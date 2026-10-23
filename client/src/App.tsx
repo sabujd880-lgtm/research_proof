@@ -5,7 +5,7 @@ import {
   Plus, ScanText, Settings2, ShieldCheck, Sparkles, Sun, Trash2, Upload, WandSparkles
 } from 'lucide-react';
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
+const API = import.meta.env.VITE_API_URL || (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1' ? '/api' : 'http://localhost:4000/api');
 type User = { id: string; email: string };
 type Revision = { _id: string; mode: string; summary: string; createdAt: string; originalText: string; revisedText: string };
 type Project = { _id: string; title: string; description: string; updatedAt: string };

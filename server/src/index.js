@@ -7,6 +7,8 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { z } from 'zod';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { User, Project, Document, Revision, IntegrityReport, AuditEvent } from './models.js';
 import { requireAuth } from './middleware.js';
 import { assessWriting, findRepeatedPhrases, checkCitations, humanizeWithAI } from './services.js';
@@ -19,8 +21,8 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 24) {
   console.warn('WARNING: Set JWT_SECRET to a random secret of at least 24 characters in server/.env.');
 }
 
-app.use(helmet());
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
+app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 250, standardHeaders: true, legacyHeaders: false }));
 
@@ -476,6 +478,19 @@ apiRouter.get('/reports/:id', requireAuth, async (req, res, next) => {
 // Mount router on both /api and /api/v1
 app.use('/api/v1', apiRouter);
 app.use('/api', apiRouter);
+
+// Serve static frontend in production (Render cloud deployment)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const clientDist = path.resolve(__dirname, '../../client/dist');
+
+app.use(express.static(clientDist));
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) return next();
+  res.sendFile(path.join(clientDist, 'index.html'), (err) => {
+    if (err) res.status(404).send('ResearchProof AI API is active. Build the frontend client to view the UI.');
+  });
+});
 
 // Global Error Handler
 app.use((err, _req, res, _next) => {
