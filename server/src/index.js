@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import 'dotenv/config'; // Environment loaded (Groq/OpenRouter ready)
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
