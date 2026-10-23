@@ -142,7 +142,84 @@ export async function checkCitations(text) {
   };
 }
 
+export async function humanizeWithReverseGPT({ text, apiKey }) {
+  const key = apiKey || process.env.REVERSEGPT_API_KEY;
+  if (!key) {
+    const error = new Error('ReverseGPT API key is missing. Set REVERSEGPT_API_KEY in server/.env.');
+    error.status = 503;
+    throw error;
+  }
+
+  // 1. Submit humanize job
+  const initRes = await fetch('https://www.reversegpt.ai/api/v1/humanize', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${key}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      text,
+      ultra: false
+    })
+  });
+
+  if (!initRes.ok) {
+    const errText = await initRes.text().catch(() => '');
+    const error = new Error(`ReverseGPT job initialization failed (${initRes.status}): ${errText.slice(0, 300)}`);
+    error.status = initRes.status;
+    throw error;
+  }
+
+  const envelope = await initRes.json();
+  const pollUrl = envelope?.job?.url || (envelope?.job?.id ? `https://www.reversegpt.ai/api/v1/jobs/${envelope.job.id}` : null);
+  
+  if (!pollUrl) {
+    throw new Error('ReverseGPT did not return a valid job status URL.');
+  }
+
+  // If already finished on 200
+  if (envelope?.job?.status === 'completed' && envelope?.result?.humanizedText) {
+    return {
+      revisedText: envelope.result.humanizedText,
+      changeSummary: 'Revision completed via ReverseGPT pipeline.',
+      cautions: ['ReverseGPT transformation applied. Verify academic integrity and claims.']
+    };
+  }
+
+  // 2. Poll until completed (timeout after 60s)
+  const maxAttempts = 30;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await new Promise(r => setTimeout(r, 2000));
+    const checkRes = await fetch(pollUrl, {
+      headers: {
+        'Authorization': `Bearer ${key}`
+      }
+    });
+
+    if (checkRes.ok) {
+      const pollData = await checkRes.json();
+      if (pollData?.job?.status === 'completed' && pollData?.result?.humanizedText) {
+        return {
+          revisedText: pollData.result.humanizedText,
+          changeSummary: 'Revision completed via ReverseGPT humanization pipeline.',
+          cautions: ['ReverseGPT transformation applied. Verify scholarly terminology, citations, and claims.']
+        };
+      }
+      if (pollData?.job?.status === 'failed') {
+        throw new Error(`ReverseGPT processing failed: ${pollData?.error?.message || 'Unknown processing error'}`);
+      }
+    }
+  }
+
+  throw new Error('ReverseGPT job timed out after 60 seconds.');
+}
+
 export async function humanizeWithAI({ text, style, preserveTerms = '' }) {
+  // Check if ReverseGPT is requested
+  if (process.env.AI_PROVIDER === 'reversegpt' || (process.env.AI_API_KEY && process.env.AI_API_KEY.startsWith('rg_live_'))) {
+    return humanizeWithReverseGPT({ text, apiKey: process.env.AI_API_KEY || process.env.REVERSEGPT_API_KEY });
+  }
+
   const key = process.env.AI_API_KEY;
   const base = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
   const model = process.env.AI_MODEL;
