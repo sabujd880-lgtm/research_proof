@@ -33,6 +33,36 @@ const memDocuments = new Map();
 const memRevisions = new Map();
 const isDbConnected = () => mongoose.connection.readyState === 1;
 
+// Pre-seed default demo credentials
+const DEMO_EMAIL = 'demo@researchproof.ai';
+const DEMO_PASSWORD = 'Password1234!';
+const DEMO_HASH = bcrypt.hashSync(DEMO_PASSWORD, 10);
+const demoUserId = new mongoose.Types.ObjectId().toString();
+memUsers.set(DEMO_EMAIL, {
+  _id: demoUserId,
+  id: demoUserId,
+  email: DEMO_EMAIL,
+  passwordHash: DEMO_HASH,
+  displayName: 'Demo Researcher',
+  createdAt: new Date()
+});
+
+async function seedDemoUserToDb() {
+  try {
+    const existing = await User.findOne({ email: DEMO_EMAIL });
+    if (!existing) {
+      await User.create({
+        email: DEMO_EMAIL,
+        passwordHash: DEMO_HASH,
+        displayName: 'Demo Researcher'
+      });
+      console.log(`Demo user ready: ${DEMO_EMAIL}`);
+    }
+  } catch (err) {
+    // Non-blocking
+  }
+}
+
 // Safe Audit Logging Helper (Section 6 & 10)
 async function recordAudit(actorId, action, resourceType, resourceId = '', metadata = {}) {
   try {
@@ -509,6 +539,7 @@ const mongoUri = process.env.MONGODB_URI;
 if (mongoUri && !mongoUri.includes('localhost:5173')) {
   mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 4000 })
     .then(() => {
+      seedDemoUserToDb();
       console.log(`Connected to MongoDB successfully at ${mongoUri.split('@').pop()}`);
     })
     .catch((err) => {
