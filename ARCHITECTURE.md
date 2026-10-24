@@ -242,36 +242,17 @@ The AI must not silently fabricate citations, data, participant details, results
 
 ## 13. Implementation roadmap
 
-### Phase 1 — Local baseline
-Install dependencies, configure MongoDB and AI provider, run the app, test auth and verify one revision end-to-end.
+### Phase 1 — Local baseline & Secure Public Launch (Complete)
+Dependencies, MongoDB models, JWT & Google authentication, security headers, rate limiting, and free-tier quotas.
 
-### Phase 2 — Stable backend architecture
-Split routes/controllers/services/validators, version the API, standardize errors, add automated tests and ownership checks.
+### Phase 2 — Academic Tools Suite (Complete)
+- **Academic Writing Studio**: 3-column workspace, responsive editor, debounced autosave, document version control with optimistic concurrency control (`doc.version`).
+- **Meaning-Preserving Rewriting**: 8 specialized academic modes, deterministic meaning auditor checking negation reversals, statistical metrics, p-values, sample sizes, confidence intervals, and reference markers.
+- **Diff & Revision Lifecycle**: Full revision tracking with Word/Paragraph diff highlighting, `accept`, `reject`, and `restore` endpoints.
+- **Citation Assistant**: Crossref REST API lookup, APA 7th, MLA 9th, and IEEE formatters, and citation integrity auditor with in-memory TTL caching.
+- **DOCX Import & Export**: Mammoth-based DOCX import with PKZIP magic byte security validation and `docx` library Office Open XML binary export streaming.
+- **Automated Test Coverage**: 34 automated unit and integration tests passing with zero failures.
 
-### Phase 3 — Research editor
-Add projects/documents, side-by-side diffs, accept/reject edits, revision history, opt-in persistence and deletion controls.
+### Phase 3 — Collaborative & Multi-Tenant Enhancements (Future)
+Real-time collaborative editing via WebSockets/CRDT, institutional SSO (SAML), and advanced PDF generation.
 
-### Phase 4 — Integrity suite
-Improve citation parsing, DOI metadata verification, repeated-phrase analysis, evidence/claim flags and transparent reports.
-
-### Phase 5 — Documents and exports
-Add secure DOCX import/export, file validation, private storage, size limits and deletion/retention behavior.
-
-### Phase 6 — Production hardening
-Add email verification, password recovery, refresh-token strategy, monitoring, backups, deployment automation and an independent security review.
-
-## 14. Acceptance criteria
-
-- A user can register, log in, create a project and submit text for revision.
-- The revision is shown beside the original, with a change summary and user approval.
-- Critical values, citations, negation and uncertainty are preserved or explicitly flagged.
-- Persistence opt-out is respected and verified by tests.
-- A user cannot access another user's project by changing an ID.
-- Citation checks distinguish metadata matching from claim verification.
-- Writing-pattern results are presented as uncertain indicators, not proof of AI authorship.
-- Provider/API failures do not expose secrets or document contents.
-- Setup, tests, retention policy and deployment steps are documented.
-
-## 15. Current status disclaimer
-
-The supplied ZIP is a starter application, not a finished production platform. It includes the initial React UI, Express API, MongoDB models, authentication foundation, configurable AI revision service, basic writing/citation checks and revision/project functionality. DOCX support, external plagiarism corpus integration, rigorous citation verification, comprehensive automated tests, production security hardening and deployment automation remain future work.

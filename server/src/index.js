@@ -10,10 +10,19 @@ import { z } from 'zod';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import cookieParser from 'cookie-parser';
+import multer from 'multer';
 import { OAuth2Client } from 'google-auth-library';
-import { User, Project, Document, Revision, IntegrityReport, AuditEvent, UsageRecord } from './models.js';
+import { User, Project, Document, Revision, IntegrityReport, AuditEvent, UsageRecord, Citation, DoiCache } from './models.js';
 import { requireAuth } from './middleware.js';
-import { assessWriting, findRepeatedPhrases, checkCitations, humanizeWithAI } from './services.js';
+import { assessWriting, findRepeatedPhrases, checkCitations, humanizeWithAI, ACADEMIC_REWRITE_MODES } from './services.js';
+import { auditMeaningPreservation } from './meaningChecker.js';
+import { lookupDoiMetadata, formatApa, formatMla, formatIeee, formatInTextCitation, validateDocumentCitations, normalizeDoi } from './citationService.js';
+import { importDocxFromBuffer, exportDocxFromText } from './docxService.js';
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+});
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
@@ -130,8 +139,13 @@ const memUsers = new Map();
 const memProjects = new Map();
 const memDocuments = new Map();
 const memRevisions = new Map();
+const memCitations = new Map();
 const isDbConnected = () => mongoose.connection.readyState === 1;
 app.locals.memUsers = memUsers;
+app.locals.memProjects = memProjects;
+app.locals.memDocuments = memDocuments;
+app.locals.memRevisions = memRevisions;
+app.locals.memCitations = memCitations;
 
 // Pre-seed default demo credentials
 const DEMO_EMAIL = 'demo@researchproof.ai';
@@ -845,53 +859,151 @@ apiRouter.post(['/analyze/citations', '/analysis/citations'], requireAuth, async
   } catch (e) { next(e); }
 });
 
-// AI Revision / Humanizer (with usage quota enforcement - Section 6)
-apiRouter.post(['/humanize', '/revisions/humanize'], requireAuth, checkAiUsage, async (req, res, next) => {
+// AI Academic Revision & Rewriting (Section 4 & 5)
+apiRouter.post(['/revisions/rewrite', '/humanize', '/revisions/humanize'], requireAuth, checkAiUsage, async (req, res, next) => {
   try {
     const schema = textSchema.extend({
+      mode: z.string().optional().default('academic-clarity'),
       style: z.string().max(60).optional(),
       preserveTerms: z.string().max(3000).optional(),
-      saveRevision: z.boolean().optional(),
+      saveRevision: z.boolean().optional().default(true),
       projectId: z.string().optional(),
       documentId: z.string().optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Provide text under 50,000 characters and valid options.' });
-    
+
+    // Validate target document ownership if specified
+    let targetDoc = null;
+    if (parsed.data.documentId) {
+      if (isDbConnected()) {
+        targetDoc = await Document.findOne({ _id: parsed.data.documentId, ownerId: req.user.id });
+      } else {
+        targetDoc = memDocuments.get(parsed.data.documentId);
+        if (targetDoc && targetDoc.ownerId !== req.user.id) targetDoc = null;
+      }
+      if (!targetDoc) return res.status(404).json({ error: 'Target document not found or access denied.' });
+    }
+
     const result = await humanizeWithAI(parsed.data);
     await recordFeatureUsage(req.user.id, req.user.email, 'rewrite');
-    let saved = false;
 
-    if (parsed.data.saveRevision && process.env.PERSIST_DOCUMENT_TEXT !== 'false') {
-      saved = true;
+    const meaningWarnings = auditMeaningPreservation(parsed.data.text, result.revisedText);
+    let revisionRecord = null;
+
+    if (process.env.PERSIST_DOCUMENT_TEXT !== 'false') {
+      const modeName = parsed.data.mode || 'academic-clarity';
       if (isDbConnected()) {
-        const rev = await Revision.create({
+        revisionRecord = await Revision.create({
           userId: req.user.id,
-          projectId: mongoose.isValidObjectId(parsed.data.projectId) ? parsed.data.projectId : null,
-          documentId: mongoose.isValidObjectId(parsed.data.documentId) ? parsed.data.documentId : null,
-          mode: 'humanize',
+          projectId: mongoose.isValidObjectId(parsed.data.projectId) ? parsed.data.projectId : (targetDoc?.projectId || null),
+          documentId: targetDoc?._id || (mongoose.isValidObjectId(parsed.data.documentId) ? parsed.data.documentId : null),
+          mode: modeName,
           originalText: parsed.data.text,
           revisedText: result.revisedText,
+          proposedText: result.revisedText,
           summary: result.changeSummary,
-          modelProvider: 'openai-compatible',
+          meaningWarnings,
+          status: 'proposed',
+          modelProvider: process.env.AI_PROVIDER || 'openai-compatible',
           modelName: process.env.AI_MODEL || 'default'
         });
-        await recordAudit(req.user.id, 'REVISION_CREATED', 'Revision', rev._id);
+        await recordAudit(req.user.id, 'REVISION_CREATED', 'Revision', revisionRecord._id);
       } else {
         const revId = new mongoose.Types.ObjectId().toString();
-        memRevisions.set(revId, {
+        revisionRecord = {
           _id: revId,
+          id: revId,
           userId: req.user.id,
-          projectId: parsed.data.projectId || null,
-          mode: 'humanize',
+          projectId: parsed.data.projectId || targetDoc?.projectId || null,
+          documentId: targetDoc?._id || parsed.data.documentId || null,
+          mode: modeName,
           originalText: parsed.data.text,
           revisedText: result.revisedText,
+          proposedText: result.revisedText,
           summary: result.changeSummary,
+          meaningWarnings,
+          status: 'proposed',
           createdAt: new Date().toISOString()
-        });
+        };
+        memRevisions.set(revId, revisionRecord);
       }
     }
-    res.json({ ...result, saved });
+    res.json({
+      ...result,
+      meaningWarnings,
+      revision: revisionRecord,
+      saved: Boolean(revisionRecord)
+    });
+  } catch (e) { next(e); }
+});
+
+// Accept Revision (Section 5)
+apiRouter.post('/revisions/:id/accept', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const rev = await Revision.findOne({ _id: req.params.id, userId: req.user.id });
+      if (!rev) return res.status(404).json({ error: 'Revision not found.' });
+
+      rev.status = 'accepted';
+      rev.acceptedAt = new Date();
+      rev.acceptedText = rev.revisedText;
+      await rev.save();
+
+      let doc = null;
+      if (rev.documentId) {
+        doc = await Document.findOne({ _id: rev.documentId, ownerId: req.user.id });
+        if (doc) {
+          doc.content = rev.revisedText;
+          doc.wordCount = countWords(rev.revisedText);
+          doc.characterCount = rev.revisedText.length;
+          doc.currentRevisionId = rev._id;
+          doc.version = (doc.version || 1) + 1;
+          await doc.save();
+        }
+      }
+      await recordAudit(req.user.id, 'REVISION_ACCEPTED', 'Revision', rev._id);
+      return res.json({ success: true, revision: rev, document: doc });
+    }
+
+    const rev = memRevisions.get(req.params.id);
+    if (!rev || rev.userId !== req.user.id) return res.status(404).json({ error: 'Revision not found.' });
+    rev.status = 'accepted';
+    rev.acceptedAt = new Date().toISOString();
+    rev.acceptedText = rev.revisedText;
+
+    let doc = null;
+    if (rev.documentId) {
+      doc = memDocuments.get(String(rev.documentId));
+      if (doc && doc.ownerId === req.user.id) {
+        doc.content = rev.revisedText;
+        doc.wordCount = countWords(rev.revisedText);
+        doc.characterCount = rev.revisedText.length;
+        doc.currentRevisionId = rev._id || rev.id;
+        doc.version = (doc.version || 1) + 1;
+        doc.updatedAt = new Date().toISOString();
+      }
+    }
+    res.json({ success: true, revision: rev, document: doc });
+  } catch (e) { next(e); }
+});
+
+// Reject Revision (Section 5)
+apiRouter.post('/revisions/:id/reject', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const rev = await Revision.findOne({ _id: req.params.id, userId: req.user.id });
+      if (!rev) return res.status(404).json({ error: 'Revision not found.' });
+      rev.status = 'rejected';
+      await rev.save();
+      await recordAudit(req.user.id, 'REVISION_REJECTED', 'Revision', rev._id);
+      return res.json({ success: true, revision: rev });
+    }
+
+    const rev = memRevisions.get(req.params.id);
+    if (!rev || rev.userId !== req.user.id) return res.status(404).json({ error: 'Revision not found.' });
+    rev.status = 'rejected';
+    res.json({ success: true, revision: rev });
   } catch (e) { next(e); }
 });
 
@@ -1033,17 +1145,26 @@ apiRouter.post('/documents', requireAuth, async (req, res, next) => {
   try {
     const schema = z.object({
       title: z.string().trim().min(1).max(200),
+      content: z.string().optional().default(''),
       projectId: z.string().optional(),
       persistenceConsent: z.boolean().optional()
     });
     const p = schema.safeParse(req.body);
     if (!p.success) return res.status(400).json({ error: 'Document title is required.' });
 
+    const content = p.data.content || '';
+    const wordCount = countWords(content);
+    const characterCount = content.length;
+
     if (isDbConnected()) {
       const doc = await Document.create({
         ownerId: req.user.id,
         projectId: mongoose.isValidObjectId(p.data.projectId) ? p.data.projectId : null,
         title: p.data.title,
+        content,
+        wordCount,
+        characterCount,
+        version: 1,
         persistenceConsent: p.data.persistenceConsent !== false
       });
       await recordAudit(req.user.id, 'DOCUMENT_CREATED', 'Document', doc._id);
@@ -1053,15 +1174,122 @@ apiRouter.post('/documents', requireAuth, async (req, res, next) => {
     const docId = new mongoose.Types.ObjectId().toString();
     const newDoc = {
       _id: docId,
+      id: docId,
       ownerId: req.user.id,
       projectId: p.data.projectId || null,
       title: p.data.title,
+      content,
+      wordCount,
+      characterCount,
+      version: 1,
       persistenceConsent: p.data.persistenceConsent !== false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
     memDocuments.set(docId, newDoc);
     res.status(201).json(newDoc);
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/documents/:id', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const doc = await Document.findOne({ _id: req.params.id, ownerId: req.user.id }).lean();
+      if (!doc) return res.status(404).json({ error: 'Document not found.' });
+      const revisions = await Revision.find({ documentId: doc._id, userId: req.user.id }).sort({ createdAt: -1 }).limit(20).lean();
+      return res.json({ ...doc, revisions });
+    }
+    const doc = memDocuments.get(req.params.id);
+    if (!doc || doc.ownerId !== req.user.id) return res.status(404).json({ error: 'Document not found.' });
+    const revisions = [...memRevisions.values()]
+      .filter(r => (r.documentId === req.params.id || r.documentId === doc._id) && r.userId === req.user.id)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    res.json({ ...doc, revisions });
+  } catch (e) { next(e); }
+});
+
+apiRouter.patch('/documents/:id', requireAuth, async (req, res, next) => {
+  try {
+    const schema = z.object({
+      title: z.string().trim().min(1).max(200).optional(),
+      content: z.string().optional(),
+      version: z.number().optional()
+    });
+    const p = schema.safeParse(req.body);
+    if (!p.success) return res.status(400).json({ error: 'Invalid document update data.' });
+
+    if (isDbConnected()) {
+      const doc = await Document.findOne({ _id: req.params.id, ownerId: req.user.id });
+      if (!doc) return res.status(404).json({ error: 'Document not found.' });
+
+      // Optimistic concurrency check
+      if (p.data.version !== undefined && doc.version !== p.data.version) {
+        return res.status(409).json({
+          error: 'Document has been modified by another session. Please reload to avoid overwriting changes.',
+          code: 'CONCURRENT_EDIT_CONFLICT',
+          currentVersion: doc.version
+        });
+      }
+
+      if (p.data.title !== undefined) doc.title = p.data.title;
+      if (p.data.content !== undefined) {
+        doc.content = p.data.content;
+        doc.wordCount = countWords(p.data.content);
+        doc.characterCount = p.data.content.length;
+      }
+      doc.version = (doc.version || 1) + 1;
+      await doc.save();
+      return res.json(doc);
+    }
+
+    const doc = memDocuments.get(req.params.id);
+    if (!doc || doc.ownerId !== req.user.id) return res.status(404).json({ error: 'Document not found.' });
+
+    if (p.data.version !== undefined && (doc.version || 1) !== p.data.version) {
+      return res.status(409).json({
+        error: 'Document has been modified by another session. Please reload to avoid overwriting changes.',
+        code: 'CONCURRENT_EDIT_CONFLICT',
+        currentVersion: doc.version || 1
+      });
+    }
+
+    if (p.data.title !== undefined) doc.title = p.data.title;
+    if (p.data.content !== undefined) {
+      doc.content = p.data.content;
+      doc.wordCount = countWords(p.data.content);
+      doc.characterCount = p.data.content.length;
+    }
+    doc.version = (doc.version || 1) + 1;
+    doc.updatedAt = new Date().toISOString();
+    res.json(doc);
+  } catch (e) { next(e); }
+});
+
+apiRouter.delete('/documents/:id', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const doc = await Document.findOneAndDelete({ _id: req.params.id, ownerId: req.user.id });
+      if (!doc) return res.status(404).json({ error: 'Document not found.' });
+      await Revision.deleteMany({ documentId: doc._id, userId: req.user.id });
+      await Citation.deleteMany({ documentId: doc._id, ownerId: req.user.id });
+      await recordAudit(req.user.id, 'DOCUMENT_DELETED', 'Document', req.params.id);
+      return res.json({ deleted: true });
+    }
+
+    const doc = memDocuments.get(req.params.id);
+    if (!doc || doc.ownerId !== req.user.id) return res.status(404).json({ error: 'Document not found.' });
+    memDocuments.delete(req.params.id);
+    for (const [id, r] of memRevisions.entries()) {
+      if ((r.documentId === req.params.id || r.documentId === doc._id) && r.userId === req.user.id) {
+        memRevisions.delete(id);
+      }
+    }
+    for (const [id, c] of memCitations.entries()) {
+      if ((c.documentId === req.params.id || c.documentId === doc._id) && c.ownerId === req.user.id) {
+        memCitations.delete(id);
+      }
+    }
+    res.json({ deleted: true });
   } catch (e) { next(e); }
 });
 
@@ -1075,9 +1303,363 @@ apiRouter.get('/documents/:id/revisions', requireAuth, async (req, res, next) =>
     }
     const doc = memDocuments.get(req.params.id);
     if (!doc || doc.ownerId !== req.user.id) return res.status(404).json({ error: 'Document not found.' });
-    const revs = [...memRevisions.values()].filter(r => r.documentId === req.params.id && r.userId === req.user.id);
+    const revs = [...memRevisions.values()].filter(r => (r.documentId === req.params.id || r.documentId === doc._id) && r.userId === req.user.id);
     res.json(revs);
   } catch (e) { next(e); }
+});
+
+// Restore Revision (Section 5)
+apiRouter.post('/documents/:id/restore', requireAuth, async (req, res, next) => {
+  try {
+    const schema = z.object({
+      revisionId: z.string().min(1),
+      expectedVersion: z.number().optional()
+    });
+    const p = schema.safeParse(req.body);
+    if (!p.success) return res.status(400).json({ error: 'Revision ID is required.' });
+
+    if (isDbConnected()) {
+      const doc = await Document.findOne({ _id: req.params.id, ownerId: req.user.id });
+      if (!doc) return res.status(404).json({ error: 'Document not found.' });
+
+      if (p.data.expectedVersion !== undefined && doc.version !== p.data.expectedVersion) {
+        return res.status(409).json({
+          error: 'Document has been modified. Please reload before restoring.',
+          code: 'CONCURRENT_EDIT_CONFLICT'
+        });
+      }
+
+      const rev = await Revision.findOne({ _id: p.data.revisionId, userId: req.user.id });
+      if (!rev) return res.status(404).json({ error: 'Revision not found.' });
+
+      const restoredText = rev.revisedText || rev.originalText || '';
+      doc.content = restoredText;
+      doc.wordCount = countWords(restoredText);
+      doc.characterCount = restoredText.length;
+      doc.version = (doc.version || 1) + 1;
+      doc.currentRevisionId = rev._id;
+      await doc.save();
+
+      const restoredRev = await Revision.create({
+        userId: req.user.id,
+        projectId: doc.projectId,
+        documentId: doc._id,
+        parentRevisionId: rev._id,
+        mode: 'restoration',
+        originalText: doc.content,
+        revisedText: restoredText,
+        proposedText: restoredText,
+        summary: `Restored version from revision ${rev._id}`,
+        status: 'restored'
+      });
+
+      return res.json({ success: true, document: doc, revision: restoredRev });
+    }
+
+    const doc = memDocuments.get(req.params.id);
+    if (!doc || doc.ownerId !== req.user.id) return res.status(404).json({ error: 'Document not found.' });
+
+    if (p.data.expectedVersion !== undefined && (doc.version || 1) !== p.data.expectedVersion) {
+      return res.status(409).json({
+        error: 'Document has been modified. Please reload before restoring.',
+        code: 'CONCURRENT_EDIT_CONFLICT'
+      });
+    }
+
+    const rev = memRevisions.get(p.data.revisionId);
+    if (!rev || rev.userId !== req.user.id) return res.status(404).json({ error: 'Revision not found.' });
+
+    const restoredText = rev.revisedText || rev.originalText || '';
+    doc.content = restoredText;
+    doc.wordCount = countWords(restoredText);
+    doc.characterCount = restoredText.length;
+    doc.version = (doc.version || 1) + 1;
+    doc.currentRevisionId = rev._id || rev.id;
+    doc.updatedAt = new Date().toISOString();
+
+    const revId = new mongoose.Types.ObjectId().toString();
+    const restoredRev = {
+      _id: revId,
+      id: revId,
+      userId: req.user.id,
+      projectId: doc.projectId,
+      documentId: doc._id || doc.id,
+      parentRevisionId: rev._id || rev.id,
+      mode: 'restoration',
+      originalText: doc.content,
+      revisedText: restoredText,
+      proposedText: restoredText,
+      summary: `Restored version from revision ${rev._id || rev.id}`,
+      status: 'restored',
+      createdAt: new Date().toISOString()
+    };
+    memRevisions.set(revId, restoredRev);
+
+    res.json({ success: true, document: doc, revision: restoredRev });
+  } catch (e) { next(e); }
+});
+
+// DOCX Import (Section 7)
+apiRouter.post('/documents/import-docx', requireAuth, upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'Please upload a valid .docx file.' });
+    }
+
+    const result = await importDocxFromBuffer(req.file.buffer, req.file.originalname);
+    const projectId = req.body.projectId;
+
+    let savedDoc = null;
+    if (req.body.saveDocument !== 'false' && process.env.PERSIST_DOCUMENT_TEXT !== 'false') {
+      if (isDbConnected()) {
+        savedDoc = await Document.create({
+          ownerId: req.user.id,
+          projectId: mongoose.isValidObjectId(projectId) ? projectId : null,
+          title: result.title,
+          content: result.content,
+          wordCount: result.wordCount,
+          characterCount: result.characterCount,
+          version: 1
+        });
+        await recordAudit(req.user.id, 'DOCX_IMPORTED', 'Document', savedDoc._id);
+      } else {
+        const docId = new mongoose.Types.ObjectId().toString();
+        savedDoc = {
+          _id: docId,
+          id: docId,
+          ownerId: req.user.id,
+          projectId: projectId || null,
+          title: result.title,
+          content: result.content,
+          wordCount: result.wordCount,
+          characterCount: result.characterCount,
+          version: 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        memDocuments.set(docId, savedDoc);
+      }
+    }
+
+    res.json({
+      success: true,
+      document: savedDoc,
+      ...result
+    });
+  } catch (e) { next(e); }
+});
+
+// DOCX Export (Section 8)
+apiRouter.get('/documents/:id/export-docx', requireAuth, async (req, res, next) => {
+  try {
+    let doc = null;
+    let references = [];
+
+    if (isDbConnected()) {
+      doc = await Document.findOne({ _id: req.params.id, ownerId: req.user.id }).lean();
+      if (!doc) return res.status(404).json({ error: 'Document not found.' });
+
+      if (doc.projectId) {
+        const cites = await Citation.find({ projectId: doc.projectId, ownerId: req.user.id }).lean();
+        references = cites.map(formatApa);
+      }
+    } else {
+      doc = memDocuments.get(req.params.id);
+      if (!doc || doc.ownerId !== req.user.id) return res.status(404).json({ error: 'Document not found.' });
+
+      if (doc.projectId) {
+        const cites = [...memCitations.values()].filter(c => c.projectId === doc.projectId && c.ownerId === req.user.id);
+        references = cites.map(formatApa);
+      }
+    }
+
+    const targetContent = doc.content || '';
+    const safeTitle = (doc.title || 'Manuscript').replace(/[^\w\s-]/gi, '').replace(/\s+/g, '_');
+    const buffer = await exportDocxFromText({
+      title: doc.title,
+      content: targetContent,
+      references
+    });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.docx"`);
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
+  } catch (e) { next(e); }
+});
+
+// Citation Assistant Routes (Section 6)
+apiRouter.post('/citations/lookup', requireAuth, async (req, res, next) => {
+  try {
+    const schema = z.object({ doi: z.string().trim().min(1, 'DOI is required.') });
+    const p = schema.safeParse(req.body);
+    if (!p.success) return res.status(400).json({ error: 'Please enter a valid DOI.' });
+
+    const metadata = await lookupDoiMetadata(p.data.doi, isDbConnected());
+    res.json({
+      metadata,
+      formatted: {
+        apa: formatApa(metadata),
+        mla: formatMla(metadata),
+        ieee: formatIeee(metadata, 1)
+      }
+    });
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/citations', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const filter = { ownerId: req.user.id };
+      if (req.query.projectId) filter.projectId = req.query.projectId;
+      const citations = await Citation.find(filter).sort({ updatedAt: -1 }).lean();
+      return res.json(citations);
+    }
+    const cites = [...memCitations.values()]
+      .filter(c => c.ownerId === req.user.id && (!req.query.projectId || c.projectId === req.query.projectId))
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime());
+    res.json(cites);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/citations', requireAuth, async (req, res, next) => {
+  try {
+    const schema = z.object({
+      doi: z.string().optional().default(''),
+      title: z.string().trim().min(1, 'Title is required.'),
+      authors: z.array(z.any()).optional().default([]),
+      year: z.string().optional().default(''),
+      journal: z.string().optional().default(''),
+      volume: z.string().optional().default(''),
+      issue: z.string().optional().default(''),
+      pages: z.string().optional().default(''),
+      projectId: z.string().optional(),
+      documentId: z.string().optional(),
+      metadataSource: z.string().optional().default('manual'),
+      rawMetadata: z.any().optional()
+    });
+    const p = schema.safeParse(req.body);
+    if (!p.success) return res.status(400).json({ error: p.error.issues[0]?.message || 'Invalid citation data.' });
+
+    if (isDbConnected()) {
+      const cite = await Citation.create({
+        ownerId: req.user.id,
+        projectId: mongoose.isValidObjectId(p.data.projectId) ? p.data.projectId : null,
+        documentId: mongoose.isValidObjectId(p.data.documentId) ? p.data.documentId : null,
+        doi: normalizeDoi(p.data.doi),
+        title: p.data.title,
+        authors: p.data.authors,
+        year: p.data.year,
+        journal: p.data.journal,
+        volume: p.data.volume,
+        issue: p.data.issue,
+        pages: p.data.pages,
+        metadataSource: p.data.metadataSource,
+        rawMetadata: p.data.rawMetadata
+      });
+      return res.status(201).json(cite);
+    }
+
+    const citeId = new mongoose.Types.ObjectId().toString();
+    const newCite = {
+      _id: citeId,
+      id: citeId,
+      ownerId: req.user.id,
+      projectId: p.data.projectId || null,
+      documentId: p.data.documentId || null,
+      doi: normalizeDoi(p.data.doi),
+      title: p.data.title,
+      authors: p.data.authors,
+      year: p.data.year,
+      journal: p.data.journal,
+      volume: p.data.volume,
+      issue: p.data.issue,
+      pages: p.data.pages,
+      metadataSource: p.data.metadataSource,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    memCitations.set(citeId, newCite);
+    res.status(201).json(newCite);
+  } catch (e) { next(e); }
+});
+
+apiRouter.delete('/citations/:id', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const cite = await Citation.findOneAndDelete({ _id: req.params.id, ownerId: req.user.id });
+      if (!cite) return res.status(404).json({ error: 'Citation not found.' });
+      return res.json({ deleted: true });
+    }
+    const cite = memCitations.get(req.params.id);
+    if (!cite || cite.ownerId !== req.user.id) return res.status(404).json({ error: 'Citation not found.' });
+    memCitations.delete(req.params.id);
+    res.json({ deleted: true });
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/citations/format', requireAuth, async (req, res, next) => {
+  try {
+    const { citation, style = 'apa' } = req.body;
+    if (!citation) return res.status(400).json({ error: 'Citation object is required.' });
+
+    let formatted = '';
+    const st = style.toLowerCase();
+    if (st === 'mla') formatted = formatMla(citation);
+    else if (st === 'ieee') formatted = formatIeee(citation, 1);
+    else formatted = formatApa(citation);
+
+    res.json({ style: st, formatted });
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/citations/validate', requireAuth, async (req, res, next) => {
+  try {
+    const { text = '', projectId } = req.body;
+    let citations = [];
+
+    if (isDbConnected()) {
+      const filter = { ownerId: req.user.id };
+      if (projectId) filter.projectId = projectId;
+      citations = await Citation.find(filter).lean();
+    } else {
+      citations = [...memCitations.values()].filter(c => c.ownerId === req.user.id && (!projectId || c.projectId === projectId));
+    }
+
+    const validation = validateDocumentCitations(text, citations);
+    res.json(validation);
+  } catch (e) { next(e); }
+});
+
+// Feature Status Endpoint (Section 9)
+apiRouter.get('/features/status', async (_req, res) => {
+  const hasGemini = Boolean(process.env.GEMINI_API_KEY || (process.env.AI_PROVIDER === 'gemini' && process.env.AI_API_KEY));
+  const hasOpenAi = Boolean(process.env.AI_API_KEY && process.env.AI_MODEL);
+  const hasReverseGpt = Boolean(process.env.AI_PROVIDER === 'reversegpt' || (process.env.AI_API_KEY && process.env.AI_API_KEY.startsWith('rg_live_')));
+  const aiAvailable = hasGemini || hasOpenAi || hasReverseGpt;
+
+  let provider = 'none';
+  if (hasReverseGpt) provider = 'reversegpt';
+  else if (hasGemini) provider = 'gemini';
+  else if (hasOpenAi) provider = 'openai-compatible';
+
+  res.json({
+    aiAvailable,
+    aiProvider: provider,
+    aiModel: process.env.AI_MODEL || (hasGemini ? 'gemini-1.5-flash' : 'none'),
+    docxImport: true,
+    docxExport: true,
+    citationsApi: true,
+    meaningChecking: true,
+    concurrencyControl: true,
+    modes: Object.keys(ACADEMIC_REWRITE_MODES),
+    freeLimits: {
+      rewriteDaily: FREE_REWRITE_DAILY_LIMIT,
+      rewriteMaxWords: FREE_REWRITE_MAX_WORDS,
+      analysisDaily: FREE_ANALYSIS_DAILY_LIMIT,
+      analysisMaxWords: FREE_ANALYSIS_MAX_WORDS
+    }
+  });
 });
 
 // Revisions

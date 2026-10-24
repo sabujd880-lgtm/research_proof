@@ -45,24 +45,73 @@ const documentSchema = new mongoose.Schema({
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null, index: true },
   title: { type: String, required: true, trim: true, maxlength: 200 },
+  content: { type: String, default: '' },
+  version: { type: Number, default: 1 }, // Optimistic concurrency control
+  wordCount: { type: Number, default: 0 },
+  characterCount: { type: Number, default: 0 },
   currentRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Revision', default: null },
   persistenceConsent: { type: Boolean, default: true }
 }, { timestamps: true });
 documentSchema.index({ ownerId: 1, updatedAt: -1 });
+documentSchema.index({ projectId: 1, updatedAt: -1 });
 
 const revisionSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null, index: true },
   documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null, index: true },
+  parentRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Revision', default: null },
   revisionNumber: { type: Number, default: 1 },
   mode: { type: String, required: true },
   originalText: { type: String, default: '' },
   revisedText: { type: String, default: '' },
+  proposedText: { type: String, default: '' },
+  acceptedText: { type: String, default: '' },
   summary: { type: String, default: '' },
+  meaningWarnings: [{
+    category: { type: String, required: true },
+    severity: { type: String, enum: ['critical', 'warning', 'info'], default: 'warning' },
+    detail: { type: String, required: true },
+    originalValue: { type: String, default: '' },
+    revisedValue: { type: String, default: '' },
+    excerpt: { type: String, default: '' }
+  }],
+  status: { type: String, enum: ['proposed', 'accepted', 'rejected', 'restored'], default: 'proposed' },
+  acceptedAt: { type: Date, default: null },
   modelProvider: { type: String, default: 'openai-compatible' },
   modelName: { type: String, default: '' }
 }, { timestamps: true });
 revisionSchema.index({ userId: 1, createdAt: -1 });
+revisionSchema.index({ documentId: 1, createdAt: -1 });
+
+const citationSchema = new mongoose.Schema({
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null, index: true },
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null, index: true },
+  doi: { type: String, default: '', trim: true },
+  title: { type: String, required: true, trim: true },
+  authors: [{
+    given: { type: String, default: '' },
+    family: { type: String, default: '' },
+    name: { type: String, default: '' }
+  }],
+  year: { type: String, default: '' },
+  journal: { type: String, default: '' },
+  volume: { type: String, default: '' },
+  issue: { type: String, default: '' },
+  pages: { type: String, default: '' },
+  publisher: { type: String, default: '' },
+  metadataSource: { type: String, default: 'crossref' },
+  verificationStatus: { type: String, enum: ['verified', 'unverified', 'manual'], default: 'verified' },
+  rawMetadata: { type: mongoose.Schema.Types.Mixed, default: null }
+}, { timestamps: true });
+citationSchema.index({ ownerId: 1, updatedAt: -1 });
+citationSchema.index({ ownerId: 1, doi: 1 });
+
+const doiCacheSchema = new mongoose.Schema({
+  doi: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  metadata: { type: mongoose.Schema.Types.Mixed, required: true },
+  cachedAt: { type: Date, default: Date.now, expires: 60 * 60 * 24 * 30 }
+}, { timestamps: true });
 
 const integrityReportSchema = new mongoose.Schema({
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -98,3 +147,5 @@ export const Revision = mongoose.model('Revision', revisionSchema);
 export const IntegrityReport = mongoose.model('IntegrityReport', integrityReportSchema);
 export const AuditEvent = mongoose.model('AuditEvent', auditEventSchema);
 export const UsageRecord = mongoose.model('UsageRecord', usageRecordSchema);
+export const Citation = mongoose.model('Citation', citationSchema);
+export const DoiCache = mongoose.model('DoiCache', doiCacheSchema);

@@ -214,22 +214,132 @@ export async function humanizeWithReverseGPT({ text, apiKey }) {
   throw new Error('ReverseGPT job timed out after 60 seconds.');
 }
 
-export async function humanizeWithAI({ text, style, preserveTerms = '' }) {
-  // Check if ReverseGPT is requested
+import { auditMeaningPreservation } from './meaningChecker.js';
+
+export const ACADEMIC_REWRITE_MODES = {
+  'academic-clarity': {
+    name: 'Academic clarity',
+    guidance: 'Eliminate ambiguity, enhance logical flow between sentences, and express arguments with precision while preserving all evidence and terminology.'
+  },
+  'grammar-correction': {
+    name: 'Grammar correction',
+    guidance: 'Fix grammatical errors, punctuation, subject-verb agreement, and syntax issues with minimal restructuring of sentences.'
+  },
+  'concise-academic': {
+    name: 'Concise academic writing',
+    guidance: 'Remove scholarly circumlocution, tautologies, and nominalizations to maximize density of information without omitting caveats.'
+  },
+  'formal-scientific': {
+    name: 'Formal scientific tone',
+    guidance: 'Elevate casual or colloquial phrasing to rigorous, objective academic prose suited for peer-reviewed journal submission.'
+  },
+  'readability-improvement': {
+    name: 'Readability improvement',
+    guidance: 'Optimize sentence lengths, reduce unnecessarily convoluted clauses, and improve cognitive flow for broad academic readers.'
+  },
+  'paragraph-restructure': {
+    name: 'Paragraph restructuring',
+    guidance: 'Reorganize paragraph hierarchy with clear topic sentences, supporting evidence, and smooth transitions.'
+  },
+  'thesis-dissertation': {
+    name: 'Thesis/dissertation writing',
+    guidance: 'Provide comprehensive, thorough academic framing with explicit methodological grounding suitable for graduate examination.'
+  },
+  'journal-manuscript': {
+    name: 'Journal manuscript editing',
+    guidance: 'Deliver authoritative, publication-ready prose complying with high-impact scientific journal expectations (e.g., Nature, IEEE, Cell).'
+  }
+};
+
+export async function humanizeWithAI({ text, mode = 'academic-clarity', style, preserveTerms = '' }) {
+  // Validate mode
+  const modeKey = mode || 'academic-clarity';
+  const modeConfig = ACADEMIC_REWRITE_MODES[modeKey] || ACADEMIC_REWRITE_MODES['academic-clarity'];
+
+  // 1. ReverseGPT integration
   if (process.env.AI_PROVIDER === 'reversegpt' || (process.env.AI_API_KEY && process.env.AI_API_KEY.startsWith('rg_live_'))) {
-    return humanizeWithReverseGPT({ text, apiKey: process.env.AI_API_KEY || process.env.REVERSEGPT_API_KEY });
+    const res = await humanizeWithReverseGPT({ text, apiKey: process.env.AI_API_KEY || process.env.REVERSEGPT_API_KEY });
+    return {
+      ...res,
+      mode: modeKey,
+      meaningWarnings: auditMeaningPreservation(text, res.revisedText)
+    };
   }
 
+  // 2. Gemini native integration
+  const geminiKey = process.env.GEMINI_API_KEY || (process.env.AI_PROVIDER === 'gemini' ? process.env.AI_API_KEY : null);
+  if (geminiKey) {
+    const model = process.env.AI_MODEL || 'gemini-1.5-flash';
+    const system = `You are a Senior Academic Research Editor and Scientific Writing Specialist.
+Mode: "${modeConfig.name}"
+Guidance: ${modeConfig.guidance}
+CRITICAL RULES FOR RESEARCH INTEGRITY:
+- Preserve author claims, certainty/uncertainty levels, and limitations.
+- NEVER alter numbers, statistical values, p-values, sample sizes, units, dates, or percentages.
+- NEVER reverse negations (e.g., "did not demonstrate" must not become "demonstrated").
+- Preserve all in-text citations ([1], (Author, 2020)) and direct quotes verbatim.
+- Return ONLY valid JSON with keys: "revisedText", "changeSummary", and "cautions" (array of strings).`;
+
+    const userPrompt = `Terms to preserve: ${preserveTerms || '(preserve all technical terms)'}\n\nOriginal manuscript text to edit:\n${text}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`;
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          { role: 'user', parts: [{ text: `${system}\n\n${userPrompt}` }] }
+        ],
+        generationConfig: {
+          temperature: 0.2,
+          responseMimeType: 'application/json'
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      const error = new Error(`Gemini API error (${response.status}): ${errBody.slice(0, 200)}`);
+      error.status = 502;
+      throw error;
+    }
+
+    const data = await response.json();
+    const candidateText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!candidateText) throw Object.assign(new Error('Gemini API returned empty response.'), { status: 502 });
+
+    const parsed = JSON.parse(candidateText);
+    return {
+      revisedText: parsed.revisedText || text,
+      changeSummary: String(parsed.changeSummary || `Revised in ${modeConfig.name} mode.`),
+      cautions: Array.isArray(parsed.cautions) ? parsed.cautions.map(String) : [],
+      mode: modeKey,
+      meaningWarnings: auditMeaningPreservation(text, parsed.revisedText || text)
+    };
+  }
+
+  // 3. OpenAI-compatible / Groq / OpenRouter API
   const key = process.env.AI_API_KEY;
   const base = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
   const model = process.env.AI_MODEL;
   if (!key || !model) {
-    const error = new Error('AI service is not configured. Set AI_API_KEY and AI_MODEL in server/.env.');
+    const error = new Error('AI service is not configured. Set AI_API_KEY and AI_MODEL (or GEMINI_API_KEY) in server/.env.');
     error.status = 503;
+    error.code = 'AI_UNAVAILABLE';
     throw error;
   }
-  const system = `You are an academic writing editor focused on research integrity. Revise text for clarity, natural scholarly expression, and readability. This is editing, not detector evasion. Preserve the author's claims, uncertainty, methods, results, numbers, quotations, citations, technical terms, and limitations. Do not add evidence, references, facts, or conclusions. Do not silently change scientific meaning. If a sentence is ambiguous, preserve it as closely as possible and note the ambiguity. Return valid JSON with keys revisedText, changeSummary, and cautions (array of strings).`;
-  const user = `Style: ${style || 'Natural Scholarly'}\nTerms to preserve: ${preserveTerms || '(preserve all domain-specific terms)'}\n\nText to edit:\n${text}`;
+
+  const system = `You are a Senior Academic Research Editor and Scientific Writing Specialist.
+Mode: "${modeConfig.name}"
+Guidance: ${modeConfig.guidance}
+CRITICAL RULES FOR RESEARCH INTEGRITY:
+- Preserve author claims, certainty/uncertainty levels, and limitations.
+- NEVER alter numbers, statistical values, p-values, sample sizes, units, dates, or percentages.
+- NEVER reverse negations (e.g., "did not demonstrate" must not become "demonstrated").
+- Preserve all in-text citations ([1], (Author, 2020)) and direct quotes verbatim.
+- Return ONLY valid JSON with keys: "revisedText", "changeSummary", and "cautions" (array of strings).`;
+
+  const user = `Style: ${style || modeConfig.name}\nTerms to preserve: ${preserveTerms || '(preserve all domain-specific terms)'}\n\nText to edit:\n${text}`;
   const response = await fetch(`${base}/chat/completions`, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -240,22 +350,28 @@ export async function humanizeWithAI({ text, style, preserveTerms = '' }) {
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }]
     })
   });
+
   if (!response.ok) {
     const body = await response.text().catch(() => '');
     const error = new Error(`AI provider request failed (${response.status}). ${body.slice(0, 300)}`);
     error.status = 502;
     throw error;
   }
+
   const data = await response.json();
   const content = data?.choices?.[0]?.message?.content;
   if (!content) throw Object.assign(new Error('AI provider returned an empty response.'), { status: 502 });
+
   try {
     const parsed = JSON.parse(content);
     if (typeof parsed.revisedText !== 'string') throw new Error('Missing revisedText');
+    const revisedText = parsed.revisedText;
     return {
-      revisedText: parsed.revisedText,
-      changeSummary: String(parsed.changeSummary || ''),
-      cautions: Array.isArray(parsed.cautions) ? parsed.cautions.map(String) : []
+      revisedText,
+      changeSummary: String(parsed.changeSummary || `Revised in ${modeConfig.name} mode.`),
+      cautions: Array.isArray(parsed.cautions) ? parsed.cautions.map(String) : [],
+      mode: modeKey,
+      meaningWarnings: auditMeaningPreservation(text, revisedText)
     };
   } catch {
     throw Object.assign(new Error('AI provider returned an unexpected response format.'), { status: 502 });
