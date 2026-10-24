@@ -17,6 +17,11 @@ A full-stack academic writing and research-integrity starter project.
 - Usage Analytics Engine with TTL-bounded retention & daily aggregates
 - User Privacy Control Center, GDPR/CCPA Data Export & Cascading Account Deletion
 - Research Integrity Reporting Engine with multi-dimensional auditing & DOCX export
+- APA 7 Word-to-LaTeX Manuscript Converter (Student Paper `stu` & Professional Manuscript `man`)
+- Mathematical & statistical notation preservation ($p$-values, effect sizes, Greek symbols)
+- Official `apa7` document class integration with `booktabs` tables and `biblatex` (Biber)
+- Automated ZIP project generation (`main.tex`, `references.bib`, `README.md`, `latexmkrc`, `sections/`)
+- Sandboxed LaTeX compiler worker with graceful cloud container degradation (Render/Vercel)
 - Projects, document versioning, and revision history
 - Privacy-first option not to persist submitted text (`PERSIST_DOCUMENT_TEXT`)
 
@@ -25,6 +30,7 @@ A full-stack academic writing and research-integrity starter project.
 - npm
 - MongoDB local instance or MongoDB Atlas connection
 - Optional: API key for Gemini or an OpenAI-compatible model endpoint (non-AI features work without an API key)
+- Optional: TeX Live / MacTeX / MikTeX for local PDF compilation (pre-configured Overleaf ZIP export works out of the box)
 
 ## Setup
 
@@ -49,10 +55,11 @@ API health check: http://localhost:4000/api/health
 ```bash
 npm test --prefix server
 ```
-Executes **45 comprehensive tests** across:
+Executes **58 comprehensive tests** across:
 - Phase 1 Security, Google OAuth, and Usage Quotas (20 tests)
 - Phase 2 Academic Writing Studio, Citations, and DOCX (12 tests)
 - Phase 3 Platform Management, RBAC, Analytics, Privacy, and Integrity Reports (10 tests)
+- Phase 5 APA 7 Word-to-LaTeX Converter, Templates, BibTeX, and ZIP Pipeline (12 tests)
 
 ### 5. Production Build
 ```bash
@@ -65,6 +72,12 @@ npm run --prefix server seed:admin <email> <password> [displayName]
 ```
 
 ## Documentation
+- [Phase 5 Implementation Guide](docs/PHASE5_IMPLEMENTATION.md)
+- [APA 7 Templates Specification](docs/APA7_TEMPLATE.md)
+- [DOCX-to-LaTeX Conversion Pipeline](docs/APA7_CONVERSION.md)
+- [APA Bibliography & BibTeX](docs/APA7_BIBLIOGRAPHY.md)
+- [PDF Compilation & Environment Compatibility](docs/APA7_PDF_COMPILATION.md)
+- [Phase 5 Testing Protocol](docs/APA7_TESTING.md)
 - [Phase 3 Implementation Guide](docs/PHASE3_IMPLEMENTATION.md)
 - [Administrator Dashboard & RBAC](docs/ADMIN_DASHBOARD.md)
 - [Usage Analytics Engine](docs/USAGE_ANALYTICS.md)
@@ -77,6 +90,7 @@ npm run --prefix server seed:admin <email> <password> [displayName]
 - [DOCX Import & Export](docs/DOCX_IMPORT_EXPORT.md)
 - [Deployment Guide (Render & Vercel)](docs/DEPLOYMENT.md)
 - [System Architecture](ARCHITECTURE.md)
+
 
 ## AI provider configuration
 Set `AI_PROVIDER` (`gemini` or `openai`), `AI_API_KEY`, `AI_BASE_URL`, and `AI_MODEL` in `server/.env`.

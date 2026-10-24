@@ -208,6 +208,51 @@ const dataDeletionJobSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
+// Phase 5: APA 7 LaTeX Conversion Job Tracker
+const latexJobSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  sourceDocumentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null },
+  template: { type: String, enum: ['apa7'], default: 'apa7', required: true },
+  variant: { type: String, enum: ['student', 'professional'], default: 'student', required: true },
+  metadata: {
+    title: { type: String, required: true, trim: true },
+    authors: [{
+      name: { type: String, default: '' },
+      affiliation: { type: String, default: '' },
+      orcid: { type: String, default: '' }
+    }],
+    affiliations: [{ type: String, default: '' }],
+    abstract: { type: String, default: '' },
+    keywords: [{ type: String, default: '' }],
+    course: { type: String, default: '' },
+    instructor: { type: String, default: '' },
+    dueDate: { type: String, default: '' },
+    runningHead: { type: String, default: '' },
+    authorNote: { type: String, default: '' },
+    correspondingAuthor: { type: String, default: '' }
+  },
+  status: { type: String, enum: ['pending', 'processing', 'completed', 'failed'], default: 'completed', index: true },
+  compilationStatus: { type: String, enum: ['compiled', 'unavailable', 'failed', 'skipped'], default: 'unavailable' },
+  warnings: [{
+    category: { type: String, required: true },
+    severity: { type: String, enum: ['warning', 'info', 'error'], default: 'warning' },
+    message: { type: String, required: true },
+    detail: { type: String, default: '' }
+  }],
+  artifactReferences: {
+    zipSize: { type: Number, default: 0 },
+    pdfSize: { type: Number, default: 0 },
+    texFilesCount: { type: Number, default: 0 },
+    referencesCount: { type: Number, default: 0 },
+    figuresCount: { type: Number, default: 0 },
+    tablesCount: { type: Number, default: 0 }
+  },
+  mainTexSnippet: { type: String, default: '' },
+  report: { type: mongoose.Schema.Types.Mixed, default: {} },
+  expirationTimestamp: { type: Date, default: () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) }
+}, { timestamps: true });
+latexJobSchema.index({ userId: 1, createdAt: -1 });
+
 export const User = mongoose.model('User', userSchema);
 export const Project = mongoose.model('Project', projectSchema);
 export const Document = mongoose.model('Document', documentSchema);
@@ -220,4 +265,6 @@ export const DoiCache = mongoose.model('DoiCache', doiCacheSchema);
 export const UsageEvent = mongoose.model('UsageEvent', usageEventSchema);
 export const DailyUsageAggregate = mongoose.model('DailyUsageAggregate', dailyUsageAggregateSchema);
 export const DataDeletionJob = mongoose.model('DataDeletionJob', dataDeletionJobSchema);
+export const LatexJob = mongoose.model('LatexJob', latexJobSchema);
+
 

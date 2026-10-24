@@ -64,9 +64,10 @@ flowchart TB
 6. **Citation and reference integrity**: parse author-year citations and reference list; identify unmatched entries, incomplete fields and duplicates; optional DOI metadata verification via Crossref. Metadata matches do not prove that a source supports a claim.
 7. **Similarity review**: initially checks repeated phrases inside the submitted document only. A later licensed source corpus can be integrated with clear scope and attribution.
 8. **Research integrity**: flag missing evidence for factual claims, inconsistent numbers/dates, potential quotation/citation problems, methods/results inconsistencies and possible overstatement. These are prompts for researcher review, not automatic misconduct findings.
-9. **Reports and exports**: downloadable report, revision comparison, reference checklist; future DOCX import/export and PDF generation.
-10. **Privacy and audit**: consent and persistence settings, deletion/export controls, access history, provider configuration, retention policy.
-11. **Administration**: user management, usage limits, provider health and audit review; add only with strict role checks.
+9. **Reports and exports**: downloadable report, revision comparison, reference checklist, Office Open XML DOCX import/export, and complete research integrity report export.
+10. **APA 7 LaTeX Export Studio**: Word-to-LaTeX manuscript converter supporting official `apa7` document class for Student Papers (`stu`) and Professional Manuscripts (`man`), Biber biblatex references, booktabs tables, statistical notation preservation, sandboxed PDF compiler worker, and complete ZIP project packaging.
+11. **Privacy and audit**: consent and persistence settings, deletion/export controls, access history, provider configuration, retention policy.
+12. **Administration**: user management, usage limits, provider health and audit review; enforced with strict role checks.
 
 ## 5. Recommended repository structure
 

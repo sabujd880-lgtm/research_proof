@@ -648,6 +648,7 @@ export default function App() {
     { name: 'Writing Studio', icon: WandSparkles, group: 'WORKSPACE' },
     { name: 'Dashboard', icon: LayoutDashboard, group: 'WORKSPACE' },
     { name: 'Citation Assistant', icon: BookOpenCheck, group: 'RESEARCH TOOLS' },
+    { name: 'LaTeX Export Studio', icon: BookOpen, group: 'RESEARCH TOOLS' },
     { name: 'Integrity Reports', icon: FileCheck2, group: 'RESEARCH TOOLS' },
     { name: 'AI Assessment', icon: ScanText, group: 'RESEARCH TOOLS' },
     { name: 'Originality Review', icon: FileText, group: 'RESEARCH TOOLS' },
@@ -1215,6 +1216,18 @@ export default function App() {
 
           {section === 'Platform Audit Logs' && user?.role === 'admin' && (
             <AdminAuditLogsPage token={token} setError={setError} />
+          )}
+
+          {/* PHASE 5: LATEX EXPORT STUDIO VIEW */}
+          {section === 'LaTeX Export Studio' && (
+            <LatexExportStudioPage
+              token={token}
+              activeDoc={activeDoc}
+              documents={documents}
+              citationsList={citationsList}
+              setError={setError}
+              setMessage={setMessage}
+            />
           )}
 
           {/* SETTINGS VIEW */}
@@ -2565,4 +2578,591 @@ function AdminAuditLogsPage({ token, setError }: any) {
     </section>
   );
 }
+
+/* =========================================================
+   PHASE 5: APA 7 LATEX EXPORT STUDIO VIEW
+   ========================================================= */
+function LatexExportStudioPage({ token, activeDoc, documents, citationsList, setError, setMessage }: any) {
+  const [variant, setVariant] = useState<'student' | 'professional'>('student');
+  const [title, setTitle] = useState(activeDoc?.title || 'Cognitive Load and Working Memory in Academic Writing');
+  const [authors, setAuthors] = useState('Alex Rivera');
+  const [affiliation, setAffiliation] = useState('Department of Psychology, Stanford University');
+  const [abstract, setAbstract] = useState('This empirical manuscript examines the impact of cognitive load on working memory retention and academic problem solving.');
+  const [keywords, setKeywords] = useState('cognitive load, working memory, academic writing, empirical methods');
+  
+  // Student Specific
+  const [course, setCourse] = useState('PSY 301: Advanced Cognitive Psychology');
+  const [instructor, setInstructor] = useState('Dr. Eleanor Vance');
+  const [dueDate, setDueDate] = useState('October 24, 2026');
+
+  // Professional Specific
+  const [runningHead, setRunningHead] = useState('COGNITIVE LOAD AND WORKING MEMORY');
+  const [authorNote, setAuthorNote] = useState('Correspondence concerning this manuscript should be addressed to Alex Rivera, Department of Psychology, Stanford University.');
+  const [correspondingAuthor, setCorrespondingAuthor] = useState('arivera@stanford.edu');
+
+  // Source selection
+  const [sourceMode, setSourceMode] = useState<'active' | 'upload' | 'text'>('active');
+  const [customText, setCustomText] = useState(activeDoc?.content || sampleText);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+
+  // Conversion state
+  const [busy, setBusy] = useState(false);
+  const [jobResult, setJobResult] = useState<any>(null);
+  const [activeTab, setActiveTab] = useState<'latex' | 'warnings' | 'structure'>('latex');
+
+  // Update title/content if activeDoc changes
+  useEffect(() => {
+    if (activeDoc) {
+      if (!title || title === 'Untitled Academic Document') setTitle(activeDoc.title);
+      if (sourceMode === 'active') setCustomText(activeDoc.content);
+    }
+  }, [activeDoc]);
+
+  async function handleConvert() {
+    if (!title.trim()) {
+      setError('Please provide a manuscript title before converting.');
+      return;
+    }
+
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      let bodyData: any;
+      let isMultipart = false;
+
+      const authorList = authors.split(/[\n,]+/).map(a => a.trim()).filter(Boolean).map(a => ({ name: a, affiliation }));
+      const affiliationList = affiliation.split(/[\n,]+/).map(a => a.trim()).filter(Boolean);
+      const keywordList = keywords.split(',').map(k => k.trim()).filter(Boolean);
+
+      if (sourceMode === 'upload' && uploadedFile) {
+        isMultipart = true;
+        const formData = new FormData();
+        formData.append('file', uploadedFile);
+        formData.append('variant', variant);
+        formData.append('title', title.trim());
+        formData.append('author', authors.trim());
+        formData.append('affiliation', affiliation.trim());
+        formData.append('abstract', abstract.trim());
+        formData.append('keywords', keywords);
+        if (variant === 'student') {
+          formData.append('course', course.trim());
+          formData.append('instructor', instructor.trim());
+          formData.append('dueDate', dueDate.trim());
+        } else {
+          formData.append('runningHead', runningHead.trim().toUpperCase());
+          formData.append('authorNote', authorNote.trim());
+          formData.append('correspondingAuthor', correspondingAuthor.trim());
+        }
+        bodyData = formData;
+      } else {
+        const textPayload = sourceMode === 'active' && activeDoc ? activeDoc.content : customText;
+        bodyData = JSON.stringify({
+          variant,
+          title: title.trim(),
+          authors: authorList,
+          affiliations: affiliationList,
+          abstract: abstract.trim(),
+          keywords: keywordList,
+          course: variant === 'student' ? course.trim() : undefined,
+          instructor: variant === 'student' ? instructor.trim() : undefined,
+          dueDate: variant === 'student' ? dueDate.trim() : undefined,
+          runningHead: variant === 'professional' ? runningHead.trim().toUpperCase() : undefined,
+          authorNote: variant === 'professional' ? authorNote.trim() : undefined,
+          correspondingAuthor: variant === 'professional' ? correspondingAuthor.trim() : undefined,
+          rawText: textPayload,
+          citations: (citationsList || []).map((c: any) => ({
+            author: Array.isArray(c.authors) && c.authors[0] ? (c.authors[0].family || c.authors[0].name) : 'Author',
+            authors: c.authors,
+            title: c.title,
+            year: c.year || '2024',
+            journal: c.journal,
+            volume: c.volume,
+            pages: c.pages,
+            doi: c.doi
+          }))
+        });
+      }
+
+      const res = await fetch(`${API}/latex/apa7/convert`, {
+        method: 'POST',
+        headers: {
+          ...(isMultipart ? {} : { 'Content-Type': 'application/json' }),
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        credentials: 'include',
+        body: bodyData
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Conversion failed.');
+
+      setJobResult(data);
+      setMessage(`APA 7 ${variant === 'student' ? 'Student Paper' : 'Professional Manuscript'} generated successfully!`);
+    } catch (err: any) {
+      setError(err.message || 'LaTeX conversion failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function downloadArtifact(type: 'zip' | 'pdf') {
+    if (!jobResult?.jobId) return;
+    try {
+      const endpoint = type === 'zip' ? 'download-zip' : 'download-pdf';
+      const res = await fetch(`${API}/latex/jobs/${jobResult.jobId}/${endpoint}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        credentials: 'include'
+      });
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || errorData.message || `Failed to download ${type.toUpperCase()}`);
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = type === 'zip' ? 'researchproof-apa7-manuscript.zip' : 'manuscript.pdf';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  return (
+    <section className="analysis-page">
+      <div className="page-title-row">
+        <div>
+          <p className="eyebrow">PHASE 5 LATEX EXPORT STUDIO</p>
+          <h1>APA 7 Word-to-LaTeX Converter</h1>
+          <p className="muted">Generate publication-grade APA 7 LaTeX manuscripts using the official <code style={{ color: 'var(--primary)' }}>apa7</code> document class with Biber and booktabs tables.</p>
+        </div>
+        <div className="page-title-icon"><BookOpen /></div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 420px) 1fr', gap: '24px', alignItems: 'start' }}>
+        
+        {/* Left Column: Configuration Controls */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          
+          {/* 1. Template Selection */}
+          <div className="panel">
+            <h3 style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '12px' }}>1. Manuscript Format</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <button
+                type="button"
+                className={`tool-card ${variant === 'student' ? 'active' : ''}`}
+                onClick={() => setVariant('student')}
+                style={{
+                  padding: '12px',
+                  textAlign: 'left',
+                  border: variant === 'student' ? '2px solid var(--primary)' : '1px solid var(--border)',
+                  background: variant === 'student' ? 'var(--surface2)' : 'transparent',
+                  borderRadius: '8px'
+                }}
+              >
+                <div style={{ fontWeight: 700, fontSize: '13px' }}>Student Paper</div>
+                <small style={{ color: 'var(--muted)', fontSize: '10px' }}>\documentclass[stu]· Course & Instructor title page</small>
+              </button>
+
+              <button
+                type="button"
+                className={`tool-card ${variant === 'professional' ? 'active' : ''}`}
+                onClick={() => setVariant('professional')}
+                style={{
+                  padding: '12px',
+                  textAlign: 'left',
+                  border: variant === 'professional' ? '2px solid var(--primary)' : '1px solid var(--border)',
+                  background: variant === 'professional' ? 'var(--surface2)' : 'transparent',
+                  borderRadius: '8px'
+                }}
+              >
+                <div style={{ fontWeight: 700, fontSize: '13px' }}>Professional</div>
+                <small style={{ color: 'var(--muted)', fontSize: '10px' }}>\documentclass[man] · Running head & Author note</small>
+              </button>
+            </div>
+          </div>
+
+          {/* 2. Document Content Source */}
+          <div className="panel">
+            <h3 style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '12px' }}>2. Document Source</h3>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+              <button
+                className={`filter-btn ${sourceMode === 'active' ? 'active' : ''}`}
+                onClick={() => setSourceMode('active')}
+              >
+                Active Document ({activeDoc ? '1 Selected' : 'None'})
+              </button>
+              <button
+                className={`filter-btn ${sourceMode === 'upload' ? 'active' : ''}`}
+                onClick={() => setSourceMode('upload')}
+              >
+                Upload Word (.docx)
+              </button>
+              <button
+                className={`filter-btn ${sourceMode === 'text' ? 'active' : ''}`}
+                onClick={() => setSourceMode('text')}
+              >
+                Manual Text
+              </button>
+            </div>
+
+            {sourceMode === 'upload' && (
+              <div style={{ border: '2px dashed var(--border)', padding: '20px', borderRadius: '8px', textAlign: 'center' }}>
+                <Upload size={24} style={{ color: 'var(--muted)', margin: '0 auto 8px' }} />
+                <p style={{ fontSize: '12px', fontWeight: 600 }}>Upload Word Manuscript (.docx)</p>
+                <input
+                  type="file"
+                  accept=".docx"
+                  onChange={(e) => setUploadedFile(e.target.files?.[0] || null)}
+                  style={{ marginTop: '8px', fontSize: '11px' }}
+                />
+                {uploadedFile && (
+                  <div style={{ marginTop: '8px', fontSize: '11px', color: '#16a34a', fontWeight: 600 }}>
+                    ✓ Ready: {uploadedFile.name} ({(uploadedFile.size / 1024).toFixed(1)} KB)
+                  </div>
+                )}
+              </div>
+            )}
+
+            {sourceMode === 'active' && (
+              <div style={{ fontSize: '12px', color: 'var(--muted)', background: 'var(--surface2)', padding: '10px', borderRadius: '6px' }}>
+                Source: <strong>{activeDoc ? activeDoc.title : 'Sample Manuscript Draft'}</strong> ({activeDoc?.wordCount || 150} words)
+              </div>
+            )}
+
+            {sourceMode === 'text' && (
+              <textarea
+                value={customText}
+                onChange={(e) => setCustomText(e.target.value)}
+                placeholder="Paste or write manuscript text here..."
+                rows={5}
+                style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+              />
+            )}
+          </div>
+
+          {/* 3. Metadata Fields */}
+          <div className="panel">
+            <h3 style={{ fontSize: '13px', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '12px' }}>3. Manuscript Metadata</h3>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div>
+                <label style={{ fontSize: '11px', fontWeight: 700, color: 'var(--muted)' }}>MANUSCRIPT TITLE *</label>
+                <input
+                  type="text"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: 700, color: 'var(--muted)' }}>AUTHOR(S)</label>
+                  <input
+                    type="text"
+                    value={authors}
+                    onChange={(e) => setAuthors(e.target.value)}
+                    style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: '11px', fontWeight: 700, color: 'var(--muted)' }}>AFFILIATION</label>
+                  <input
+                    type="text"
+                    value={affiliation}
+                    onChange={(e) => setAffiliation(e.target.value)}
+                    style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+                  />
+                </div>
+              </div>
+
+              {variant === 'student' ? (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                    <div>
+                      <label style={{ fontSize: '11px', fontWeight: 700, color: 'var(--muted)' }}>COURSE NAME & NUMBER</label>
+                      <input
+                        type="text"
+                        value={course}
+                        onChange={(e) => setCourse(e.target.value)}
+                        placeholder="e.g. PSY 301: Research Methods"
+                        style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '11px', fontWeight: 700, color: 'var(--muted)' }}>INSTRUCTOR / PROFESSOR</label>
+                      <input
+                        type="text"
+                        value={instructor}
+                        onChange={(e) => setInstructor(e.target.value)}
+                        placeholder="e.g. Dr. Eleanor Vance"
+                        style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '11px', fontWeight: 700, color: 'var(--muted)' }}>ASSIGNMENT DUE DATE</label>
+                    <input
+                      type="text"
+                      value={dueDate}
+                      onChange={(e) => setDueDate(e.target.value)}
+                      placeholder="e.g. October 24, 2026"
+                      style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label style={{ fontSize: '11px', fontWeight: 700, color: 'var(--muted)' }}>RUNNING HEAD (MAX 50 CHARACTERS)</label>
+                    <input
+                      type="text"
+                      maxLength={50}
+                      value={runningHead}
+                      onChange={(e) => setRunningHead(e.target.value.toUpperCase())}
+                      placeholder="SHORT TITLE FOR HEADER"
+                      style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '11px', fontWeight: 700, color: 'var(--muted)' }}>AUTHOR NOTE</label>
+                    <textarea
+                      value={authorNote}
+                      onChange={(e) => setAuthorNote(e.target.value)}
+                      rows={2}
+                      placeholder="Disclosures, department changes, or correspondence..."
+                      style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+                    />
+                  </div>
+                </>
+              )}
+
+              <div>
+                <label style={{ fontSize: '11px', fontWeight: 700, color: 'var(--muted)' }}>ABSTRACT ({variant === 'student' ? 'OPTIONAL' : 'REQUIRED'})</label>
+                <textarea
+                  value={abstract}
+                  onChange={(e) => setAbstract(e.target.value)}
+                  rows={3}
+                  placeholder="Summary of research purpose, hypothesis, method, and findings..."
+                  style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '11px', fontWeight: 700, color: 'var(--muted)' }}>KEYWORDS</label>
+                <input
+                  type="text"
+                  value={keywords}
+                  onChange={(e) => setKeywords(e.target.value)}
+                  placeholder="e.g. psychology, memory, reaction time"
+                  style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '12px' }}
+                />
+              </div>
+            </div>
+
+            <button
+              className="primary"
+              onClick={handleConvert}
+              disabled={busy}
+              style={{ width: '100%', marginTop: '16px', padding: '12px' }}
+            >
+              {busy ? (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                  <RefreshCw className="spin" size={16} /> Generating APA 7 Project…
+                </span>
+              ) : (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                  <Sparkles size={16} /> Convert to APA 7 LaTeX
+                </span>
+              )}
+            </button>
+          </div>
+
+        </div>
+
+        {/* Right Column: Conversion Results, Artifact Downloads & LaTeX Preview */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          
+          {jobResult ? (
+            <>
+              {/* Status Header */}
+              <div className="panel" style={{ background: 'var(--surface2)', border: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px' }}>
+                  <div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '6px' }}>
+                      <span className="status-pill active">Conversion Completed</span>
+                      <span className="subtle-tag">Class: apa7 ({jobResult.variant === 'student' ? 'stu' : 'man'})</span>
+                    </div>
+                    <h2 style={{ fontSize: '18px', fontWeight: 700, margin: 0 }}>{title}</h2>
+                    <p style={{ color: 'var(--muted)', fontSize: '12px', marginTop: '4px' }}>
+                      Archive Size: {(jobResult.artifactReferences.zipSize / 1024).toFixed(1)} KB · Sections: {jobResult.artifactReferences.texFilesCount} · Citations: {jobResult.artifactReferences.referencesCount}
+                    </p>
+                  </div>
+
+                  {/* Primary Download Buttons */}
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    <button
+                      className="primary"
+                      onClick={() => downloadArtifact('zip')}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '10px 16px' }}
+                    >
+                      <Download size={16} /> Download ZIP Archive
+                    </button>
+                    
+                    <button
+                      className="secondary"
+                      onClick={() => downloadArtifact('pdf')}
+                      disabled={jobResult.compilationStatus !== 'compiled'}
+                      title={jobResult.compilationStatus === 'compiled' ? 'Download PDF' : 'PDF compilation is unavailable in current hosting tier.'}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        padding: '10px 16px',
+                        opacity: jobResult.compilationStatus === 'compiled' ? 1 : 0.6
+                      }}
+                    >
+                      <FileText size={16} /> Download PDF
+                    </button>
+                  </div>
+                </div>
+
+                {/* Compilation Status Explanation */}
+                <div style={{ marginTop: '16px', padding: '12px', borderRadius: '8px', background: jobResult.compilationStatus === 'compiled' ? '#dcfce7' : '#fef3c7', border: `1px solid ${jobResult.compilationStatus === 'compiled' ? '#86efac' : '#fde68a'}`, color: jobResult.compilationStatus === 'compiled' ? '#166534' : '#92400e' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, fontSize: '12px' }}>
+                    {jobResult.compilationStatus === 'compiled' ? <Check size={16} /> : <AlertTriangle size={16} />}
+                    {jobResult.compilationStatus === 'compiled' ? 'Validated PDF Output Available' : 'TeX Compiler Unavailable on Render Container'}
+                  </div>
+                  <p style={{ fontSize: '11px', margin: '4px 0 0 0', lineHeight: 1.4 }}>
+                    {jobResult.compilationMessage || (jobResult.compilationStatus === 'compiled' ? 'Full Biber and pdfLaTeX compilation succeeded.' : 'The host container does not include a full TeX Live distribution. The generated ZIP archive contains complete, compilable LaTeX sources, BibLaTeX references, and latexmk configuration for compiling locally or on Overleaf.')}
+                  </p>
+                </div>
+              </div>
+
+              {/* Preview Tabs */}
+              <div className="panel">
+                <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid var(--border)', paddingBottom: '10px', marginBottom: '14px' }}>
+                  <button
+                    className={`filter-btn ${activeTab === 'latex' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('latex')}
+                  >
+                    LaTeX Source (main.tex)
+                  </button>
+                  <button
+                    className={`filter-btn ${activeTab === 'warnings' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('warnings')}
+                  >
+                    Integrity Warnings ({jobResult.warnings?.length || 0})
+                  </button>
+                  <button
+                    className={`filter-btn ${activeTab === 'structure' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('structure')}
+                  >
+                    Project ZIP Structure
+                  </button>
+                </div>
+
+                {/* Tab 1: LaTeX Code Preview */}
+                {activeTab === 'latex' && (
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                      <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Previewing generated apa7 source code:</span>
+                      <span className="subtle-tag">style=apa, backend=biber</span>
+                    </div>
+                    <pre style={{
+                      background: 'var(--surface2)',
+                      padding: '16px',
+                      borderRadius: '8px',
+                      fontSize: '11px',
+                      fontFamily: 'monospace',
+                      overflowX: 'auto',
+                      maxHeight: '480px',
+                      lineHeight: 1.5,
+                      border: '1px solid var(--border)'
+                    }}>
+                      {jobResult.mainTexSnippet || '% No preview available'}
+                    </pre>
+                  </div>
+                )}
+
+                {/* Tab 2: Warnings Review */}
+                {activeTab === 'warnings' && (
+                  <div>
+                    {jobResult.warnings && jobResult.warnings.length > 0 ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {jobResult.warnings.map((w: any, idx: number) => (
+                          <div key={idx} style={{ padding: '12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--surface)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+                              <span className="subtle-tag" style={{ textTransform: 'uppercase', fontSize: '10px' }}>{w.category || 'General'}</span>
+                              <span style={{ fontSize: '11px', color: w.severity === 'error' ? '#dc2626' : (w.severity === 'warning' ? '#d97706' : '#2563eb'), fontWeight: 600 }}>
+                                {w.severity || 'notice'}
+                              </span>
+                            </div>
+                            <p style={{ margin: 0, fontSize: '12px' }}>{w.message}</p>
+                            {w.detail && <small style={{ color: 'var(--muted)', fontSize: '10px' }}>{w.detail}</small>}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div style={{ textAlign: 'center', padding: '32px', color: '#16a34a' }}>
+                        <Check size={24} style={{ margin: '0 auto 8px' }} />
+                        <strong>Zero Conversion Warnings</strong>
+                        <p style={{ fontSize: '11px', color: 'var(--muted)', margin: '4px 0 0 0' }}>All headings, citations, and structural nodes mapped cleanly.</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Tab 3: Project Structure */}
+                {activeTab === 'structure' && (
+                  <div style={{ fontSize: '12px' }}>
+                    <p style={{ color: 'var(--muted)', marginBottom: '12px' }}>
+                      The generated ZIP package complies with the recommended Overleaf and TeX Live layout:
+                    </p>
+                    <pre style={{ background: 'var(--surface2)', padding: '14px', borderRadius: '8px', fontFamily: 'monospace', fontSize: '11px' }}>
+{`researchproof-apa7-manuscript/
+├── main.tex                 # Compilable APA 7 LaTeX master document
+├── references.bib           # Formatted BibTeX bibliography
+├── README.md                # Local & Overleaf compilation instructions
+├── conversion-report.json   # Machine-readable conversion findings
+├── latexmkrc                # Automation script for latexmk + biber
+├── sections/                # Partitioned manuscript sections
+│   ├── introduction.tex
+│   └── method.tex
+├── figures/                 # Figure image assets
+└── tables/                  # Booktabs table definitions`}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            /* Empty State before first conversion */
+            <div className="panel" style={{ textAlign: 'center', padding: '60px 24px', color: 'var(--muted)' }}>
+              <BookOpen size={48} style={{ margin: '0 auto 16px', opacity: 0.3 }} />
+              <h3 style={{ fontSize: '16px', color: 'var(--text)', marginBottom: '8px' }}>Ready for APA 7 Conversion</h3>
+              <p style={{ maxWidth: '440px', margin: '0 auto 20px', fontSize: '13px', lineHeight: 1.5 }}>
+                Select a manuscript template, confirm author metadata, and click <strong>"Convert to APA 7 LaTeX"</strong> to generate a complete downloadable ZIP package with LaTeX sources and BibTeX references.
+              </p>
+              <div style={{ display: 'inline-flex', gap: '16px', fontSize: '11px' }}>
+                <span>✓ apa7 stu & man support</span>
+                <span>✓ Booktabs formatting</span>
+                <span>✓ BibLaTeX & Biber</span>
+                <span>✓ Overleaf compatible</span>
+              </div>
+            </div>
+          )}
+
+        </div>
+
+      </div>
+    </section>
+  );
+}
+
 

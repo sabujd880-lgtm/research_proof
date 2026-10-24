@@ -9,8 +9,8 @@
     "test": "node --test test/*.test.js",
     "seed:admin": "node src/seedAdmin.js"
   },
-
   "dependencies": {
+    "adm-zip": "^0.6.1",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",

@@ -12,7 +12,7 @@ import { fileURLToPath } from 'url';
 import cookieParser from 'cookie-parser';
 import multer from 'multer';
 import { OAuth2Client } from 'google-auth-library';
-import { User, Project, Document, Revision, IntegrityReport, AuditEvent, UsageRecord, Citation, DoiCache, UsageEvent, DailyUsageAggregate, DataDeletionJob } from './models.js';
+import { User, Project, Document, Revision, IntegrityReport, AuditEvent, UsageRecord, Citation, DoiCache, UsageEvent, DailyUsageAggregate, DataDeletionJob, LatexJob } from './models.js';
 import { requireAuth, requireAdmin } from './middleware.js';
 import { assessWriting, findRepeatedPhrases, checkCitations, humanizeWithAI, ACADEMIC_REWRITE_MODES } from './services.js';
 import { auditMeaningPreservation } from './meaningChecker.js';
@@ -20,6 +20,9 @@ import { lookupDoiMetadata, formatApa, formatMla, formatIeee, formatInTextCitati
 import { importDocxFromBuffer, exportDocxFromText } from './docxService.js';
 import { recordUsageEvent, getAnalyticsOverview, getFeatureUsageBreakdown, getErrorTrends } from './analyticsService.js';
 import { generateIntegrityReport, exportIntegrityReportDocx } from './integrityService.js';
+import { convertToApa7Project, escapeLatex, mapHeadingToApa7, generateBibtex, resolveInTextCitations } from './apa7Converter.js';
+import { attemptPdfCompilation, checkCompilerAvailability } from './latexCompiler.js';
+
 
 
 const upload = multer({
@@ -146,6 +149,8 @@ const memCitations = new Map();
 const memReports = new Map();
 const memJobs = new Map();
 const memAuditEvents = [];
+const memLatexJobs = new Map();
+const latexArtifactCache = new Map();
 const isDbConnected = () => mongoose.connection.readyState === 1;
 app.locals.memUsers = memUsers;
 app.locals.memProjects = memProjects;
@@ -155,6 +160,9 @@ app.locals.memCitations = memCitations;
 app.locals.memReports = memReports;
 app.locals.memJobs = memJobs;
 app.locals.memAuditEvents = memAuditEvents;
+app.locals.memLatexJobs = memLatexJobs;
+app.locals.latexArtifactCache = latexArtifactCache;
+
 
 // Pre-seed default demo credentials (researcher)
 const DEMO_EMAIL = 'demo@researchproof.ai';
@@ -2452,6 +2460,300 @@ apiRouter.get('/admin/analytics/providers', requireAdmin, async (_req, res, next
   } catch (err) { next(err); }
 });
 
+
+// ==========================================
+// Phase 5: APA 7 Word-to-LaTeX Studio Endpoints
+// ==========================================
+
+// 1. Template Metadata & Options
+apiRouter.get('/latex/templates/apa7', (_req, res) => {
+  const compiler = checkCompilerAvailability();
+  res.json({
+    templates: [
+      {
+        id: 'student',
+        name: 'APA 7 Student Paper',
+        documentClass: 'apa7',
+        classOption: 'stu',
+        description: 'Standard APA 7 student paper format. Features title page with course name/number, instructor, and due date. No running head required.',
+        fields: {
+          required: ['title', 'author', 'affiliation'],
+          studentSpecific: ['course', 'instructor', 'dueDate'],
+          optional: ['abstract', 'keywords']
+        }
+      },
+      {
+        id: 'professional',
+        name: 'APA 7 Professional Manuscript',
+        documentClass: 'apa7',
+        classOption: 'man',
+        description: 'APA 7 professional publication manuscript format. Includes running head, author note, and abstract.',
+        fields: {
+          required: ['title', 'author', 'affiliation', 'abstract'],
+          professionalSpecific: ['runningHead', 'authorNote', 'correspondingAuthor'],
+          optional: ['keywords']
+        }
+      }
+    ],
+    compilerStatus: compiler
+  });
+});
+
+// Helper to find LatexJob by ID with user ownership check
+async function getOwnedLatexJob(jobId, userId, isAdmin = false) {
+  let job = null;
+  if (isDbConnected()) {
+    job = await LatexJob.findById(jobId);
+  }
+  if (!job) {
+    job = memLatexJobs.get(jobId);
+  }
+  if (!job) return null;
+
+  const jobUserId = job.userId ? job.userId.toString() : '';
+  if (jobUserId !== userId && !isAdmin) {
+    return 'UNAUTHORIZED';
+  }
+  return job;
+}
+
+// 2. Convert Document/DOCX to APA 7 LaTeX Project
+apiRouter.post('/latex/apa7/convert', requireAuth, upload.single('file'), async (req, res, next) => {
+  try {
+    let payload = req.body || {};
+    if (typeof payload.metadata === 'string') {
+      try {
+        const parsed = JSON.parse(payload.metadata);
+        payload = { ...payload, ...parsed };
+      } catch {}
+    }
+
+    const variant = payload.variant === 'professional' ? 'professional' : 'student';
+    let title = (payload.title || '').trim();
+    let authors = Array.isArray(payload.authors) ? payload.authors : (payload.author ? [payload.author] : []);
+    let affiliations = Array.isArray(payload.affiliations) ? payload.affiliations : (payload.affiliation ? [payload.affiliation] : []);
+    let rawText = payload.content || payload.rawText || '';
+    let citations = Array.isArray(payload.citations) ? payload.citations : [];
+    let sourceDocumentId = payload.documentId || null;
+
+    // Handle DOCX upload if file is attached
+    if (req.file && req.file.buffer) {
+      try {
+        const imported = await importDocxFromBuffer(req.file.buffer);
+        rawText = imported.text || rawText;
+        if (!title && imported.title) title = imported.title;
+      } catch (docxErr) {
+        return res.status(400).json({ error: `DOCX parsing failed: ${docxErr.message}` });
+      }
+    } else if (sourceDocumentId) {
+      let doc = null;
+      if (isDbConnected()) {
+        doc = await Document.findOne({ _id: sourceDocumentId, ownerId: req.user.id });
+      } else {
+        const found = memDocuments.get(sourceDocumentId);
+        if (found && (found.ownerId === req.user.id || (found.ownerId && found.ownerId.toString() === req.user.id))) {
+          doc = found;
+        }
+      }
+      if (doc) {
+        if (!title) title = doc.title;
+        if (!rawText) rawText = doc.content;
+      }
+    }
+
+    if (!title) {
+      title = 'Manuscript';
+    }
+
+    if (authors.length === 0) {
+      authors = [{ name: req.user.displayName || req.user.email.split('@')[0], affiliation: 'Research Institution' }];
+    }
+
+    // Execute APA 7 Project Conversion
+    const conversionResult = await convertToApa7Project({
+      variant,
+      title,
+      authors,
+      affiliations,
+      abstract: payload.abstract || '',
+      keywords: Array.isArray(payload.keywords) ? payload.keywords : (payload.keywords ? String(payload.keywords).split(',').map(s => s.trim()) : []),
+      course: payload.course || '',
+      instructor: payload.instructor || '',
+      dueDate: payload.dueDate || '',
+      runningHead: payload.runningHead || '',
+      authorNote: payload.authorNote || '',
+      rawText,
+      citations
+    });
+
+    // Execute Secure PDF Compilation Attempt
+    const compilationResult = await attemptPdfCompilation(conversionResult.zipBuffer);
+    const finalZipBuffer = compilationResult.updatedZipBuffer || conversionResult.zipBuffer;
+    const finalPdfBuffer = compilationResult.pdfBuffer || null;
+
+    const jobId = new mongoose.Types.ObjectId().toString();
+
+    const jobData = {
+      _id: jobId,
+      id: jobId,
+      userId: req.user.id,
+      sourceDocumentId: sourceDocumentId || null,
+      template: 'apa7',
+      variant,
+      metadata: {
+        title,
+        authors,
+        affiliations,
+        abstract: payload.abstract || '',
+        keywords: conversionResult.report.metadata.keywordsCount ? payload.keywords : [],
+        course: payload.course || '',
+        instructor: payload.instructor || '',
+        dueDate: payload.dueDate || '',
+        runningHead: payload.runningHead || '',
+        authorNote: payload.authorNote || '',
+        correspondingAuthor: payload.correspondingAuthor || ''
+      },
+      status: 'completed',
+      compilationStatus: compilationResult.status,
+      warnings: [
+        ...conversionResult.warnings,
+        ...(compilationResult.warnings || []).map(w => ({ category: 'compilation', severity: 'info', message: w }))
+      ],
+      artifactReferences: {
+        zipSize: finalZipBuffer.length,
+        pdfSize: finalPdfBuffer ? finalPdfBuffer.length : 0,
+        texFilesCount: conversionResult.stats.sectionsCount + 1,
+        referencesCount: conversionResult.stats.referencesCount,
+        figuresCount: 0,
+        tablesCount: 0
+      },
+      mainTexSnippet: conversionResult.mainTex.slice(0, 1500),
+      report: conversionResult.report,
+      createdAt: new Date(),
+      expirationTimestamp: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    };
+
+    // Store in-memory buffer cache for rapid, secure downloads
+    latexArtifactCache.set(jobId, {
+      userId: req.user.id,
+      zipBuffer: finalZipBuffer,
+      pdfBuffer: finalPdfBuffer
+    });
+
+    if (isDbConnected()) {
+      try {
+        await LatexJob.create(jobData);
+      } catch (dbErr) {
+        console.warn(`[LatexJob] Mongo save error: ${dbErr.message}`);
+        memLatexJobs.set(jobId, jobData);
+      }
+    } else {
+      memLatexJobs.set(jobId, jobData);
+    }
+
+    recordUsageEvent({
+      eventType: 'latex_export',
+      feature: 'latex_apa7',
+      userId: req.user.id,
+      success: true,
+      metadata: { variant, compilationStatus: compilationResult.status }
+    }).catch(() => {});
+
+    res.status(201).json({
+      success: true,
+      jobId,
+      template: 'apa7',
+      variant,
+      status: 'completed',
+      compilationStatus: compilationResult.status,
+      compilationMessage: compilationResult.message,
+      warnings: jobData.warnings,
+      artifactReferences: jobData.artifactReferences,
+      mainTexSnippet: jobData.mainTexSnippet,
+      report: jobData.report
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// 3. Get Conversion Job Status
+apiRouter.get('/latex/jobs/:id', requireAuth, async (req, res, next) => {
+  try {
+    const job = await getOwnedLatexJob(req.params.id, req.user.id, req.user.role === 'admin');
+    if (job === 'UNAUTHORIZED') {
+      return res.status(403).json({ error: 'Access denied: You do not have permission to view this conversion job.' });
+    }
+    if (!job) {
+      return res.status(404).json({ error: 'Conversion job not found or expired.' });
+    }
+    res.json(job);
+  } catch (err) { next(err); }
+});
+
+// 4. Get Conversion Report
+apiRouter.get('/latex/jobs/:id/report', requireAuth, async (req, res, next) => {
+  try {
+    const job = await getOwnedLatexJob(req.params.id, req.user.id, req.user.role === 'admin');
+    if (job === 'UNAUTHORIZED') {
+      return res.status(403).json({ error: 'Access denied: You do not have permission to access this report.' });
+    }
+    if (!job) {
+      return res.status(404).json({ error: 'Conversion job not found.' });
+    }
+    res.json(job.report || {});
+  } catch (err) { next(err); }
+});
+
+// 5. Download Project ZIP Archive
+apiRouter.get('/latex/jobs/:id/download-zip', requireAuth, async (req, res, next) => {
+  try {
+    const job = await getOwnedLatexJob(req.params.id, req.user.id, req.user.role === 'admin');
+    if (job === 'UNAUTHORIZED') {
+      return res.status(403).json({ error: 'Access denied: You do not have permission to download this artifact.' });
+    }
+    if (!job) {
+      return res.status(404).json({ error: 'Conversion job not found.' });
+    }
+
+    const cached = latexArtifactCache.get(req.params.id);
+    if (!cached || !cached.zipBuffer) {
+      return res.status(404).json({ error: 'ZIP artifact expired from temporary cache.' });
+    }
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="researchproof-apa7-manuscript.zip"');
+    res.setHeader('Content-Length', cached.zipBuffer.length);
+    res.send(cached.zipBuffer);
+  } catch (err) { next(err); }
+});
+
+// 6. Download Compiled PDF (if available)
+apiRouter.get('/latex/jobs/:id/download-pdf', requireAuth, async (req, res, next) => {
+  try {
+    const job = await getOwnedLatexJob(req.params.id, req.user.id, req.user.role === 'admin');
+    if (job === 'UNAUTHORIZED') {
+      return res.status(403).json({ error: 'Access denied: You do not have permission to download this PDF.' });
+    }
+    if (!job) {
+      return res.status(404).json({ error: 'Conversion job not found.' });
+    }
+
+    const cached = latexArtifactCache.get(req.params.id);
+    if (!cached || !cached.pdfBuffer) {
+      return res.status(404).json({
+        error: 'PDF not available for this job.',
+        compilationStatus: job.compilationStatus,
+        message: 'Compilation environment was unavailable or compilation was skipped. The complete TeX source is available in the ZIP archive.'
+      });
+    }
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="manuscript.pdf"');
+    res.setHeader('Content-Length', cached.pdfBuffer.length);
+    res.send(cached.pdfBuffer);
+  } catch (err) { next(err); }
+});
 
 // Mount router on both /api and /api/v1
 app.use('/api/v1', apiRouter);
