@@ -12,12 +12,15 @@ import { fileURLToPath } from 'url';
 import cookieParser from 'cookie-parser';
 import multer from 'multer';
 import { OAuth2Client } from 'google-auth-library';
-import { User, Project, Document, Revision, IntegrityReport, AuditEvent, UsageRecord, Citation, DoiCache } from './models.js';
-import { requireAuth } from './middleware.js';
+import { User, Project, Document, Revision, IntegrityReport, AuditEvent, UsageRecord, Citation, DoiCache, UsageEvent, DailyUsageAggregate, DataDeletionJob } from './models.js';
+import { requireAuth, requireAdmin } from './middleware.js';
 import { assessWriting, findRepeatedPhrases, checkCitations, humanizeWithAI, ACADEMIC_REWRITE_MODES } from './services.js';
 import { auditMeaningPreservation } from './meaningChecker.js';
 import { lookupDoiMetadata, formatApa, formatMla, formatIeee, formatInTextCitation, validateDocumentCitations, normalizeDoi } from './citationService.js';
 import { importDocxFromBuffer, exportDocxFromText } from './docxService.js';
+import { recordUsageEvent, getAnalyticsOverview, getFeatureUsageBreakdown, getErrorTrends } from './analyticsService.js';
+import { generateIntegrityReport, exportIntegrityReportDocx } from './integrityService.js';
+
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -140,14 +143,20 @@ const memProjects = new Map();
 const memDocuments = new Map();
 const memRevisions = new Map();
 const memCitations = new Map();
+const memReports = new Map();
+const memJobs = new Map();
+const memAuditEvents = [];
 const isDbConnected = () => mongoose.connection.readyState === 1;
 app.locals.memUsers = memUsers;
 app.locals.memProjects = memProjects;
 app.locals.memDocuments = memDocuments;
 app.locals.memRevisions = memRevisions;
 app.locals.memCitations = memCitations;
+app.locals.memReports = memReports;
+app.locals.memJobs = memJobs;
+app.locals.memAuditEvents = memAuditEvents;
 
-// Pre-seed default demo credentials
+// Pre-seed default demo credentials (researcher)
 const DEMO_EMAIL = 'demo@researchproof.ai';
 const DEMO_PASSWORD = 'Password1234!';
 const DEMO_HASH = bcrypt.hashSync(DEMO_PASSWORD, 10);
@@ -158,6 +167,28 @@ memUsers.set(DEMO_EMAIL, {
   email: DEMO_EMAIL,
   passwordHash: DEMO_HASH,
   displayName: 'Demo Researcher',
+  role: 'researcher',
+  status: 'active',
+  tokenVersion: 1,
+  privacySettings: { persistDocumentText: true, allowAiProcessing: true },
+  createdAt: new Date()
+});
+
+// Pre-seed default administrator credentials (admin)
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@researchproof.ai';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'AdminPassword123!';
+const ADMIN_HASH = bcrypt.hashSync(ADMIN_PASSWORD, 10);
+const adminUserId = new mongoose.Types.ObjectId().toString();
+memUsers.set(ADMIN_EMAIL, {
+  _id: adminUserId,
+  id: adminUserId,
+  email: ADMIN_EMAIL,
+  passwordHash: ADMIN_HASH,
+  displayName: 'System Administrator',
+  role: 'admin',
+  status: 'active',
+  tokenVersion: 1,
+  privacySettings: { persistDocumentText: true, allowAiProcessing: true },
   createdAt: new Date()
 });
 
@@ -168,9 +199,21 @@ async function seedDemoUserToDb() {
       await User.create({
         email: DEMO_EMAIL,
         passwordHash: DEMO_HASH,
-        displayName: 'Demo Researcher'
+        displayName: 'Demo Researcher',
+        role: 'researcher'
       });
       console.log(`Demo user ready: ${DEMO_EMAIL}`);
+    }
+
+    const existingAdmin = await User.findOne({ email: ADMIN_EMAIL });
+    if (!existingAdmin) {
+      await User.create({
+        email: ADMIN_EMAIL,
+        passwordHash: ADMIN_HASH,
+        displayName: 'System Administrator',
+        role: 'admin'
+      });
+      console.log(`System administrator ready: ${ADMIN_EMAIL}`);
     }
   } catch (err) {
     // Non-blocking
@@ -178,21 +221,39 @@ async function seedDemoUserToDb() {
 }
 
 // Safe Audit Logging Helper (Section 6 & 10)
-async function recordAudit(actorId, action, resourceType, resourceId = '', metadata = {}) {
+async function recordAudit(actorId, action, resourceType, resourceId = '', metadata = {}, targetId = null, reason = '', result = 'success') {
   try {
     if (isDbConnected()) {
       await AuditEvent.create({
         actorId,
+        targetId,
         action,
         resourceType,
         resourceId: String(resourceId),
+        result,
+        reason,
         metadata
       });
+    } else {
+      memAuditEvents.unshift({
+        _id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        actorId,
+        targetId,
+        action,
+        resourceType,
+        resourceId: String(resourceId),
+        result,
+        reason,
+        metadata,
+        createdAt: new Date()
+      });
+      if (memAuditEvents.length > 500) memAuditEvents.pop();
     }
   } catch (err) {
     console.error('Audit log failed:', err.message);
   }
 }
+
 
 const textSchema = z.object({ text: z.string().min(1).max(50000) });
 const authSchema = z.object({ email: z.string().email().max(254), password: z.string().min(10).max(128) });
@@ -1696,60 +1757,701 @@ apiRouter.delete('/revisions/:id', requireAuth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Integrity Reports (Section 6 & 7)
-apiRouter.post('/reports', requireAuth, async (req, res, next) => {
+// ==========================================
+// PHASE 3: RESEARCH INTEGRITY REPORTS
+// ==========================================
+apiRouter.post('/integrity/reports', requireAuth, async (req, res, next) => {
   try {
     const schema = z.object({
-      reportType: z.enum(['writing', 'originality', 'citations', 'comprehensive']),
+      text: z.string().optional(),
+      title: z.string().optional(),
       documentId: z.string().optional(),
-      findings: z.array(z.object({
-        category: z.string(),
-        severity: z.enum(['info', 'review', 'warning', 'critical']).default('review'),
-        excerpt: z.string().optional(),
-        explanation: z.string(),
-        suggestedAction: z.string().optional(),
-        sourceMetadata: z.any().optional()
-      })),
-      limitations: z.string().optional()
+      baselineText: z.string().optional()
     });
     const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: 'Invalid report data.' });
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid report request parameters.' });
 
-    if (isDbConnected()) {
-      const report = await IntegrityReport.create({
-        ownerId: req.user.id,
-        documentId: mongoose.isValidObjectId(parsed.data.documentId) ? parsed.data.documentId : null,
-        reportType: parsed.data.reportType,
-        findings: parsed.data.findings,
-        limitations: parsed.data.limitations || ''
-      });
-      return res.status(201).json(report);
+    let contentToAnalyze = parsed.data.text || '';
+    let docTitle = parsed.data.title || 'Research Integrity Report';
+    let docRefLibrary = [];
+
+    // If documentId is provided, pull stored document and references
+    if (parsed.data.documentId) {
+      if (isDbConnected()) {
+        const doc = await Document.findOne({ _id: parsed.data.documentId, ownerId: req.user.id }).lean();
+        if (doc) {
+          if (!contentToAnalyze) contentToAnalyze = doc.content || '';
+          docTitle = doc.title ? `Integrity Audit: ${doc.title}` : docTitle;
+          docRefLibrary = await Citation.find({ ownerId: req.user.id, projectId: doc.projectId }).lean();
+        }
+      } else {
+        const doc = memDocuments.get(parsed.data.documentId);
+        if (doc && doc.ownerId === req.user.id) {
+          if (!contentToAnalyze) contentToAnalyze = doc.content || '';
+          docTitle = doc.title ? `Integrity Audit: ${doc.title}` : docTitle;
+          docRefLibrary = [...memCitations.values()].filter(c => c.ownerId === req.user.id);
+        }
+      }
     }
 
-    const reportId = new mongoose.Types.ObjectId().toString();
-    const rep = {
-      _id: reportId,
-      ownerId: req.user.id,
+    if (!contentToAnalyze.trim()) {
+      return res.status(400).json({ error: 'Manuscript text is required for research integrity auditing.' });
+    }
+
+    const reportData = await generateIntegrityReport({
+      text: contentToAnalyze,
+      title: docTitle,
       documentId: parsed.data.documentId || null,
-      reportType: parsed.data.reportType,
-      findings: parsed.data.findings,
-      limitations: parsed.data.limitations || '',
-      createdAt: new Date().toISOString()
-    };
-    res.status(201).json(rep);
-  } catch (e) { next(e); }
+      ownerId: req.user.id,
+      referenceLibrary: docRefLibrary,
+      baselineText: parsed.data.baselineText || ''
+    });
+
+    await recordUsageEvent({
+      eventType: 'integrity_report',
+      feature: 'integrity',
+      userId: req.user.id,
+      success: true,
+      metadata: { findingsCount: reportData.summaryMetrics.totalFindings }
+    });
+
+    // Check persistence consent
+    const persistConsent = process.env.PERSIST_DOCUMENT_TEXT !== 'false';
+    if (!persistConsent) {
+      return res.status(201).json({ ...reportData, _id: `stateless-${Date.now()}` });
+    }
+
+    if (isDbConnected()) {
+      const saved = await IntegrityReport.create(reportData);
+      return res.status(201).json(saved);
+    } else {
+      const reportId = new mongoose.Types.ObjectId().toString();
+      const saved = { ...reportData, _id: reportId, id: reportId, createdAt: new Date() };
+      memReports.set(reportId, saved);
+      return res.status(201).json(saved);
+    }
+  } catch (err) { next(err); }
 });
 
-apiRouter.get('/reports/:id', requireAuth, async (req, res, next) => {
+// Backward-compatible alias for /reports
+apiRouter.post('/reports', requireAuth, async (req, res, next) => {
+  req.url = '/integrity/reports';
+  return apiRouter.handle(req, res, next);
+});
+
+apiRouter.get('/integrity/reports', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const reports = await IntegrityReport.find({ ownerId: req.user.id })
+        .sort({ createdAt: -1 })
+        .select('title reportType reviewStatus summaryMetrics createdAt documentId')
+        .lean();
+      return res.json(reports);
+    } else {
+      const reports = [...memReports.values()]
+        .filter(r => r.ownerId === req.user.id)
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      return res.json(reports);
+    }
+  } catch (err) { next(err); }
+});
+
+apiRouter.get('/integrity/reports/:id', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
       const report = await IntegrityReport.findOne({ _id: req.params.id, ownerId: req.user.id }).lean();
-      if (!report) return res.status(404).json({ error: 'Report not found.' });
+      if (!report) return res.status(404).json({ error: 'Integrity report not found.' });
+      return res.json(report);
+    } else {
+      const report = memReports.get(req.params.id);
+      if (!report || report.ownerId !== req.user.id) return res.status(404).json({ error: 'Integrity report not found.' });
       return res.json(report);
     }
-    res.status(404).json({ error: 'Report not found.' });
-  } catch (e) { next(e); }
+  } catch (err) { next(err); }
 });
+
+// Backward-compatible alias for /reports/:id
+apiRouter.get('/reports/:id', requireAuth, async (req, res, next) => {
+  req.url = `/integrity/reports/${req.params.id}`;
+  return apiRouter.handle(req, res, next);
+});
+
+apiRouter.get('/integrity/reports/:id/export', requireAuth, async (req, res, next) => {
+  try {
+    let report = null;
+    if (isDbConnected()) {
+      report = await IntegrityReport.findOne({ _id: req.params.id, ownerId: req.user.id }).lean();
+    } else {
+      report = memReports.get(req.params.id);
+      if (report && report.ownerId !== req.user.id) report = null;
+    }
+
+    if (!report) return res.status(404).json({ error: 'Integrity report not found.' });
+
+    const format = (req.query.format || 'json').toLowerCase();
+    if (format === 'docx') {
+      const docxBuffer = await exportIntegrityReportDocx(report);
+      const safeTitle = (report.title || 'Integrity-Report').replace(/[^a-zA-Z0-9_-]/g, '_');
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.docx"`);
+      res.setHeader('Content-Length', docxBuffer.length);
+      return res.send(docxBuffer);
+    }
+
+    return res.json(report);
+  } catch (err) { next(err); }
+});
+
+// ==========================================
+// PHASE 3: PRIVACY & DATA DELETION
+// ==========================================
+apiRouter.get('/privacy/settings', requireAuth, async (req, res, next) => {
+  try {
+    let userSettings = { persistDocumentText: true, allowAiProcessing: true };
+    if (isDbConnected()) {
+      const u = await User.findById(req.user.id).select('privacySettings').lean();
+      if (u?.privacySettings) userSettings = u.privacySettings;
+    } else {
+      const u = memUsers.get(req.user.email);
+      if (u?.privacySettings) userSettings = u.privacySettings;
+    }
+
+    const serverPersistEnforced = process.env.PERSIST_DOCUMENT_TEXT === 'false';
+
+    res.json({
+      settings: {
+        persistDocumentText: serverPersistEnforced ? false : userSettings.persistDocumentText,
+        allowAiProcessing: userSettings.allowAiProcessing
+      },
+      policies: {
+        serverPersistEnforced,
+        analyticsRetentionDays: 90,
+        auditRetentionDays: 365,
+        aiDataPolicy: 'Manuscript excerpts sent to AI providers are processed in-memory and are never used to train public foundation models.'
+      }
+    });
+  } catch (err) { next(err); }
+});
+
+apiRouter.patch('/privacy/settings', requireAuth, async (req, res, next) => {
+  try {
+    const schema = z.object({
+      persistDocumentText: z.boolean().optional(),
+      allowAiProcessing: z.boolean().optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid settings payload.' });
+
+    if (isDbConnected()) {
+      const u = await User.findByIdAndUpdate(
+        req.user.id,
+        { $set: { 'privacySettings.persistDocumentText': parsed.data.persistDocumentText, 'privacySettings.allowAiProcessing': parsed.data.allowAiProcessing } },
+        { new: true }
+      ).select('privacySettings').lean();
+      await recordAudit(req.user.id, 'privacy_settings_updated', 'User', req.user.id, parsed.data);
+      return res.json({ settings: u.privacySettings });
+    } else {
+      const u = memUsers.get(req.user.email);
+      if (u) {
+        u.privacySettings = { ...u.privacySettings, ...parsed.data };
+      }
+      await recordAudit(req.user.id, 'privacy_settings_updated', 'User', req.user.id, parsed.data);
+      return res.json({ settings: u?.privacySettings || parsed.data });
+    }
+  } catch (err) { next(err); }
+});
+
+// User Full Data Export (Section 6)
+apiRouter.post('/privacy/export', requireAuth, async (req, res, next) => {
+  try {
+    let profile = null;
+    let projects = [];
+    let documents = [];
+    let revisions = [];
+    let citations = [];
+    let reports = [];
+
+    if (isDbConnected()) {
+      profile = await User.findById(req.user.id).select('email displayName role createdAt lastLoginAt privacySettings usage').lean();
+      projects = await Project.find({ userId: req.user.id }).lean();
+      documents = await Document.find({ ownerId: req.user.id }).lean();
+      revisions = await Revision.find({ userId: req.user.id }).select('mode summary originalText revisedText status createdAt').lean();
+      citations = await Citation.find({ ownerId: req.user.id }).lean();
+      reports = await IntegrityReport.find({ ownerId: req.user.id }).select('title reportType summaryMetrics findings limitations createdAt').lean();
+    } else {
+      profile = memUsers.get(req.user.email);
+      projects = [...memProjects.values()].filter(p => p.userId === req.user.id);
+      documents = [...memDocuments.values()].filter(d => d.ownerId === req.user.id);
+      revisions = [...memRevisions.values()].filter(r => r.userId === req.user.id);
+      citations = [...memCitations.values()].filter(c => c.ownerId === req.user.id);
+      reports = [...memReports.values()].filter(r => r.ownerId === req.user.id);
+    }
+
+    // Exclude security credentials
+    const safeProfile = {
+      id: profile?._id || req.user.id,
+      email: profile?.email || req.user.email,
+      displayName: profile?.displayName || '',
+      role: profile?.role || 'researcher',
+      createdAt: profile?.createdAt,
+      privacySettings: profile?.privacySettings
+    };
+
+    const exportBundle = {
+      exportMetadata: {
+        exportedAt: new Date().toISOString(),
+        requestingUser: safeProfile.email,
+        application: 'ResearchProof AI',
+        version: '3.0.0'
+      },
+      user: safeProfile,
+      projects,
+      documents,
+      revisions,
+      citations,
+      integrityReports: reports
+    };
+
+    await recordAudit(req.user.id, 'user_data_exported', 'User', req.user.id);
+    res.setHeader('Content-Disposition', `attachment; filename="researchproof-export-${req.user.id}.json"`);
+    res.json(exportBundle);
+  } catch (err) { next(err); }
+});
+
+// Delete individual document via privacy center
+apiRouter.delete('/privacy/documents/:id', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const doc = await Document.findOneAndDelete({ _id: req.params.id, ownerId: req.user.id });
+      if (!doc) return res.status(404).json({ error: 'Document not found.' });
+      await Revision.deleteMany({ documentId: req.params.id, userId: req.user.id });
+      await recordAudit(req.user.id, 'document_deleted', 'Document', req.params.id);
+      return res.json({ deleted: true });
+    } else {
+      const doc = memDocuments.get(req.params.id);
+      if (!doc || doc.ownerId !== req.user.id) return res.status(404).json({ error: 'Document not found.' });
+      memDocuments.delete(req.params.id);
+      for (const [revId, rev] of memRevisions.entries()) {
+        if (rev.documentId === req.params.id && rev.userId === req.user.id) memRevisions.delete(revId);
+      }
+      await recordAudit(req.user.id, 'document_deleted', 'Document', req.params.id);
+      return res.json({ deleted: true });
+    }
+  } catch (err) { next(err); }
+});
+
+// Delete individual project via privacy center
+apiRouter.delete('/privacy/projects/:id', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const proj = await Project.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
+      if (!proj) return res.status(404).json({ error: 'Project not found.' });
+      await Document.deleteMany({ projectId: req.params.id, ownerId: req.user.id });
+      await Revision.deleteMany({ projectId: req.params.id, userId: req.user.id });
+      await Citation.deleteMany({ projectId: req.params.id, ownerId: req.user.id });
+      await recordAudit(req.user.id, 'project_deleted', 'Project', req.params.id);
+      return res.json({ deleted: true });
+    } else {
+      const proj = memProjects.get(req.params.id);
+      if (!proj || proj.userId !== req.user.id) return res.status(404).json({ error: 'Project not found.' });
+      memProjects.delete(req.params.id);
+      for (const [docId, doc] of memDocuments.entries()) {
+        if (doc.projectId === req.params.id && doc.ownerId === req.user.id) memDocuments.delete(docId);
+      }
+      for (const [revId, rev] of memRevisions.entries()) {
+        if (rev.projectId === req.params.id && rev.userId === req.user.id) memRevisions.delete(revId);
+      }
+      for (const [citId, cit] of memCitations.entries()) {
+        if (cit.projectId === req.params.id && cit.ownerId === req.user.id) memCitations.delete(citId);
+      }
+      await recordAudit(req.user.id, 'project_deleted', 'Project', req.params.id);
+      return res.json({ deleted: true });
+    }
+  } catch (err) { next(err); }
+});
+
+// Complete Account Deletion (Section 6)
+apiRouter.post('/privacy/delete-account', requireAuth, async (req, res, next) => {
+  try {
+    const schema = z.object({
+      password: z.string().optional(),
+      confirm: z.boolean().optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid deletion request parameters.' });
+
+    let userRecord = null;
+    if (isDbConnected()) {
+      userRecord = await User.findById(req.user.id);
+    } else {
+      userRecord = memUsers.get(req.user.email);
+    }
+
+    if (!userRecord) return res.status(404).json({ error: 'User account not found.' });
+
+    // Step-up verification: verify password if user has password authentication
+    if (userRecord.passwordHash) {
+      if (!parsed.data.password) {
+        return res.status(400).json({ error: 'Please enter your current password to confirm account deletion.' });
+      }
+      const match = await bcrypt.compare(parsed.data.password, userRecord.passwordHash);
+      if (!match) {
+        return res.status(401).json({ error: 'Incorrect password. Deletion cancelled.' });
+      }
+    } else {
+      // Google-only account step-up verification
+      if (!parsed.data.confirm) {
+        return res.status(400).json({ error: 'Please confirm account deletion explicitly.' });
+      }
+    }
+
+    const userId = req.user.id;
+    let counts = { documents: 0, revisions: 0, citations: 0, projects: 0, integrityReports: 0 };
+
+    if (isDbConnected()) {
+      const [d, r, c, p, rep] = await Promise.all([
+        Document.deleteMany({ ownerId: userId }),
+        Revision.deleteMany({ userId }),
+        Citation.deleteMany({ ownerId: userId }),
+        Project.deleteMany({ userId }),
+        IntegrityReport.deleteMany({ ownerId: userId }),
+        UsageRecord.deleteMany({ userId })
+      ]);
+      counts = {
+        documents: d.deletedCount || 0,
+        revisions: r.deletedCount || 0,
+        citations: c.deletedCount || 0,
+        projects: p.deletedCount || 0,
+        integrityReports: rep.deletedCount || 0
+      };
+
+      // Anonymize user record
+      userRecord.status = 'deleted';
+      userRecord.email = `deleted-user-${userId}@deleted.local`;
+      userRecord.passwordHash = null;
+      userRecord.displayName = 'Deleted User';
+      userRecord.googleId = null;
+      userRecord.tokenVersion = (userRecord.tokenVersion || 1) + 1;
+      await userRecord.save();
+    } else {
+      for (const [docId, doc] of memDocuments.entries()) {
+        if (doc.ownerId === userId) { memDocuments.delete(docId); counts.documents++; }
+      }
+      for (const [revId, rev] of memRevisions.entries()) {
+        if (rev.userId === userId) { memRevisions.delete(revId); counts.revisions++; }
+      }
+      for (const [citId, cit] of memCitations.entries()) {
+        if (cit.ownerId === userId) { memCitations.delete(citId); counts.citations++; }
+      }
+      for (const [projId, proj] of memProjects.entries()) {
+        if (proj.userId === userId) { memProjects.delete(projId); counts.projects++; }
+      }
+      for (const [repId, rep] of memReports.entries()) {
+        if (rep.ownerId === userId) { memReports.delete(repId); counts.integrityReports++; }
+      }
+
+      userRecord.status = 'deleted';
+      userRecord.tokenVersion = (userRecord.tokenVersion || 1) + 1;
+      userRecord.passwordHash = null;
+      memUsers.delete(req.user.email);
+    }
+
+    // Invalidate sessions & clear cookie
+    clearSessionCookie(res);
+    await recordAudit(userId, 'account_deleted', 'User', userId, { deletedCounts: counts });
+
+    res.json({
+      success: true,
+      message: 'Your ResearchProof AI account and associated primary research data have been permanently deleted.',
+      deletedCounts: counts
+    });
+  } catch (err) { next(err); }
+});
+
+// ==========================================
+// PHASE 3: ADMINISTRATOR DASHBOARD & USER MANAGEMENT
+// ==========================================
+apiRouter.get('/admin/overview', requireAdmin, async (req, res, next) => {
+  try {
+    const overview = await getAnalyticsOverview(app);
+    res.json({
+      ...overview,
+      system: {
+        serverTime: new Date().toISOString(),
+        nodeVersion: process.version,
+        database: isDbConnected() ? 'MongoDB Cluster' : 'In-Memory Dev Store',
+        aiProvider: process.env.AI_PROVIDER || 'gemini',
+        aiConfigured: Boolean(process.env.AI_API_KEY)
+      }
+    });
+  } catch (err) { next(err); }
+});
+
+apiRouter.get('/admin/users', requireAdmin, async (req, res, next) => {
+  try {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+    const search = (req.query.search || '').trim().toLowerCase();
+    const statusFilter = req.query.status;
+    const roleFilter = req.query.role;
+
+    if (isDbConnected()) {
+      const query = { status: { $ne: 'deleted' } };
+      if (statusFilter && ['active', 'suspended', 'pending'].includes(statusFilter)) {
+        query.status = statusFilter;
+      }
+      if (roleFilter && ['researcher', 'reviewer', 'admin'].includes(roleFilter)) {
+        query.role = roleFilter;
+      }
+      if (search) {
+        query.$or = [
+          { email: { $regex: search, $options: 'i' } },
+          { displayName: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      const [total, users] = await Promise.all([
+        User.countDocuments(query),
+        User.find(query)
+          .sort({ createdAt: -1 })
+          .skip((page - 1) * limit)
+          .limit(limit)
+          .select('email displayName role status lastLoginAt lastActiveAt createdAt usage authProviders')
+          .lean()
+      ]);
+
+      return res.json({
+        users,
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) }
+      });
+    } else {
+      let users = [...memUsers.values()].filter(u => u.status !== 'deleted');
+      if (statusFilter) users = users.filter(u => u.status === statusFilter);
+      if (roleFilter) users = users.filter(u => u.role === roleFilter);
+      if (search) {
+        users = users.filter(u => (u.email || '').includes(search) || (u.displayName || '').toLowerCase().includes(search));
+      }
+      const total = users.length;
+      const paginated = users.slice((page - 1) * limit, page * limit).map(u => ({
+        _id: u._id || u.id,
+        email: u.email,
+        displayName: u.displayName,
+        role: u.role || 'researcher',
+        status: u.status || 'active',
+        lastLoginAt: u.lastLoginAt || u.createdAt,
+        lastActiveAt: u.lastActiveAt || u.createdAt,
+        createdAt: u.createdAt,
+        usage: u.usage
+      }));
+
+      return res.json({
+        users: paginated,
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) }
+      });
+    }
+  } catch (err) { next(err); }
+});
+
+apiRouter.get('/admin/users/:id', requireAdmin, async (req, res, next) => {
+  try {
+    let user = null;
+    if (isDbConnected()) {
+      user = await User.findById(req.params.id)
+        .select('email displayName role status lastLoginAt lastActiveAt createdAt usage authProviders tokenVersion')
+        .lean();
+    } else {
+      user = [...memUsers.values()].find(u => (u._id === req.params.id || u.id === req.params.id));
+    }
+
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+
+    // Safe metadata response (no passwords, tokens, or private manuscripts)
+    res.json({
+      _id: user._id || user.id,
+      email: user.email,
+      displayName: user.displayName,
+      role: user.role || 'researcher',
+      status: user.status || 'active',
+      lastLoginAt: user.lastLoginAt || user.createdAt,
+      lastActiveAt: user.lastActiveAt || user.createdAt,
+      createdAt: user.createdAt,
+      usage: user.usage,
+      authProviders: user.authProviders || ['email']
+    });
+  } catch (err) { next(err); }
+});
+
+// Suspend / Reactivate account (Section 3)
+apiRouter.patch('/admin/users/:id/status', requireAdmin, async (req, res, next) => {
+  try {
+    const schema = z.object({
+      status: z.enum(['active', 'suspended']),
+      reason: z.string().min(3, 'A valid administrative reason is mandatory.')
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid status payload.' });
+
+    const targetUserId = req.params.id;
+
+    // Safety 1: Prevent accidental self-suspension
+    if (req.user.id === targetUserId) {
+      return res.status(400).json({ error: 'Administrative safety constraint: You cannot suspend your own account.' });
+    }
+
+    let targetUser = null;
+    if (isDbConnected()) {
+      targetUser = await User.findById(targetUserId);
+    } else {
+      targetUser = [...memUsers.values()].find(u => (u._id === targetUserId || u.id === targetUserId));
+    }
+
+    if (!targetUser) return res.status(404).json({ error: 'Target user not found.' });
+
+    // Safety 2: Prevent removing or suspending the final administrator
+    if (targetUser.role === 'admin' && parsed.data.status === 'suspended') {
+      let adminCount = 0;
+      if (isDbConnected()) {
+        adminCount = await User.countDocuments({ role: 'admin', status: 'active' });
+      } else {
+        adminCount = [...memUsers.values()].filter(u => u.role === 'admin' && u.status === 'active').length;
+      }
+      if (adminCount <= 1) {
+        return res.status(400).json({ error: 'Administrative safety constraint: Cannot suspend the final active administrator.' });
+      }
+    }
+
+    targetUser.status = parsed.data.status;
+    if (parsed.data.status === 'suspended') {
+      targetUser.tokenVersion = (targetUser.tokenVersion || 1) + 1; // Invalidate active sessions immediately
+    }
+
+    if (isDbConnected()) {
+      await targetUser.save();
+    }
+
+    const action = parsed.data.status === 'suspended' ? 'account_suspended' : 'account_reactivated';
+    await recordAudit(req.user.id, action, 'User', targetUserId, { reason: parsed.data.reason }, targetUserId, parsed.data.reason);
+
+    res.json({
+      success: true,
+      user: {
+        _id: targetUser._id || targetUser.id,
+        email: targetUser.email,
+        status: targetUser.status
+      },
+      message: `User account ${parsed.data.status === 'suspended' ? 'suspended' : 'reactivated'} successfully.`
+    });
+  } catch (err) { next(err); }
+});
+
+// Revoke all active sessions for a user (Section 3)
+apiRouter.post('/admin/users/:id/revoke-sessions', requireAdmin, async (req, res, next) => {
+  try {
+    const targetUserId = req.params.id;
+    let targetUser = null;
+
+    if (isDbConnected()) {
+      targetUser = await User.findById(targetUserId);
+    } else {
+      targetUser = [...memUsers.values()].find(u => (u._id === targetUserId || u.id === targetUserId));
+    }
+
+    if (!targetUser) return res.status(404).json({ error: 'User not found.' });
+
+    targetUser.tokenVersion = (targetUser.tokenVersion || 1) + 1;
+    if (isDbConnected()) {
+      await targetUser.save();
+    }
+
+    await recordAudit(req.user.id, 'sessions_revoked', 'User', targetUserId, {}, targetUserId, 'Administrative session revocation');
+
+    res.json({
+      success: true,
+      message: `Active sessions revoked for ${targetUser.email}. The user will be required to sign in again.`
+    });
+  } catch (err) { next(err); }
+});
+
+// Admin Audit Logs Feed (Section 9)
+apiRouter.get('/admin/audit-events', requireAdmin, async (req, res, next) => {
+  try {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 25)));
+    const actionFilter = req.query.action;
+
+    if (isDbConnected()) {
+      const query = {};
+      if (actionFilter) query.action = actionFilter;
+      const [total, events] = await Promise.all([
+        AuditEvent.countDocuments(query),
+        AuditEvent.find(query)
+          .sort({ createdAt: -1 })
+          .skip((page - 1) * limit)
+          .limit(limit)
+          .populate('actorId', 'email displayName role')
+          .populate('targetId', 'email displayName')
+          .lean()
+      ]);
+      return res.json({ events, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+    } else {
+      let events = [...memAuditEvents];
+      if (actionFilter) events = events.filter(e => e.action === actionFilter);
+      const total = events.length;
+      const paginated = events.slice((page - 1) * limit, page * limit);
+      return res.json({ events: paginated, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
+    }
+  } catch (err) { next(err); }
+});
+
+// ==========================================
+// PHASE 3: USAGE ANALYTICS ENGINE
+// ==========================================
+apiRouter.get('/admin/analytics/overview', requireAdmin, async (req, res, next) => {
+  try {
+    const overview = await getAnalyticsOverview(app);
+    res.json(overview);
+  } catch (err) { next(err); }
+});
+
+apiRouter.get('/admin/analytics/users', requireAdmin, async (req, res, next) => {
+  try {
+    const overview = await getAnalyticsOverview(app);
+    res.json(overview.users);
+  } catch (err) { next(err); }
+});
+
+apiRouter.get('/admin/analytics/features', requireAdmin, async (req, res, next) => {
+  try {
+    const breakdown = await getFeatureUsageBreakdown();
+    res.json(breakdown);
+  } catch (err) { next(err); }
+});
+
+apiRouter.get('/admin/analytics/errors', requireAdmin, async (req, res, next) => {
+  try {
+    const errors = await getErrorTrends();
+    res.json(errors);
+  } catch (err) { next(err); }
+});
+
+apiRouter.get('/admin/analytics/providers', requireAdmin, async (_req, res, next) => {
+  try {
+    const isDbConnected = mongoose.connection.readyState === 1;
+    let providerStats = [];
+    if (isDbConnected) {
+      providerStats = await UsageEvent.aggregate([
+        { $match: { feature: 'rewrite', provider: { $ne: null } } },
+        { $group: { _id: '$provider', totalRequests: { $sum: 1 }, successCount: { $sum: { $cond: ['$success', 1, 0] } } } }
+      ]);
+    }
+    res.json({
+      activeProvider: process.env.AI_PROVIDER || 'gemini',
+      activeModel: process.env.AI_MODEL || 'gemini-1.5-flash',
+      providers: providerStats
+    });
+  } catch (err) { next(err); }
+});
+
 
 // Mount router on both /api and /api/v1
 app.use('/api/v1', apiRouter);

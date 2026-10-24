@@ -13,7 +13,10 @@ A full-stack academic writing and research-integrity starter project.
 - Original vs. Revised diff inspector with accept, reject, and restore lifecycle
 - Citation Assistant with Crossref REST API lookup, APA 7th/MLA 9th/IEEE formatting, and validation
 - Secure DOCX Import (Mammoth) with PKZIP magic byte checks & DOCX Export (Office Open XML)
-- Transparent writing heuristics & research integrity checks
+- Administrator Dashboard & RBAC User Management (`requireAdmin`)
+- Usage Analytics Engine with TTL-bounded retention & daily aggregates
+- User Privacy Control Center, GDPR/CCPA Data Export & Cascading Account Deletion
+- Research Integrity Reporting Engine with multi-dimensional auditing & DOCX export
 - Projects, document versioning, and revision history
 - Privacy-first option not to persist submitted text (`PERSIST_DOCUMENT_TEXT`)
 
@@ -46,14 +49,28 @@ API health check: http://localhost:4000/api/health
 ```bash
 npm test --prefix server
 ```
-Executes 34 comprehensive tests across Phase 1 authentication/quotas and Phase 2 Academic Tools (rewriting, diff, citations, DOCX import/export).
+Executes **45 comprehensive tests** across:
+- Phase 1 Security, Google OAuth, and Usage Quotas (20 tests)
+- Phase 2 Academic Writing Studio, Citations, and DOCX (12 tests)
+- Phase 3 Platform Management, RBAC, Analytics, Privacy, and Integrity Reports (10 tests)
 
 ### 5. Production Build
 ```bash
 npm run build --prefix client
 ```
 
+### 6. Provision an Administrator Account
+```bash
+npm run --prefix server seed:admin <email> <password> [displayName]
+```
+
 ## Documentation
+- [Phase 3 Implementation Guide](docs/PHASE3_IMPLEMENTATION.md)
+- [Administrator Dashboard & RBAC](docs/ADMIN_DASHBOARD.md)
+- [Usage Analytics Engine](docs/USAGE_ANALYTICS.md)
+- [Privacy Controls & Data Deletion](docs/PRIVACY_AND_DELETION.md)
+- [Research Integrity Reporting Engine](docs/INTEGRITY_REPORTS.md)
+- [Platform Security & Threat Model](docs/SECURITY.md)
 - [Phase 2 Implementation Guide](docs/PHASE2_IMPLEMENTATION.md)
 - [Academic Rewriting & Meaning Preservation](docs/ACADEMIC_REWRITING.md)
 - [Citation Assistant & Crossref Integration](docs/CITATION_ASSISTANT.md)
@@ -63,11 +80,12 @@ npm run build --prefix client
 
 ## AI provider configuration
 Set `AI_PROVIDER` (`gemini` or `openai`), `AI_API_KEY`, `AI_BASE_URL`, and `AI_MODEL` in `server/.env`.
-If no API key is configured, the application functions cleanly for all non-AI tools (Writing Studio, Citation Assistant, DOCX import/export, and Diff comparison).
+If no API key is configured, the application functions cleanly for all non-AI tools (Writing Studio, Citation Assistant, DOCX import/export, Privacy Center, and Integrity Reports).
 
 ## Important limitations
 - The writing assessment is a heuristic review aid, not a reliable determination of authorship.
 - Citation checks format and verify bibliographic metadata against Crossref; they do not prove that a source substantively supports a specific claim.
-- No result guarantees how Turnitin or another external system will classify a document.
+- Research integrity reports evaluate internal manuscript characteristics; they do not verify external Turnitin or plagiarism databases.
 - Always verify sources, data, quotations, and institutional AI-use policies.
+
 

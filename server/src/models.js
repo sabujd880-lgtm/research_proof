@@ -9,9 +9,15 @@ const userSchema = new mongoose.Schema({
   authProviders: [{ type: String, enum: ['email', 'google'], default: 'email' }],
   emailVerified: { type: Boolean, default: true },
   role: { type: String, enum: ['researcher', 'reviewer', 'admin'], default: 'researcher' },
-  status: { type: String, enum: ['active', 'suspended', 'pending'], default: 'active' },
+  status: { type: String, enum: ['active', 'suspended', 'pending', 'deleted'], default: 'active' },
   tokenVersion: { type: Number, default: 1 }, // Used for database-backed server-side session revocation
   lastLoginAt: { type: Date, default: Date.now },
+  lastActiveAt: { type: Date, default: Date.now },
+  deletionStatus: { type: String, enum: ['none', 'pending', 'completed'], default: 'none' },
+  privacySettings: {
+    persistDocumentText: { type: Boolean, default: true },
+    allowAiProcessing: { type: Boolean, default: true }
+  },
   usage: {
     dailyRequests: { type: Number, default: 0 },
     dailyLimit: { type: Number, default: 50 },
@@ -20,6 +26,8 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 userSchema.index({ googleId: 1 }, { unique: true, sparse: true });
+userSchema.index({ role: 1, status: 1 });
+userSchema.index({ lastActiveAt: -1 });
 
 // Section 6: Free Usage Limit Collection
 const usageRecordSchema = new mongoose.Schema({
@@ -115,30 +123,90 @@ const doiCacheSchema = new mongoose.Schema({
 
 const integrityReportSchema = new mongoose.Schema({
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null },
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null, index: true },
   revisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Revision', default: null },
-  reportType: { type: String, enum: ['writing', 'originality', 'citations', 'comprehensive'], required: true },
+  title: { type: String, default: 'Research Integrity Report', trim: true },
+  reportType: { type: String, enum: ['writing', 'originality', 'citations', 'comprehensive'], default: 'comprehensive' },
+  analysisVersion: { type: String, default: '3.0.0' },
+  checksPerformed: [{ type: String }],
+  checksSkipped: [{ type: String }],
+  reviewStatus: { type: String, enum: ['completed', 'partial', 'failed'], default: 'completed' },
+  summaryMetrics: {
+    wordCount: { type: Number, default: 0 },
+    highPriorityCount: { type: Number, default: 0 },
+    reviewRecommendedCount: { type: Number, default: 0 },
+    informationalCount: { type: Number, default: 0 },
+    totalFindings: { type: Number, default: 0 }
+  },
   findings: [{
     category: { type: String, required: true },
-    severity: { type: String, enum: ['info', 'review', 'warning', 'critical'], default: 'review' },
+    severity: { type: String, enum: ['informational', 'review_recommended', 'high_priority_review', 'info', 'review', 'warning', 'critical'], default: 'review_recommended' },
     excerpt: { type: String, default: '' },
     explanation: { type: String, required: true },
     suggestedAction: { type: String, default: '' },
+    evidenceLocation: { type: String, default: '' },
     sourceMetadata: { type: mongoose.Schema.Types.Mixed, default: null }
   }],
-  limitations: { type: String, default: '' }
+  limitations: { type: String, default: 'Integrity reports utilize transparent statistical and stylistic heuristics. They do not constitute definitive proof of scientific misconduct or AI authorship.' }
 }, { timestamps: true });
 integrityReportSchema.index({ ownerId: 1, createdAt: -1 });
 
 const auditEventSchema = new mongoose.Schema({
   actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  action: { type: String, required: true },
+  targetId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+  action: { type: String, required: true, index: true },
   resourceType: { type: String, required: true },
   resourceId: { type: String, default: '' },
+  result: { type: String, enum: ['success', 'failure'], default: 'success' },
+  reason: { type: String, default: '' },
   requestId: { type: String, default: '' },
   metadata: { type: mongoose.Schema.Types.Mixed, default: {} }
 }, { timestamps: { createdAt: true, updatedAt: false } });
 auditEventSchema.index({ actorId: 1, createdAt: -1 });
+auditEventSchema.index({ action: 1, createdAt: -1 });
+
+// Phase 3: Analytics Events (Bounded Retention with TTL)
+const usageEventSchema = new mongoose.Schema({
+  eventType: { type: String, required: true, index: true },
+  feature: { type: String, required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+  durationMs: { type: Number, default: 0 },
+  success: { type: Boolean, default: true, index: true },
+  errorCategory: { type: String, default: null },
+  provider: { type: String, default: null },
+  tokenCount: { type: Number, default: 0 },
+  requestId: { type: String, default: '' },
+  metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+  timestamp: { type: Date, default: Date.now, expires: 60 * 60 * 24 * 90 } // 90 days TTL default
+}, { timestamps: true });
+usageEventSchema.index({ timestamp: -1 });
+usageEventSchema.index({ feature: 1, timestamp: -1 });
+
+// Phase 3: Fast Daily Aggregation Store
+const dailyUsageAggregateSchema = new mongoose.Schema({
+  date: { type: String, required: true, index: true }, // 'YYYY-MM-DD'
+  feature: { type: String, required: true, index: true },
+  requestCount: { type: Number, default: 0 },
+  successCount: { type: Number, default: 0 },
+  failureCount: { type: Number, default: 0 }
+}, { timestamps: true });
+dailyUsageAggregateSchema.index({ date: 1, feature: 1 }, { unique: true });
+
+// Phase 3: Data Deletion Job Tracker
+const dataDeletionJobSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  status: { type: String, enum: ['pending', 'processing', 'completed', 'failed'], default: 'pending', index: true },
+  requestedAt: { type: Date, default: Date.now },
+  completedAt: { type: Date, default: null },
+  failureCategory: { type: String, default: null },
+  deletedCounts: {
+    documents: { type: Number, default: 0 },
+    revisions: { type: Number, default: 0 },
+    citations: { type: Number, default: 0 },
+    projects: { type: Number, default: 0 },
+    integrityReports: { type: Number, default: 0 }
+  }
+}, { timestamps: true });
 
 export const User = mongoose.model('User', userSchema);
 export const Project = mongoose.model('Project', projectSchema);
@@ -149,3 +217,7 @@ export const AuditEvent = mongoose.model('AuditEvent', auditEventSchema);
 export const UsageRecord = mongoose.model('UsageRecord', usageRecordSchema);
 export const Citation = mongoose.model('Citation', citationSchema);
 export const DoiCache = mongoose.model('DoiCache', doiCacheSchema);
+export const UsageEvent = mongoose.model('UsageEvent', usageEventSchema);
+export const DailyUsageAggregate = mongoose.model('DailyUsageAggregate', dailyUsageAggregateSchema);
+export const DataDeletionJob = mongoose.model('DataDeletionJob', dataDeletionJobSchema);
+

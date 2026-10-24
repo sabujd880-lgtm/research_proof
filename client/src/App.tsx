@@ -648,11 +648,19 @@ export default function App() {
     { name: 'Writing Studio', icon: WandSparkles, group: 'WORKSPACE' },
     { name: 'Dashboard', icon: LayoutDashboard, group: 'WORKSPACE' },
     { name: 'Citation Assistant', icon: BookOpenCheck, group: 'RESEARCH TOOLS' },
+    { name: 'Integrity Reports', icon: FileCheck2, group: 'RESEARCH TOOLS' },
     { name: 'AI Assessment', icon: ScanText, group: 'RESEARCH TOOLS' },
-    { name: 'Originality Review', icon: FileCheck2, group: 'RESEARCH TOOLS' },
+    { name: 'Originality Review', icon: FileText, group: 'RESEARCH TOOLS' },
     { name: 'Projects', icon: FolderKanban, group: 'MANAGE' },
     { name: 'Revision History', icon: History, group: 'MANAGE' },
-    { name: 'Settings', icon: Settings2, group: 'MANAGE' }
+    { name: 'Privacy & Data', icon: ShieldAlert, group: 'MANAGE' },
+    { name: 'Settings', icon: Settings2, group: 'MANAGE' },
+    ...(user.role === 'admin' ? [
+      { name: 'Admin Overview', icon: Gauge, group: 'ADMINISTRATION' },
+      { name: 'User Management', icon: FolderKanban, group: 'ADMINISTRATION' },
+      { name: 'Usage Analytics', icon: Activity, group: 'ADMINISTRATION' },
+      { name: 'Platform Audit Logs', icon: History, group: 'ADMINISTRATION' }
+    ] : [])
   ];
   const groups = [...new Set(nav.map(n => n.group))];
 
@@ -661,9 +669,10 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark"><ShieldCheck size={20} /></div>
-          <div><strong>ResearchProof <span>AI</span></strong><small>PHASE 2 ACADEMIC SUITE</small></div>
+          <div><strong>ResearchProof <span>AI</span></strong><small>PHASE 3 PLATFORM MANAGEMENT</small></div>
           <button className="icon-button mobile-menu" aria-label="Toggle sidebar"><PanelLeft size={18} /></button>
         </div>
+
 
         <div className="workspace-pill">
           {user.avatarUrl ? (
@@ -1165,6 +1174,49 @@ export default function App() {
             <HistoryPage revisions={revisions} />
           )}
 
+          {/* INTEGRITY REPORTS VIEW */}
+          {section === 'Integrity Reports' && (
+            <IntegrityReportsPage
+              token={token}
+              documents={documents}
+              activeDoc={activeDoc}
+              setMessage={setMessage}
+              setError={setError}
+            />
+          )}
+
+          {/* PRIVACY & DATA VIEW */}
+          {section === 'Privacy & Data' && (
+            <PrivacyPage
+              token={token}
+              user={user}
+              projects={projects}
+              documents={documents}
+              revisions={revisions}
+              citations={citationsList}
+              setMessage={setMessage}
+              setError={setError}
+              logout={logout}
+            />
+          )}
+
+          {/* ADMIN VIEWS */}
+          {section === 'Admin Overview' && user?.role === 'admin' && (
+            <AdminOverviewPage token={token} setError={setError} />
+          )}
+
+          {section === 'User Management' && user?.role === 'admin' && (
+            <AdminUsersPage token={token} currentUser={user} setMessage={setMessage} setError={setError} />
+          )}
+
+          {section === 'Usage Analytics' && user?.role === 'admin' && (
+            <AdminAnalyticsPage token={token} setError={setError} />
+          )}
+
+          {section === 'Platform Audit Logs' && user?.role === 'admin' && (
+            <AdminAuditLogsPage token={token} setError={setError} />
+          )}
+
           {/* SETTINGS VIEW */}
           {section === 'Settings' && (
             <SettingsPage
@@ -1180,6 +1232,7 @@ export default function App() {
             />
           )}
         </div>
+
       </main>
     </div>
   );
@@ -1654,3 +1707,862 @@ function SettingsPage({ user, usage, dark, setDark, persist, setPersist, logout,
     </section>
   );
 }
+
+/* =========================================================
+   PHASE 3: RESEARCH INTEGRITY REPORTS VIEW
+   ========================================================= */
+function IntegrityReportsPage({ token, documents, activeDoc, setMessage, setError }: any) {
+  const [selectedDocId, setSelectedDocId] = useState(activeDoc?._id || '');
+  const [reportText, setReportText] = useState(activeDoc?.content || sampleText);
+  const [currentReport, setCurrentReport] = useState<any>(null);
+  const [pastReports, setPastReports] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    fetchReports();
+  }, []);
+
+  async function fetchReports() {
+    try {
+      const data = await request('/integrity/reports', token, undefined, 'GET');
+      setPastReports(data);
+    } catch (_) {}
+  }
+
+  async function handleRunAudit() {
+    setBusy(true);
+    try {
+      const res = await request('/integrity/reports', token, {
+        documentId: selectedDocId || undefined,
+        text: reportText,
+        title: activeDoc?.title ? `Integrity Audit: ${activeDoc.title}` : 'Research Integrity Audit'
+      });
+      setCurrentReport(res);
+      setMessage(`Audit complete: ${res.summaryMetrics.totalFindings} findings identified.`);
+      await fetchReports();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleExportDocx(reportId: string, title: string) {
+    try {
+      const res = await fetch(`${API}/integrity/reports/${reportId}/export?format=docx`, {
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        credentials: 'include'
+      });
+      if (!res.ok) throw new Error('DOCX export failed.');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${title.replace(/[^a-zA-Z0-9_-]/g, '_')}.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  return (
+    <section className="analysis-page">
+      <div className="page-title-row">
+        <div>
+          <p className="eyebrow">SCIENTIFIC RIGOR</p>
+          <h1>Research Integrity Reports</h1>
+          <p className="muted">Transparent heuristic checks for sentence complexity, meaning preservation, citation integrity, and acronym consistency.</p>
+        </div>
+        <div className="page-title-icon"><FileCheck2 /></div>
+      </div>
+
+      <div className="panel" style={{ marginBottom: '24px' }}>
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap' }}>
+          <select
+            value={selectedDocId}
+            onChange={(e) => {
+              setSelectedDocId(e.target.value);
+              const found = documents.find((d: any) => d._id === e.target.value);
+              if (found) setReportText(found.content);
+            }}
+            style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--surface2)', color: 'var(--text)', fontSize: '12px' }}
+          >
+            <option value="">Manual / Custom Text Input</option>
+            {documents.map((d: any) => (
+              <option key={d._id} value={d._id}>{d.title} ({d.wordCount} words)</option>
+            ))}
+          </select>
+          <button className="primary" onClick={handleRunAudit} disabled={busy}>
+            {busy ? <RefreshCw size={14} className="spin" /> : <ShieldCheck size={14} />} Run Integrity Audit
+          </button>
+        </div>
+
+        <textarea
+          value={reportText}
+          onChange={(e) => setReportText(e.target.value)}
+          rows={5}
+          style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--surface2)', color: 'var(--text)', fontFamily: 'monospace', fontSize: '12px' }}
+          placeholder="Paste or edit manuscript excerpt to audit..."
+        />
+      </div>
+
+      {currentReport && (
+        <div style={{ marginBottom: '28px' }}>
+          <div className="stat-grid">
+            <div className="stat-card">
+              <span className="stat-label">Total Words</span>
+              <span className="stat-value">{currentReport.summaryMetrics?.wordCount || 0}</span>
+              <span className="stat-sub">Analyzed tokens</span>
+            </div>
+            <div className="stat-card" style={{ borderColor: '#fca5a5' }}>
+              <span className="stat-label" style={{ color: '#b91c1c' }}>High Priority</span>
+              <span className="stat-value" style={{ color: '#b91c1c' }}>{currentReport.summaryMetrics?.highPriorityCount || 0}</span>
+              <span className="stat-sub">Action required</span>
+            </div>
+            <div className="stat-card" style={{ borderColor: '#fde68a' }}>
+              <span className="stat-label" style={{ color: '#b45309' }}>Review Recommended</span>
+              <span className="stat-value" style={{ color: '#b45309' }}>{currentReport.summaryMetrics?.reviewRecommendedCount || 0}</span>
+              <span className="stat-sub">Advisory review</span>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label" style={{ color: '#0369a1' }}>Informational</span>
+              <span className="stat-value" style={{ color: '#0369a1' }}>{currentReport.summaryMetrics?.informationalCount || 0}</span>
+              <span className="stat-sub">Stylistic notices</span>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+            <h2 style={{ fontSize: '16px', margin: 0 }}>Audit Findings ({currentReport.findings?.length || 0})</h2>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button className="secondary small" onClick={() => handleExportDocx(currentReport._id, currentReport.title)}>
+                <Download size={13} /> Export DOCX
+              </button>
+              <button className="secondary small" onClick={() => {
+                const blob = new Blob([JSON.stringify(currentReport, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `integrity-report-${currentReport._id}.json`;
+                a.click();
+              }}>
+                <Download size={13} /> Export JSON
+              </button>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '20px' }}>
+            {currentReport.findings?.length > 0 ? (
+              currentReport.findings.map((f: any, i: number) => {
+                const sev = f.severity?.includes('high') || f.severity === 'critical' ? 'high' : (f.severity?.includes('review') ? 'medium' : 'low');
+                return (
+                  <div key={i} className="panel" style={{ padding: '14px 18px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                      <span className={`severity-pill ${sev}`}>{f.severity.replace(/_/g, ' ')}</span>
+                      <small style={{ color: 'var(--muted)', fontSize: '10px' }}>Category: {f.category}</small>
+                    </div>
+                    <strong style={{ display: 'block', fontSize: '12px', marginBottom: '4px' }}>{f.evidenceLocation}</strong>
+                    <p style={{ fontSize: '11px', color: 'var(--muted)', margin: '0 0 8px 0', lineHeight: 1.5 }}>{f.explanation}</p>
+                    <div style={{ fontSize: '10px', background: 'var(--surface2)', padding: '6px 10px', borderRadius: '6px' }}>
+                      <span style={{ fontWeight: 700, color: 'var(--text)' }}>Action: </span>
+                      <span style={{ color: 'var(--muted)' }}>{f.suggestedAction}</span>
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="panel empty-state">
+                <Check size={28} style={{ color: '#15803d' }} />
+                <strong>Clean Manuscript Audit</strong>
+                <p>No critical structural or semantic meaning deviations detected.</p>
+              </div>
+            )}
+          </div>
+
+          <div className="panel" style={{ background: 'var(--surface2)', borderColor: 'var(--border)' }}>
+            <strong style={{ fontSize: '11px', display: 'block', marginBottom: '4px' }}>Scope & Scientific Limitations</strong>
+            <p style={{ fontSize: '10px', color: 'var(--muted)', margin: 0, lineHeight: 1.5 }}>{currentReport.limitations}</p>
+          </div>
+        </div>
+      )}
+
+      {pastReports.length > 0 && (
+        <div style={{ marginTop: '24px' }}>
+          <h3 style={{ fontSize: '14px', marginBottom: '12px' }}>Audit History</h3>
+          <div className="admin-table-wrap">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Report Title</th>
+                  <th>Generated</th>
+                  <th>Status</th>
+                  <th>Findings</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pastReports.map((r: any) => (
+                  <tr key={r._id}>
+                    <td><strong>{r.title}</strong></td>
+                    <td>{new Date(r.createdAt).toLocaleString()}</td>
+                    <td><span className="status-pill active">{r.reviewStatus}</span></td>
+                    <td>{r.summaryMetrics?.totalFindings || 0} issues</td>
+                    <td>
+                      <button className="text-button" onClick={async () => {
+                        const full = await request(`/integrity/reports/${r._id}`, token, undefined, 'GET');
+                        setCurrentReport(full);
+                      }}>View Report</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* =========================================================
+   PHASE 3: PRIVACY CONTROL CENTER & DATA DELETION
+   ========================================================= */
+function PrivacyPage({ token, user, projects, documents, revisions, citations, setMessage, setError, logout }: any) {
+  const [settings, setSettings] = useState<any>({ persistDocumentText: true, allowAiProcessing: true });
+  const [policies, setPolicies] = useState<any>(null);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [confirmGoogleDelete, setConfirmGoogleDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    request('/privacy/settings', token, undefined, 'GET')
+      .then(d => {
+        setSettings(d.settings);
+        setPolicies(d.policies);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleTogglePersistence(val: boolean) {
+    try {
+      const res = await request('/privacy/settings', token, { persistDocumentText: val }, 'PATCH');
+      setSettings(res.settings);
+      setMessage(`Manuscript persistence updated: ${val ? 'Enabled' : 'Disabled (Stateless Mode)'}`);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  async function handleToggleAiProcessing(val: boolean) {
+    try {
+      const res = await request('/privacy/settings', token, { allowAiProcessing: val }, 'PATCH');
+      setSettings(res.settings);
+      setMessage(`AI data processing preference updated: ${val ? 'Consented' : 'Revoked'}`);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  async function handleExportData() {
+    try {
+      const res = await fetch(`${API}/privacy/export`, {
+        method: 'POST',
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        credentials: 'include'
+      });
+      if (!res.ok) throw new Error('Data export failed.');
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `researchproof-data-export-${user?.id || 'account'}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setMessage('Account data export downloaded successfully.');
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  async function handleDeleteAccount() {
+    setDeleting(true);
+    try {
+      const res = await request('/privacy/delete-account', token, {
+        password: deletePassword || undefined,
+        confirm: confirmGoogleDelete || undefined
+      });
+      if (res.success) {
+        alert('Your account and research data have been permanently deleted.');
+        logout();
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <section className="analysis-page">
+      <div className="page-title-row">
+        <div>
+          <p className="eyebrow">PRIVACY BY DESIGN</p>
+          <h1>Privacy & Data Management</h1>
+          <p className="muted">Transparent controls over your research manuscripts, cloud retention, data exports, and deletion.</p>
+        </div>
+        <div className="page-title-icon"><ShieldAlert /></div>
+      </div>
+
+      <div className="stat-grid">
+        <div className="stat-card">
+          <span className="stat-label">Saved Documents</span>
+          <span className="stat-value">{documents?.length || 0}</span>
+          <span className="stat-sub">Manuscript drafts</span>
+        </div>
+        <div className="stat-card">
+          <span className="stat-label">Research Projects</span>
+          <span className="stat-value">{projects?.length || 0}</span>
+          <span className="stat-sub">Active project workspaces</span>
+        </div>
+        <div className="stat-card">
+          <span className="stat-label">Revision History</span>
+          <span className="stat-value">{revisions?.length || 0}</span>
+          <span className="stat-sub">Recorded edits</span>
+        </div>
+        <div className="stat-card">
+          <span className="stat-label">Citations Stored</span>
+          <span className="stat-value">{citations?.length || 0}</span>
+          <span className="stat-sub">Bibliographic entries</span>
+        </div>
+      </div>
+
+      <div className="settings-list panel" style={{ marginBottom: '24px' }}>
+        <div className="setting-row">
+          <div className="setting-icon"><History size={18} /></div>
+          <div className="setting-copy">
+            <strong>Manuscript Cloud Persistence</strong>
+            <p>When enabled, active document text and revision proposals are saved in your private MongoDB database. When disabled, the editor operates in stateless mode.</p>
+            {policies?.serverPersistEnforced && (
+              <small style={{ color: '#b45309', fontWeight: 600, display: 'block', marginTop: '4px' }}>
+                ⚠ Server policy overrides local preference: PERSIST_DOCUMENT_TEXT is globally disabled on this deployment.
+              </small>
+            )}
+          </div>
+          <label className="switch-label">
+            <input
+              type="checkbox"
+              checked={settings.persistDocumentText}
+              disabled={policies?.serverPersistEnforced}
+              onChange={e => handleTogglePersistence(e.target.checked)}
+            />
+            <span>{settings.persistDocumentText ? 'Active' : 'Disabled'}</span>
+          </label>
+        </div>
+
+        <div className="setting-row">
+          <div className="setting-icon"><Sparkles size={18} /></div>
+          <div className="setting-copy">
+            <strong>AI Provider Processing Consent</strong>
+            <p>Consent to transmitting selected paragraphs to configured LLM providers for academic revision. Zero manuscript text is retained by providers for model training.</p>
+          </div>
+          <label className="switch-label">
+            <input
+              type="checkbox"
+              checked={settings.allowAiProcessing}
+              onChange={e => handleToggleAiProcessing(e.target.checked)}
+            />
+            <span>{settings.allowAiProcessing ? 'Consented' : 'Opted Out'}</span>
+          </label>
+        </div>
+
+        <div className="setting-row">
+          <div className="setting-icon"><Download size={18} /></div>
+          <div className="setting-copy">
+            <strong>Download Complete Data Export (GDPR / CCPA)</strong>
+            <p>Receive a structured JSON archive containing your profile, projects, manuscripts, citations, and revision timeline. Excludes authentication secrets.</p>
+          </div>
+          <button className="secondary small" onClick={handleExportData}>
+            <Download size={13} /> Export My Data
+          </button>
+        </div>
+      </div>
+
+      {/* DANGER ZONE */}
+      <div className="danger-zone">
+        <h3>Permanent Account & Data Deletion</h3>
+        <p>
+          Deleting your account is permanent and irreversible. All your stored projects, documents, revisions, citations, and integrity audit records will be purged immediately from primary storage.
+        </p>
+        <button className="primary" style={{ background: '#b91c1c', borderColor: '#991b1b' }} onClick={() => setShowDeleteModal(true)}>
+          <Trash2 size={14} /> Delete My Account & Research Data
+        </button>
+      </div>
+
+      {/* DELETION CONFIRMATION MODAL */}
+      {showDeleteModal && (
+        <div className="modal-backdrop">
+          <div className="modal-box">
+            <h3 style={{ color: '#b91c1c' }}>Confirm Account Purge</h3>
+            <p>
+              Are you sure you want to delete account <strong>{user?.email}</strong>? All {documents?.length || 0} manuscripts and {citations?.length || 0} citations will be erased.
+            </p>
+
+            {user?.authProviders?.includes('email') ? (
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ fontSize: '11px', display: 'block', marginBottom: '6px', fontWeight: 600 }}>
+                  Enter your current password to confirm:
+                </label>
+                <input
+                  type="password"
+                  value={deletePassword}
+                  onChange={e => setDeletePassword(e.target.value)}
+                  placeholder="Your password"
+                  style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--surface2)', color: 'var(--text)' }}
+                />
+              </div>
+            ) : (
+              <label style={{ display: 'flex', gap: '8px', alignItems: 'center', fontSize: '11px', marginBottom: '16px' }}>
+                <input
+                  type="checkbox"
+                  checked={confirmGoogleDelete}
+                  onChange={e => setConfirmGoogleDelete(e.target.checked)}
+                />
+                I understand this Google-authenticated account and all data will be permanently purged.
+              </label>
+            )}
+
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => setShowDeleteModal(false)} disabled={deleting}>
+                Cancel
+              </button>
+              <button
+                className="primary"
+                style={{ background: '#b91c1c', borderColor: '#991b1b' }}
+                onClick={handleDeleteAccount}
+                disabled={deleting}
+              >
+                {deleting ? 'Deleting...' : 'Confirm Permanent Deletion'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* =========================================================
+   PHASE 3: ADMINISTRATOR OVERVIEW VIEW
+   ========================================================= */
+function AdminOverviewPage({ token, setError }: any) {
+  const [data, setData] = useState<any>(null);
+
+  useEffect(() => {
+    request('/admin/overview', token, undefined, 'GET')
+      .then(d => setData(d))
+      .catch(e => setError(e.message));
+  }, []);
+
+  if (!data) {
+    return (
+      <div className="analysis-page">
+        <div className="panel empty-state">Loading administrator metrics...</div>
+      </div>
+    );
+  }
+
+  return (
+    <section className="analysis-page">
+      <div className="page-title-row">
+        <div>
+          <p className="eyebrow">PLATFORM MANAGEMENT</p>
+          <h1>Administrator Overview</h1>
+          <p className="muted">Real database-backed platform telemetry, active accounts, and infrastructure status.</p>
+        </div>
+        <div className="page-title-icon"><Gauge /></div>
+      </div>
+
+      <div className="stat-grid">
+        <div className="stat-card">
+          <span className="stat-label">Total Users</span>
+          <span className="stat-value">{data.users?.total || 0}</span>
+          <span className="stat-sub">{data.users?.newToday || 0} registered today</span>
+        </div>
+        <div className="stat-card">
+          <span className="stat-label">Daily Active Users (DAU)</span>
+          <span className="stat-value" style={{ color: '#8876ee' }}>{data.users?.dau || 0}</span>
+          <span className="stat-sub">Active in last 24h</span>
+        </div>
+        <div className="stat-card">
+          <span className="stat-label">Weekly Active (WAU)</span>
+          <span className="stat-value">{data.users?.wau || 0}</span>
+          <span className="stat-sub">Active in last 7d</span>
+        </div>
+        <div className="stat-card">
+          <span className="stat-label">Monthly Active (MAU)</span>
+          <span className="stat-value">{data.users?.mau || 0}</span>
+          <span className="stat-sub">Active in last 30d</span>
+        </div>
+      </div>
+
+      <div className="stat-grid">
+        <div className="stat-card">
+          <span className="stat-label">Total Projects</span>
+          <span className="stat-value">{data.content?.projects || 0}</span>
+          <span className="stat-sub">Research projects</span>
+        </div>
+        <div className="stat-card">
+          <span className="stat-label">Total Documents</span>
+          <span className="stat-value">{data.content?.documents || 0}</span>
+          <span className="stat-sub">Cloud persisted manuscripts</span>
+        </div>
+        <div className="stat-card">
+          <span className="stat-label">Revisions Created</span>
+          <span className="stat-value">{data.content?.revisions || 0}</span>
+          <span className="stat-sub">AI & manual revisions</span>
+        </div>
+        <div className="stat-card">
+          <span className="stat-label">Integrity Reports</span>
+          <span className="stat-value">{data.content?.integrityReports || 0}</span>
+          <span className="stat-sub">Scientific audits</span>
+        </div>
+      </div>
+
+      <div className="panel" style={{ marginTop: '20px' }}>
+        <h3 style={{ fontSize: '14px', marginBottom: '14px' }}>System Infrastructure Status</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px', fontSize: '11px' }}>
+          <div><span style={{ color: 'var(--muted)' }}>Database: </span><strong>{data.system?.database}</strong></div>
+          <div><span style={{ color: 'var(--muted)' }}>AI Provider: </span><strong>{data.system?.aiProvider} ({data.system?.aiConfigured ? 'Ready' : 'Not configured'})</strong></div>
+          <div><span style={{ color: 'var(--muted)' }}>Node Engine: </span><strong>{data.system?.nodeVersion}</strong></div>
+          <div><span style={{ color: 'var(--muted)' }}>Server Clock: </span><strong>{new Date(data.system?.serverTime).toUTCString()}</strong></div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* =========================================================
+   PHASE 3: ADMINISTRATOR USER MANAGEMENT VIEW
+   ========================================================= */
+function AdminUsersPage({ token, currentUser, setMessage, setError }: any) {
+  const [users, setUsers] = useState<any[]>([]);
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [roleFilter, setRoleFilter] = useState('');
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState<any>(null);
+  const [targetUser, setTargetUser] = useState<any>(null);
+  const [suspensionReason, setSuspensionReason] = useState('');
+  const [showModal, setShowModal] = useState(false);
+
+  useEffect(() => {
+    fetchUsers();
+  }, [page, statusFilter, roleFilter]);
+
+  async function fetchUsers() {
+    try {
+      const q = new URLSearchParams({
+        page: String(page),
+        limit: '15',
+        ...(search ? { search } : {}),
+        ...(statusFilter ? { status: statusFilter } : {}),
+        ...(roleFilter ? { role: roleFilter } : {})
+      });
+      const res = await request(`/admin/users?${q.toString()}`, token, undefined, 'GET');
+      setUsers(res.users);
+      setPagination(res.pagination);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  async function handleToggleStatus() {
+    if (!targetUser) return;
+    try {
+      const nextStatus = targetUser.status === 'suspended' ? 'active' : 'suspended';
+      const res = await request(`/admin/users/${targetUser._id}/status`, token, {
+        status: nextStatus,
+        reason: suspensionReason || 'Administrative decision'
+      }, 'PATCH');
+      setMessage(res.message);
+      setShowModal(false);
+      setTargetUser(null);
+      setSuspensionReason('');
+      await fetchUsers();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  async function handleRevokeSessions(userId: string) {
+    if (!confirm('Revoke all active sessions for this user? They will be required to log in again.')) return;
+    try {
+      const res = await request(`/admin/users/${userId}/revoke-sessions`, token, undefined, 'POST');
+      setMessage(res.message);
+    } catch (err: any) {
+      setError(err.message);
+    }
+  }
+
+  return (
+    <section className="analysis-page">
+      <div className="page-title-row">
+        <div>
+          <p className="eyebrow">ACCESS CONTROL</p>
+          <h1>User Management</h1>
+          <p className="muted">Search users, view aggregate metadata, manage account status, and revoke sessions.</p>
+        </div>
+        <div className="page-title-icon"><FolderKanban /></div>
+      </div>
+
+      <div className="panel" style={{ marginBottom: '16px', display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+        <input
+          type="text"
+          placeholder="Search by email or name..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && fetchUsers()}
+          style={{ flex: 1, minWidth: '200px', padding: '8px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--surface2)', color: 'var(--text)', fontSize: '11px' }}
+        />
+        <select
+          value={statusFilter}
+          onChange={e => setStatusFilter(e.target.value)}
+          style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--surface2)', color: 'var(--text)', fontSize: '11px' }}
+        >
+          <option value="">All Statuses</option>
+          <option value="active">Active</option>
+          <option value="suspended">Suspended</option>
+        </select>
+        <select
+          value={roleFilter}
+          onChange={e => setRoleFilter(e.target.value)}
+          style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--surface2)', color: 'var(--text)', fontSize: '11px' }}
+        >
+          <option value="">All Roles</option>
+          <option value="researcher">Researcher</option>
+          <option value="reviewer">Reviewer</option>
+          <option value="admin">Administrator</option>
+        </select>
+        <button className="primary small" onClick={() => { setPage(1); fetchUsers(); }}>Search</button>
+      </div>
+
+      <div className="admin-table-wrap">
+        <table className="admin-table">
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Registered</th>
+              <th>Last Active</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((u: any) => (
+              <tr key={u._id}>
+                <td>
+                  <strong>{u.displayName || 'Researcher'}</strong>
+                  <div style={{ color: 'var(--muted)', fontSize: '10px' }}>{u.email}</div>
+                </td>
+                <td><span className={`status-pill ${u.role === 'admin' ? 'admin' : ''}`}>{u.role}</span></td>
+                <td><span className={`status-pill ${u.status === 'suspended' ? 'suspended' : 'active'}`}>{u.status}</span></td>
+                <td>{new Date(u.createdAt).toLocaleDateString()}</td>
+                <td>{new Date(u.lastActiveAt || u.createdAt).toLocaleDateString()}</td>
+                <td>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      className="text-button"
+                      onClick={() => {
+                        if (u._id === currentUser?.id) {
+                          alert('Administrative safety constraint: You cannot suspend your own account.');
+                          return;
+                        }
+                        setTargetUser(u);
+                        setShowModal(true);
+                      }}
+                    >
+                      {u.status === 'suspended' ? 'Reactivate' : 'Suspend'}
+                    </button>
+                    <button className="text-button" onClick={() => handleRevokeSessions(u._id)}>
+                      Revoke Sessions
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {showModal && targetUser && (
+        <div className="modal-backdrop">
+          <div className="modal-box">
+            <h3>{targetUser.status === 'suspended' ? 'Reactivate User Account' : 'Suspend User Account'}</h3>
+            <p>
+              Target user: <strong>{targetUser.email}</strong>
+            </p>
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ fontSize: '11px', fontWeight: 600, display: 'block', marginBottom: '6px' }}>
+                Mandatory Administrative Reason:
+              </label>
+              <textarea
+                value={suspensionReason}
+                onChange={e => setSuspensionReason(e.target.value)}
+                placeholder="State the reason for this action (recorded in audit logs)..."
+                rows={3}
+                style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--surface2)', color: 'var(--text)', fontSize: '11px' }}
+              />
+            </div>
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => { setShowModal(false); setTargetUser(null); }}>Cancel</button>
+              <button className="primary" onClick={handleToggleStatus} disabled={!suspensionReason.trim()}>
+                Confirm {targetUser.status === 'suspended' ? 'Reactivation' : 'Suspension'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/* =========================================================
+   PHASE 3: USAGE ANALYTICS VIEW
+   ========================================================= */
+function AdminAnalyticsPage({ token, setError }: any) {
+  const [features, setFeatures] = useState<any[]>([]);
+  const [errors, setErrors] = useState<any[]>([]);
+
+  useEffect(() => {
+    Promise.all([
+      request('/admin/analytics/features', token, undefined, 'GET').catch(() => []),
+      request('/admin/analytics/errors', token, undefined, 'GET').catch(() => [])
+    ]).then(([f, e]) => {
+      setFeatures(f);
+      setErrors(e);
+    }).catch(err => setError(err.message));
+  }, []);
+
+  const maxCount = Math.max(...features.map(f => f.count), 1);
+
+  return (
+    <section className="analysis-page">
+      <div className="page-title-row">
+        <div>
+          <p className="eyebrow">TELEMETRY & INSIGHTS</p>
+          <h1>Platform Usage Analytics</h1>
+          <p className="muted">Aggregate feature distribution, error trends, and provider requests.</p>
+        </div>
+        <div className="page-title-icon"><Activity /></div>
+      </div>
+
+      <div className="panel" style={{ marginBottom: '24px' }}>
+        <h3 style={{ fontSize: '14px', marginBottom: '16px' }}>Feature Request Distribution</h3>
+        {features.length ? features.map((f: any) => (
+          <div key={f.feature} className="chart-bar-row">
+            <span style={{ width: '140px', fontWeight: 600, textTransform: 'capitalize' }}>{f.feature}</span>
+            <div className="chart-bar-bg">
+              <div className="chart-bar-fill" style={{ width: `${Math.round((f.count / maxCount) * 100)}%` }} />
+            </div>
+            <span style={{ width: '60px', textAlign: 'right', color: 'var(--muted)' }}>{f.count} reqs</span>
+          </div>
+        )) : (
+          <div className="empty-state">No feature activity recorded yet.</div>
+        )}
+      </div>
+
+      <div className="panel">
+        <h3 style={{ fontSize: '14px', marginBottom: '14px' }}>Recent System Error Trends</h3>
+        {errors.length ? (
+          <div className="admin-table-wrap">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>Feature</th>
+                  <th>Error Category</th>
+                  <th>Duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                {errors.map((e: any, i: number) => (
+                  <tr key={i}>
+                    <td>{new Date(e.timestamp).toLocaleTimeString()}</td>
+                    <td>{e.feature}</td>
+                    <td style={{ color: '#b91c1c' }}>{e.errorCategory || 'Unknown'}</td>
+                    <td>{e.durationMs}ms</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div style={{ color: 'var(--muted)', fontSize: '11px' }}>Zero recorded platform errors. Operational stability is 100%.</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/* =========================================================
+   PHASE 3: PLATFORM AUDIT LOGS VIEW
+   ========================================================= */
+function AdminAuditLogsPage({ token, setError }: any) {
+  const [logs, setLogs] = useState<any[]>([]);
+
+  useEffect(() => {
+    request('/admin/audit-events', token, undefined, 'GET')
+      .then(d => setLogs(d.events || []))
+      .catch(e => setError(e.message));
+  }, []);
+
+  return (
+    <section className="analysis-page">
+      <div className="page-title-row">
+        <div>
+          <p className="eyebrow">SECURITY TRAIL</p>
+          <h1>Platform Audit Logs</h1>
+          <p className="muted">Append-only administrative audit records of status changes, exports, and session revocations.</p>
+        </div>
+        <div className="page-title-icon"><History /></div>
+      </div>
+
+      <div className="admin-table-wrap">
+        <table className="admin-table">
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Action</th>
+              <th>Resource</th>
+              <th>Target</th>
+              <th>Result</th>
+              <th>Reason / Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {logs.length ? logs.map((l: any) => (
+              <tr key={l._id}>
+                <td>{new Date(l.createdAt).toLocaleString()}</td>
+                <td><strong style={{ textTransform: 'uppercase', fontSize: '10px' }}>{l.action}</strong></td>
+                <td>{l.resourceType}</td>
+                <td>{l.targetId?.email || l.targetId || 'System'}</td>
+                <td><span className="status-pill active">{l.result || 'success'}</span></td>
+                <td>{l.reason || JSON.stringify(l.metadata || {})}</td>
+              </tr>
+            )) : (
+              <tr>
+                <td colSpan={6} style={{ textAlign: 'center', padding: '24px', color: 'var(--muted)' }}>
+                  No administrative events recorded yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
