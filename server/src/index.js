@@ -9,6 +9,8 @@ import mongoose from 'mongoose';
 import { z } from 'zod';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import cookieParser from 'cookie-parser';
+import { OAuth2Client } from 'google-auth-library';
 import { User, Project, Document, Revision, IntegrityReport, AuditEvent } from './models.js';
 import { requireAuth } from './middleware.js';
 import { assessWriting, findRepeatedPhrases, checkCitations, humanizeWithAI } from './services.js';
@@ -23,8 +25,81 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 24) {
 
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
 app.use(cors({ origin: true, credentials: true }));
+app.use(cookieParser());
 app.use(express.json({ limit: '1mb' }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 250, standardHeaders: true, legacyHeaders: false }));
+
+// Session Cookie Management (Section 5)
+function setSessionCookie(res, token) {
+  const isProduction = process.env.NODE_ENV === 'production';
+  res.cookie('rp_session', token, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax',
+    maxAge: 8 * 60 * 60 * 1000 // 8 hours
+  });
+}
+
+function clearSessionCookie(res) {
+  const isProduction = process.env.NODE_ENV === 'production';
+  res.clearCookie('rp_session', {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax'
+  });
+}
+
+// Google OAuth Verification (Section 2)
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+async function verifyGoogleToken(idToken) {
+  const expectedClientId = process.env.GOOGLE_CLIENT_ID;
+  let payload = null;
+
+  // 1. Primary: Verify cryptographically with official google-auth-library
+  if (expectedClientId && expectedClientId !== 'your-google-oauth-client-id.apps.googleusercontent.com') {
+    try {
+      const ticket = await googleClient.verifyIdToken({
+        idToken,
+        audience: expectedClientId
+      });
+      payload = ticket.getPayload();
+    } catch (err) {
+      console.warn('google-auth-library direct verification notice:', err.message);
+    }
+  }
+
+  // 2. Secondary fallback: Google public tokeninfo endpoint
+  if (!payload) {
+    const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Google token validation failed (${res.status}): ${body.slice(0, 150)}`);
+    }
+    payload = await res.json();
+  }
+
+  if (!payload || !payload.email) {
+    throw new Error('Google token did not contain an email address.');
+  }
+
+  if (payload.email_verified === false || payload.email_verified === 'false') {
+    throw new Error('Google email is not verified.');
+  }
+
+  return {
+    googleId: payload.sub,
+    email: payload.email.toLowerCase(),
+    displayName: payload.name || payload.given_name || payload.email.split('@')[0],
+    avatarUrl: payload.picture || '',
+    emailVerified: true
+  };
+}
+
+let googleTokenVerifier = verifyGoogleToken;
+export function setGoogleTokenVerifier(fn) {
+  googleTokenVerifier = fn || verifyGoogleToken;
+}
 
 // In-Memory Dev Store (automatic fallback when MongoDB is disconnected)
 const memUsers = new Map();
@@ -97,6 +172,38 @@ apiRouter.get('/health', (_req, res) => {
   });
 });
 
+// Usage Quota Middleware (Section 9)
+async function checkAiUsage(req, res, next) {
+  try {
+    const userId = req.user.id;
+    const now = new Date();
+
+    if (isDbConnected()) {
+      const user = await User.findById(userId);
+      if (!user) return res.status(401).json({ error: 'User not found.' });
+
+      const lastReset = user.usage?.lastResetDate ? new Date(user.usage.lastResetDate) : new Date(0);
+      const isNewDay = now.toDateString() !== lastReset.toDateString();
+
+      if (isNewDay) {
+        user.usage = { dailyRequests: 1, dailyLimit: user.usage?.dailyLimit || 50, lastResetDate: now };
+        await user.save();
+      } else {
+        if ((user.usage?.dailyRequests || 0) >= (user.usage?.dailyLimit || 50)) {
+          return res.status(429).json({
+            error: 'Daily AI revision quota exceeded. Limit will reset at midnight.',
+            dailyLimit: user.usage?.dailyLimit || 50
+          });
+        }
+        await User.findByIdAndUpdate(userId, { $inc: { 'usage.dailyRequests': 1 } });
+      }
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
 // Auth Routes
 apiRouter.post('/auth/register', async (req, res, next) => {
   try {
@@ -107,20 +214,46 @@ apiRouter.post('/auth/register', async (req, res, next) => {
     if (isDbConnected()) {
       if (await User.findOne({ email })) return res.status(409).json({ error: 'An account with this email already exists.' });
       const passwordHash = await bcrypt.hash(parsed.data.password, 12);
-      const user = await User.create({ email, passwordHash });
+      const user = await User.create({
+        email,
+        passwordHash,
+        displayName: email.split('@')[0],
+        authProviders: ['email'],
+        lastLoginAt: new Date()
+      });
       const token = jwt.sign({ id: user._id.toString(), email: user.email }, jwtSecret, { expiresIn: '8h' });
+      setSessionCookie(res, token);
       await recordAudit(user._id, 'USER_REGISTERED', 'User', user._id);
-      return res.status(201).json({ token, user: { id: user._id, email: user.email } });
+      return res.status(201).json({
+        token,
+        user: { id: user._id, email: user.email, displayName: user.displayName, avatarUrl: user.avatarUrl, role: user.role, status: user.status }
+      });
     }
 
     // In-memory fallback
     if (memUsers.has(email)) return res.status(409).json({ error: 'An account with this email already exists.' });
     const passwordHash = await bcrypt.hash(parsed.data.password, 12);
     const userId = new mongoose.Types.ObjectId().toString();
-    const newUser = { _id: userId, id: userId, email, passwordHash, createdAt: new Date() };
+    const newUser = {
+      _id: userId,
+      id: userId,
+      email,
+      passwordHash,
+      displayName: email.split('@')[0],
+      avatarUrl: '',
+      authProviders: ['email'],
+      role: 'researcher',
+      status: 'active',
+      createdAt: new Date(),
+      lastLoginAt: new Date()
+    };
     memUsers.set(email, newUser);
     const token = jwt.sign({ id: userId, email }, jwtSecret, { expiresIn: '8h' });
-    res.status(201).json({ token, user: { id: userId, email } });
+    setSessionCookie(res, token);
+    res.status(201).json({
+      token,
+      user: { id: userId, email, displayName: newUser.displayName, avatarUrl: '', role: 'researcher', status: 'active' }
+    });
   } catch (e) { next(e); }
 });
 
@@ -132,26 +265,215 @@ apiRouter.post('/auth/login', async (req, res, next) => {
 
     if (isDbConnected()) {
       const user = await User.findOne({ email });
-      if (!user || !(await bcrypt.compare(parsed.data.password, user.passwordHash))) {
+      if (!user || !user.passwordHash || !(await bcrypt.compare(parsed.data.password, user.passwordHash))) {
         return res.status(401).json({ error: 'Invalid email or password.' });
       }
+      if (user.status === 'suspended') {
+        return res.status(403).json({ error: 'Account is suspended. Please contact your administrator.' });
+      }
+      user.lastLoginAt = new Date();
+      await user.save();
       const token = jwt.sign({ id: user._id.toString(), email: user.email }, jwtSecret, { expiresIn: '8h' });
+      setSessionCookie(res, token);
       await recordAudit(user._id, 'USER_LOGIN', 'User', user._id);
-      return res.json({ token, user: { id: user._id, email: user.email } });
+      return res.json({
+        token,
+        user: { id: user._id, email: user.email, displayName: user.displayName || user.email.split('@')[0], avatarUrl: user.avatarUrl, role: user.role, status: user.status }
+      });
     }
 
     // In-memory fallback
     const user = memUsers.get(email);
-    if (!user || !(await bcrypt.compare(parsed.data.password, user.passwordHash))) {
+    if (!user || !user.passwordHash || !(await bcrypt.compare(parsed.data.password, user.passwordHash))) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
-    const token = jwt.sign({ id: user.id, email: user.email }, jwtSecret, { expiresIn: '8h' });
-    res.json({ token, user: { id: user.id, email: user.email } });
+    if (user.status === 'suspended') {
+      return res.status(403).json({ error: 'Account is suspended. Please contact your administrator.' });
+    }
+    user.lastLoginAt = new Date();
+    const token = jwt.sign({ id: user.id || user._id, email: user.email }, jwtSecret, { expiresIn: '8h' });
+    setSessionCookie(res, token);
+    res.json({
+      token,
+      user: { id: user.id || user._id, email: user.email, displayName: user.displayName || user.email.split('@')[0], avatarUrl: user.avatarUrl || '', role: user.role || 'researcher', status: user.status || 'active' }
+    });
   } catch (e) { next(e); }
 });
 
-apiRouter.get('/me', requireAuth, (req, res) => {
-  res.json({ user: { id: req.user.id, email: req.user.email } });
+// Google Authentication (Section 2 & 4)
+apiRouter.post('/auth/google', async (req, res, next) => {
+  try {
+    const googleSchema = z.object({ credential: z.string().min(1, 'Google credential token is required.') });
+    const parsed = googleSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid Google credential.' });
+    }
+
+    // Verify token cryptographically
+    const googleProfile = await googleTokenVerifier(parsed.data.credential);
+    const { googleId, email, displayName, avatarUrl } = googleProfile;
+
+    let user;
+    if (isDbConnected()) {
+      // 1. Search by Google ID first
+      user = await User.findOne({ googleId });
+
+      // 2. If not found by googleId, check by email to link account
+      if (!user) {
+        user = await User.findOne({ email });
+        if (user) {
+          user.googleId = googleId;
+          if (!user.authProviders?.includes('google')) {
+            user.authProviders = [...(user.authProviders || []), 'google'];
+          }
+          if (!user.avatarUrl && avatarUrl) user.avatarUrl = avatarUrl;
+          if (!user.displayName && displayName) user.displayName = displayName;
+          user.lastLoginAt = new Date();
+          await user.save();
+          await recordAudit(user._id, 'USER_ACCOUNT_LINKED_GOOGLE', 'User', user._id);
+        } else {
+          // 3. Register new Google user
+          user = await User.create({
+            googleId,
+            email,
+            displayName,
+            avatarUrl,
+            authProviders: ['google'],
+            role: 'researcher',
+            status: 'active',
+            lastLoginAt: new Date()
+          });
+          await recordAudit(user._id, 'USER_REGISTERED_GOOGLE', 'User', user._id);
+        }
+      } else {
+        // Update profile picture and last login
+        if (avatarUrl && !user.avatarUrl) user.avatarUrl = avatarUrl;
+        user.lastLoginAt = new Date();
+        await user.save();
+      }
+
+      // Check account status
+      if (user.status === 'suspended') {
+        return res.status(403).json({ error: 'Your account is suspended. Please contact your administrator.' });
+      }
+
+      const token = jwt.sign({ id: user._id.toString(), email: user.email }, jwtSecret, { expiresIn: '8h' });
+      setSessionCookie(res, token);
+      await recordAudit(user._id, 'USER_LOGIN_GOOGLE', 'User', user._id);
+
+      return res.json({
+        token,
+        user: {
+          id: user._id,
+          email: user.email,
+          displayName: user.displayName || displayName,
+          avatarUrl: user.avatarUrl || avatarUrl,
+          authProviders: user.authProviders || ['google'],
+          role: user.role,
+          status: user.status,
+          usage: user.usage || { dailyRequests: 0, dailyLimit: 50 }
+        }
+      });
+    }
+
+    // In-memory fallback
+    user = [...memUsers.values()].find(u => u.googleId === googleId);
+    if (!user) {
+      user = memUsers.get(email);
+      if (user) {
+        user.googleId = googleId;
+        user.avatarUrl = avatarUrl || user.avatarUrl;
+        if (!user.authProviders?.includes('google')) {
+          user.authProviders = [...(user.authProviders || ['email']), 'google'];
+        }
+        user.lastLoginAt = new Date();
+      } else {
+        const userId = new mongoose.Types.ObjectId().toString();
+        user = {
+          _id: userId,
+          id: userId,
+          googleId,
+          email,
+          displayName,
+          avatarUrl,
+          authProviders: ['google'],
+          role: 'researcher',
+          status: 'active',
+          usage: { dailyRequests: 0, dailyLimit: 50 },
+          createdAt: new Date(),
+          lastLoginAt: new Date()
+        };
+        memUsers.set(email, user);
+      }
+    }
+
+    if (user.status === 'suspended') {
+      return res.status(403).json({ error: 'Your account is suspended. Please contact your administrator.' });
+    }
+
+    const token = jwt.sign({ id: user._id || user.id, email: user.email }, jwtSecret, { expiresIn: '8h' });
+    setSessionCookie(res, token);
+
+    res.json({
+      token,
+      user: {
+        id: user._id || user.id,
+        email: user.email,
+        displayName: user.displayName || displayName,
+        avatarUrl: user.avatarUrl || avatarUrl,
+        authProviders: user.authProviders || ['google'],
+        role: user.role || 'researcher',
+        status: user.status || 'active',
+        usage: user.usage || { dailyRequests: 0, dailyLimit: 50 }
+      }
+    });
+  } catch (err) {
+    console.error('Google authentication error:', err.message);
+    res.status(401).json({ error: err.message || 'Google authentication failed. Please try again.' });
+  }
+});
+
+// Logout endpoint (Section 4 & 5)
+apiRouter.post('/auth/logout', (_req, res) => {
+  clearSessionCookie(res);
+  res.json({ success: true, message: 'Logged out successfully.' });
+});
+
+// Profile endpoints
+apiRouter.get(['/auth/me', '/me'], requireAuth, async (req, res) => {
+  try {
+    if (isDbConnected()) {
+      const user = await User.findById(req.user.id).select('-passwordHash').lean();
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      return res.json({
+        user: {
+          id: user._id,
+          email: user.email,
+          displayName: user.displayName || user.email.split('@')[0],
+          avatarUrl: user.avatarUrl || '',
+          role: user.role || 'researcher',
+          status: user.status || 'active',
+          usage: user.usage || { dailyRequests: 0, dailyLimit: 50 }
+        }
+      });
+    }
+
+    const user = [...memUsers.values()].find(u => (u._id === req.user.id || u.id === req.user.id));
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    res.json({
+      user: {
+        id: user._id || user.id,
+        email: user.email,
+        displayName: user.displayName || user.email.split('@')[0],
+        avatarUrl: user.avatarUrl || '',
+        role: user.role || 'researcher',
+        status: user.status || 'active',
+        usage: { dailyRequests: 0, dailyLimit: 50 }
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to retrieve profile.' });
+  }
 });
 
 // Writing Analysis
@@ -182,8 +504,8 @@ apiRouter.post(['/analyze/citations', '/analysis/citations'], requireAuth, async
   } catch (e) { next(e); }
 });
 
-// AI Revision / Humanizer
-apiRouter.post(['/humanize', '/revisions/humanize'], requireAuth, async (req, res, next) => {
+// AI Revision / Humanizer (with usage quota enforcement - Section 9)
+apiRouter.post(['/humanize', '/revisions/humanize'], requireAuth, checkAiUsage, async (req, res, next) => {
   try {
     const schema = textSchema.extend({
       style: z.string().max(60).optional(),
@@ -529,10 +851,13 @@ app.use((err, _req, res, _next) => {
 });
 
 // Start Express server
-app.listen(port, () => {
-  console.log(`ResearchProof API listening on http://localhost:${port}`);
-  console.log(`Endpoints available at /api and /api/v1`);
-});
+const isTestEnv = process.env.NODE_ENV === 'test' || process.argv.some(a => a.includes('test'));
+if (!isTestEnv) {
+  app.listen(port, () => {
+    console.log(`ResearchProof API listening on http://localhost:${port}`);
+    console.log(`Endpoints available at /api and /api/v1`);
+  });
+}
 
 // Connect to MongoDB if URI is configured (non-blocking fallback)
 const mongoUri = process.env.MONGODB_URI;
@@ -549,3 +874,5 @@ if (mongoUri && !mongoUri.includes('localhost:5173')) {
 } else {
   console.log(`Running with In-Memory Dev Store fallback: All features (Register, Login, Projects, Revisions) are fully functional!`);
 }
+
+export { app };

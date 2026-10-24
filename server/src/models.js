@@ -2,11 +2,22 @@ import mongoose from 'mongoose';
 
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-  passwordHash: { type: String, required: true },
+  passwordHash: { type: String, default: null }, // Optional for Google-only users
+  googleId: { type: String, default: null },
   displayName: { type: String, default: '' },
+  avatarUrl: { type: String, default: '' },
+  authProviders: [{ type: String, enum: ['email', 'google'], default: 'email' }],
   role: { type: String, enum: ['researcher', 'reviewer', 'admin'], default: 'researcher' },
-  status: { type: String, enum: ['active', 'suspended', 'pending'], default: 'active' }
+  status: { type: String, enum: ['active', 'suspended', 'pending'], default: 'active' },
+  lastLoginAt: { type: Date, default: Date.now },
+  usage: {
+    dailyRequests: { type: Number, default: 0 },
+    dailyLimit: { type: Number, default: 50 },
+    lastResetDate: { type: Date, default: Date.now }
+  }
 }, { timestamps: true });
+
+userSchema.index({ googleId: 1 }, { unique: true, sparse: true });
 
 const projectSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },

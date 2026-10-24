@@ -1,13 +1,24 @@
 import jwt from 'jsonwebtoken';
 
 export function requireAuth(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (!token) return res.status(401).json({ error: 'Authentication required.' });
+  // Support both secure HttpOnly cookie and Bearer authorization header
+  let token = req.cookies?.rp_session || '';
+  if (!token) {
+    const header = req.headers.authorization || '';
+    if (header.startsWith('Bearer ')) {
+      token = header.slice(7);
+    }
+  }
+
+  if (!token) {
+    return res.status(401).json({ error: 'Authentication required. Please sign in.' });
+  }
+
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    const secret = process.env.JWT_SECRET || 'researchproof-super-secure-jwt-secret-key-32chars';
+    req.user = jwt.verify(token, secret);
     next();
-  } catch {
+  } catch (err) {
     return res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
   }
 }

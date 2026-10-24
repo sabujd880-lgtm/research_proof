@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
 import {
   Activity, BookOpenCheck, Check, ChevronDown, CircleHelp, Clock3, FileCheck2,
   FileText, FolderKanban, Gauge, History, LayoutDashboard, LogOut, Moon, PanelLeft,
@@ -6,7 +7,27 @@ import {
 } from 'lucide-react';
 
 const API = import.meta.env.VITE_API_URL || (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1' ? '/api' : 'http://localhost:4000/api');
-type User = { id: string; email: string };
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+const isGoogleConfigured = Boolean(
+  GOOGLE_CLIENT_ID &&
+  !GOOGLE_CLIENT_ID.includes('your-google-oauth-client-id') &&
+  GOOGLE_CLIENT_ID.trim().length > 10
+);
+
+type User = {
+  id: string;
+  email: string;
+  displayName?: string;
+  avatarUrl?: string;
+  authProviders?: string[];
+  role?: string;
+  status?: string;
+  usage?: {
+    dailyRequests: number;
+    dailyLimit: number;
+    lastResetDate?: string;
+  };
+};
 type Revision = { _id: string; mode: string; summary: string; createdAt: string; originalText: string; revisedText: string };
 type Project = { _id: string; title: string; description: string; updatedAt: string };
 
@@ -15,7 +36,11 @@ const sampleText = `The present study aims to examine the relationship between t
 async function request(path: string, token: string, body?: unknown, method = 'POST') {
   const response = await fetch(`${API}${path}`, {
     method,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    credentials: 'include',
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   });
   const data = await response.json().catch(() => ({}));
@@ -49,14 +74,20 @@ export default function App() {
   const [showProjectForm, setShowProjectForm] = useState(false);
 
   useEffect(() => {
-    if (!token) return;
-    request('/me', token, undefined, 'GET')
+    // Attempt /auth/me with cookies and/or token
+    request('/auth/me', token, undefined, 'GET')
       .then((d) => setUser(d.user))
-      .catch(() => { localStorage.removeItem('rp_token'); setToken(''); setUser(null); });
+      .catch(() => {
+        if (token) {
+          localStorage.removeItem('rp_token');
+          setToken('');
+        }
+        setUser(null);
+      });
   }, [token]);
 
   async function refreshData() {
-    if (!token) return;
+    if (!token && !user) return;
     try {
       const [p, r] = await Promise.all([
         request('/projects', token, undefined, 'GET'),
@@ -71,17 +102,57 @@ export default function App() {
     e.preventDefault(); setAuthError('');
     try {
       const d = await fetch(`${API}/auth/${authMode}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ email, password })
       });
       const result = await d.json();
       if (!d.ok) throw new Error(result.error || 'Authentication failed.');
-      localStorage.setItem('rp_token', result.token); setToken(result.token); setUser(result.user);
+      localStorage.setItem('rp_token', result.token);
+      setToken(result.token);
+      setUser(result.user);
     } catch (e: any) { setAuthError(e.message); }
   }
-  function logout() {
-    localStorage.removeItem('rp_token'); setToken(''); setUser(null); setAssessment(null); setOriginality(null); setCitations(null);
+
+  async function handleGoogleSuccess(credentialResponse: any) {
+    setAuthError('');
+    try {
+      if (!credentialResponse?.credential) {
+        throw new Error('No credential token received from Google.');
+      }
+      const d = await fetch(`${API}/auth/google`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ credential: credentialResponse.credential })
+      });
+      const result = await d.json();
+      if (!d.ok) throw new Error(result.error || 'Google authentication failed.');
+      localStorage.setItem('rp_token', result.token);
+      setToken(result.token);
+      setUser(result.user);
+    } catch (err: any) {
+      setAuthError(err.message || 'Google sign-in failed');
+    }
   }
+
+  function handleGoogleError() {
+    setAuthError('Google sign-in was cancelled or encountered an error.');
+  }
+
+  async function logout() {
+    try {
+      await fetch(`${API}/auth/logout`, { method: 'POST', credentials: 'include' });
+    } catch (_) {}
+    localStorage.removeItem('rp_token');
+    setToken('');
+    setUser(null);
+    setAssessment(null);
+    setOriginality(null);
+    setCitations(null);
+  }
+
   async function runAction(action: string) {
     setBusy(true); setError(''); setMessage('');
     try {
@@ -129,22 +200,58 @@ export default function App() {
   }
   const wordCount = useMemo(() => text.trim() ? text.trim().split(/\s+/).length : 0, [text]);
 
-  if (!user) return <div className={`auth-page ${dark ? 'dark' : ''}`}>
-    <div className="auth-card">
-      <div className="brand-mark"><ShieldCheck size={25} /></div>
-      <p className="eyebrow">ACADEMIC WORKSPACE</p>
-      <h1>ResearchProof <span>AI</span></h1>
-      <p className="muted">A clearer writing process. A stronger research record.</p>
-      <form onSubmit={authenticate} className="auth-form">
-        <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@university.edu" /></label>
-        <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={10} placeholder="At least 10 characters" /></label>
-        {authError && <div className="alert error">{authError}</div>}
-        <button className="primary full" type="submit">{authMode === 'register' ? 'Create secure account' : 'Sign in'} <span>→</span></button>
-      </form>
-      <p className="switch-auth">{authMode === 'register' ? 'Already registered?' : 'New to ResearchProof?'} <button className="text-button" onClick={() => setAuthMode(authMode === 'register' ? 'login' : 'register')}>{authMode === 'register' ? 'Sign in' : 'Create account'}</button></p>
-      <div className="privacy-note"><ShieldCheck size={16} /> Your research text is not saved to revision history unless you opt in.</div>
-    </div>
-  </div>;
+  if (!user) {
+    const authContent = (
+      <div className="auth-card">
+        <div className="brand-mark"><ShieldCheck size={25} /></div>
+        <p className="eyebrow">ACADEMIC WORKSPACE</p>
+        <h1>ResearchProof <span>AI</span></h1>
+        <p className="muted">A clearer writing process. A stronger research record.</p>
+
+        {isGoogleConfigured ? (
+          <div className="google-btn-wrap">
+            <GoogleLogin
+              onSuccess={handleGoogleSuccess}
+              onError={handleGoogleError}
+              theme={dark ? 'filled_black' : 'outline'}
+              shape="rectangular"
+              size="large"
+              width="340"
+              text="continue_with"
+            />
+          </div>
+        ) : (
+          <div className="google-notice">
+            <strong>Google Sign-In Ready</strong>
+            <span>Set <code>VITE_GOOGLE_CLIENT_ID</code> in client/.env to activate one-click Google Sign-In.</span>
+          </div>
+        )}
+
+        <div className="auth-divider">or continue with email</div>
+
+        <form onSubmit={authenticate} className="auth-form">
+          <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@university.edu" /></label>
+          <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={10} placeholder="At least 10 characters" /></label>
+          {authError && <div className="alert error">{authError}</div>}
+          <button className="primary full" type="submit">{authMode === 'register' ? 'Create secure account' : 'Sign in'} <span>→</span></button>
+        </form>
+        <p className="switch-auth">{authMode === 'register' ? 'Already registered?' : 'New to ResearchProof?'} <button className="text-button" onClick={() => setAuthMode(authMode === 'register' ? 'login' : 'register')}>{authMode === 'register' ? 'Sign in' : 'Create account'}</button></p>
+        <div className="privacy-note"><ShieldCheck size={16} /> Your research text is not saved to revision history unless you opt in.</div>
+      </div>
+    );
+
+    return (
+      <div className={`auth-page ${dark ? 'dark' : ''}`}>
+        {isGoogleConfigured ? (
+          <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+            {authContent}
+          </GoogleOAuthProvider>
+        ) : (
+          authContent
+        )}
+      </div>
+    );
+  }
 
   const nav = [
     { name: 'Dashboard', icon: LayoutDashboard, group: 'WORKSPACE' },
@@ -161,9 +268,34 @@ export default function App() {
   return <div className={`app-shell ${dark ? 'dark' : ''}`}>
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark"><ShieldCheck size={20} /></div><div><strong>ResearchProof <span>AI</span></strong><small>ACADEMIC INTEGRITY</small></div><button className="icon-button mobile-menu" aria-label="Toggle sidebar"><PanelLeft size={18} /></button></div>
-      <div className="workspace-pill"><div className="avatar">{user.email[0]?.toUpperCase()}</div><div><strong>Research workspace</strong><small>Personal account</small></div><ChevronDown size={15} /></div>
+      <div className="workspace-pill">
+        {user.avatarUrl ? (
+          <img src={user.avatarUrl} alt={user.displayName || user.email} className="avatar-img" />
+        ) : (
+          <div className="avatar">{(user.displayName || user.email)[0]?.toUpperCase()}</div>
+        )}
+        <div>
+          <strong>{user.displayName || 'Research workspace'}</strong>
+          <small>{user.email}</small>
+        </div>
+        <ChevronDown size={15} />
+      </div>
       <nav>{groups.map(group => <div className="nav-group" key={group}><p>{group}</p>{nav.filter(n => n.group === group).map(item => <button key={item.name} onClick={() => setSection(item.name)} className={`nav-item ${section === item.name ? 'active' : ''}`}><item.icon size={17} /><span>{item.name}</span>{item.name === 'History' && revisions.length > 0 && <small className="nav-count">{revisions.length}</small>}</button>)}</div>)}</nav>
-      <div className="sidebar-bottom"><div className="integrity-card"><div className="integrity-icon"><ShieldCheck size={18} /></div><strong>Research integrity first</strong><p>AI suggestions are drafts. You remain the author and final reviewer.</p><button onClick={() => setSection('Settings')}>Privacy & settings <span>↗</span></button></div><div className="user-row"><div className="avatar">{user.email[0]?.toUpperCase()}</div><div className="user-meta"><strong>{user.email.split('@')[0]}</strong><small>{user.email}</small></div><button className="icon-button" onClick={logout} title="Sign out"><LogOut size={17} /></button></div></div>
+      <div className="sidebar-bottom">
+        <div className="integrity-card"><div className="integrity-icon"><ShieldCheck size={18} /></div><strong>Research integrity first</strong><p>AI suggestions are drafts. You remain the author and final reviewer.</p><button onClick={() => setSection('Settings')}>Privacy & settings <span>↗</span></button></div>
+        <div className="user-row">
+          {user.avatarUrl ? (
+            <img src={user.avatarUrl} alt={user.displayName || user.email} className="avatar-img" />
+          ) : (
+            <div className="avatar">{(user.displayName || user.email)[0]?.toUpperCase()}</div>
+          )}
+          <div className="user-meta">
+            <strong>{user.displayName || user.email.split('@')[0]}</strong>
+            <small>{user.email}</small>
+          </div>
+          <button className="icon-button" onClick={logout} title="Sign out"><LogOut size={17} /></button>
+        </div>
+      </div>
     </aside>
     <main className="main-area">
       <header className="topbar"><div className="breadcrumb"><span>Workspace</span><span className="slash">/</span><strong>{section}</strong></div><div className="top-actions"><div className="secure-label"><span className="green-dot"></span> Private workspace</div><button className="icon-button" onClick={() => setDark(!dark)} title="Toggle theme">{dark ? <Sun size={18} /> : <Moon size={18} />}</button><button className="help-button" onClick={() => setSection('Settings')}><CircleHelp size={17} /> Help & privacy</button></div></header>
@@ -181,7 +313,7 @@ export default function App() {
         {section === 'Citation Checker' && <AnalysisPage title="Citation consistency" subtitle="Check basic author-year citation and reference-list patterns." icon={<BookOpenCheck />} run={() => runAction('citations')} busy={busy} result={citations} text={text} setText={setText} exportText={exportText} />}
         {section === 'Projects' && <Projects projects={projects} showForm={showProjectForm} setShowForm={setShowProjectForm} title={projectTitle} setTitle={setProjectTitle} createProject={createProject} deleteProject={deleteProject} />}
         {section === 'History' && <HistoryPage revisions={revisions} />}
-        {section === 'Settings' && <SettingsPage dark={dark} setDark={setDark} persist={persist} setPersist={setPersist} logout={logout} />}
+        {section === 'Settings' && <SettingsPage user={user} dark={dark} setDark={setDark} persist={persist} setPersist={setPersist} logout={logout} />}
       </div>
     </main>
   </div>;
@@ -264,9 +396,29 @@ function HistoryPage({ revisions }: { revisions: Revision[] }) {
     {selected && <div className="comparison-grid"><div className="panel"><h3>Original</h3><p className="history-text">{selected.originalText}</p></div><div className="panel"><h3>Revised</h3><p className="history-text">{selected.revisedText}</p></div></div>}
   </section>;
 }
-function SettingsPage({ dark, setDark, persist, setPersist, logout }: any) {
+function SettingsPage({ user, dark, setDark, persist, setPersist, logout }: any) {
   return <section className="analysis-page"><div className="page-title-row"><div><p className="eyebrow">PREFERENCES</p><h1>Settings & privacy</h1><p className="muted">Choose how ResearchProof AI behaves in your workspace.</p></div><div className="page-title-icon"><Settings2 /></div></div>
-    <div className="settings-list panel"><div className="setting-row"><div className="setting-icon"><Sun size={18} /></div><div className="setting-copy"><strong>Appearance</strong><p>Choose the workspace colour theme.</p></div><button className="secondary small" onClick={() => setDark(!dark)}>{dark ? 'Dark mode' : 'Light mode'} · Toggle</button></div>
+    <div className="settings-list panel">
+      <div className="setting-row">
+        <div className="setting-icon"><ShieldCheck size={18} /></div>
+        <div className="setting-copy">
+          <strong>Account & Identity</strong>
+          <p>Signed in as <strong>{user?.email}</strong> {user?.displayName ? `(${user.displayName})` : ''} · Role: <strong>{user?.role || 'user'}</strong> · Status: <strong>{user?.status || 'active'}</strong></p>
+          <div style={{ marginTop: '8px' }}>
+            {(user?.authProviders || ['email']).map((p: string) => (
+              <span key={p} className="provider-tag">{p === 'google' ? '✓ Google Connected' : '✓ Password Auth'}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="setting-row">
+        <div className="setting-icon"><Gauge size={18} /></div>
+        <div className="setting-copy">
+          <strong>Daily AI Quota</strong>
+          <p>Daily AI revisions: <strong>{user?.usage?.dailyRequests || 0} / {user?.usage?.dailyLimit || 50}</strong> used today (Resets daily at 00:00 UTC).</p>
+        </div>
+      </div>
+      <div className="setting-row"><div className="setting-icon"><Sun size={18} /></div><div className="setting-copy"><strong>Appearance</strong><p>Choose the workspace colour theme.</p></div><button className="secondary small" onClick={() => setDark(!dark)}>{dark ? 'Dark mode' : 'Light mode'} · Toggle</button></div>
       <div className="setting-row"><div className="setting-icon"><History size={18} /></div><div className="setting-copy"><strong>Revision history default</strong><p>When enabled, humanizer runs can be saved if you select the save option.</p></div><label className="switch-label"><input type="checkbox" checked={persist} onChange={e => setPersist(e.target.checked)} /><span>{persist ? 'On' : 'Off'}</span></label></div>
       <div className="setting-row"><div className="setting-icon"><ShieldCheck size={18} /></div><div className="setting-copy"><strong>Text processing & privacy</strong><p>Text is sent to your configured AI provider when you run humanization. Review that provider’s data policy before submitting sensitive research data. Analysis endpoints run on your server.</p></div></div>
       <div className="setting-row"><div className="setting-icon"><CircleHelp size={18} /></div><div className="setting-copy"><strong>Assessment limitations</strong><p>AI indicators and citation checks are limited review aids, not proof of authorship, plagiarism, or source validity.</p></div></div>
