@@ -7,8 +7,10 @@ const userSchema = new mongoose.Schema({
   displayName: { type: String, default: '' },
   avatarUrl: { type: String, default: '' },
   authProviders: [{ type: String, enum: ['email', 'google'], default: 'email' }],
+  emailVerified: { type: Boolean, default: true },
   role: { type: String, enum: ['researcher', 'reviewer', 'admin'], default: 'researcher' },
   status: { type: String, enum: ['active', 'suspended', 'pending'], default: 'active' },
+  tokenVersion: { type: Number, default: 1 }, // Used for database-backed server-side session revocation
   lastLoginAt: { type: Date, default: Date.now },
   usage: {
     dailyRequests: { type: Number, default: 0 },
@@ -18,6 +20,17 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 userSchema.index({ googleId: 1 }, { unique: true, sparse: true });
+
+// Section 6: Free Usage Limit Collection
+const usageRecordSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  feature: { type: String, enum: ['rewrite', 'analysis'], required: true },
+  quotaWindow: { type: String, required: true }, // UTC 'YYYY-MM-DD'
+  usedCount: { type: Number, default: 0, min: 0 },
+  reservedCount: { type: Number, default: 0, min: 0 }
+}, { timestamps: true });
+
+usageRecordSchema.index({ userId: 1, feature: 1, quotaWindow: 1 }, { unique: true });
 
 const projectSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -84,3 +97,4 @@ export const Document = mongoose.model('Document', documentSchema);
 export const Revision = mongoose.model('Revision', revisionSchema);
 export const IntegrityReport = mongoose.model('IntegrityReport', integrityReportSchema);
 export const AuditEvent = mongoose.model('AuditEvent', auditEventSchema);
+export const UsageRecord = mongoose.model('UsageRecord', usageRecordSchema);

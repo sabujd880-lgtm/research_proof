@@ -68,6 +68,7 @@ export default function App() {
   const [citations, setCitations] = useState<any>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [revisions, setRevisions] = useState<Revision[]>([]);
+  const [usage, setUsage] = useState<any>(null);
   const [projectTitle, setProjectTitle] = useState('');
   const [dark, setDark] = useState(true);
   const [persist, setPersist] = useState(false);
@@ -89,11 +90,14 @@ export default function App() {
   async function refreshData() {
     if (!token && !user) return;
     try {
-      const [p, r] = await Promise.all([
+      const [p, r, u] = await Promise.all([
         request('/projects', token, undefined, 'GET'),
-        request('/revisions', token, undefined, 'GET')
+        request('/revisions', token, undefined, 'GET'),
+        request('/usage/me', token, undefined, 'GET').catch(() => null)
       ]);
-      setProjects(p); setRevisions(r);
+      setProjects(p);
+      setRevisions(r);
+      if (u) setUsage(u);
     } catch (e: any) { setError(e.message); }
   }
   useEffect(() => { if (user) refreshData(); }, [user]);
@@ -128,12 +132,32 @@ export default function App() {
         body: JSON.stringify({ credential: credentialResponse.credential })
       });
       const result = await d.json();
-      if (!d.ok) throw new Error(result.error || 'Google authentication failed.');
+      if (!d.ok) {
+        if (result.code === 'ACCOUNT_LINKING_REQUIRED') {
+          setAuthMode('login');
+          if (result.email) setEmail(result.email);
+          throw new Error('An account with this email already exists using password authentication. Please sign in with your password to link your Google account.');
+        }
+        throw new Error(result.error || 'Google authentication failed.');
+      }
       localStorage.setItem('rp_token', result.token);
       setToken(result.token);
       setUser(result.user);
     } catch (err: any) {
       setAuthError(err.message || 'Google sign-in failed');
+    }
+  }
+
+  async function handleLinkGoogle(credentialResponse: any) {
+    setError(''); setMessage('');
+    try {
+      if (!credentialResponse?.credential) throw new Error('No credential token received from Google.');
+      const res = await request('/auth/link-google', token, { credential: credentialResponse.credential });
+      setUser(res.user);
+      setMessage('Google account linked successfully!');
+      await refreshData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to link Google account.');
     }
   }
 
@@ -302,7 +326,7 @@ export default function App() {
       <div className="page-content">
         {error && <div className="alert error">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
         {message && <div className="alert success"><Check size={16} />{message}<button onClick={() => setMessage('')}>Dismiss</button></div>}
-        {section === 'Dashboard' && <Dashboard user={user} projects={projects} revisions={revisions} setSection={setSection} setShowProjectForm={setShowProjectForm} />}
+        {section === 'Dashboard' && <Dashboard user={user} usage={usage} projects={projects} revisions={revisions} setSection={setSection} setShowProjectForm={setShowProjectForm} />}
         {(section === 'Writing Humanizer' || section === 'Dashboard') && <Editor
           text={text} setText={setText} revised={revised} style={style} setStyle={setStyle}
           preserveTerms={preserveTerms} setPreserveTerms={setPreserveTerms} busy={busy}
@@ -313,16 +337,25 @@ export default function App() {
         {section === 'Citation Checker' && <AnalysisPage title="Citation consistency" subtitle="Check basic author-year citation and reference-list patterns." icon={<BookOpenCheck />} run={() => runAction('citations')} busy={busy} result={citations} text={text} setText={setText} exportText={exportText} />}
         {section === 'Projects' && <Projects projects={projects} showForm={showProjectForm} setShowForm={setShowProjectForm} title={projectTitle} setTitle={setProjectTitle} createProject={createProject} deleteProject={deleteProject} />}
         {section === 'History' && <HistoryPage revisions={revisions} />}
-        {section === 'Settings' && <SettingsPage user={user} dark={dark} setDark={setDark} persist={persist} setPersist={setPersist} logout={logout} />}
+        {section === 'Settings' && <SettingsPage user={user} usage={usage} dark={dark} setDark={setDark} persist={persist} setPersist={setPersist} logout={logout} onLinkGoogle={handleLinkGoogle} isGoogleConfigured={isGoogleConfigured} />}
       </div>
     </main>
   </div>;
 }
 
-function Dashboard({ user, projects, revisions, setSection, setShowProjectForm }: any) {
+function Dashboard({ user, usage, projects, revisions, setSection, setShowProjectForm }: any) {
   return <section className="dashboard">
     <div className="welcome-row"><div><p className="eyebrow">YOUR RESEARCH, IN FOCUS</p><h1>Good work starts with <span>clarity.</span></h1><p className="muted">A focused workspace for stronger academic writing and responsible research.</p></div><button className="primary" onClick={() => setSection('Writing Humanizer')}><Plus size={17} /> New writing session</button></div>
-    <div className="stats-grid"><Stat icon={<FileText />} label="Projects" value={projects.length} note="Your research spaces" /><Stat icon={<Clock3 />} label="Saved revisions" value={revisions.length} note="Opt-in history" /><Stat icon={<Activity />} label="Writing workspace" value="Ready" note="Analysis tools available" /></div>
+    <div className="stats-grid">
+      <Stat icon={<FileText />} label="Projects" value={projects.length} note="Your research spaces" />
+      <Stat icon={<Clock3 />} label="Saved revisions" value={revisions.length} note="Opt-in history" />
+      <Stat
+        icon={<Activity />}
+        label="Free AI Rewriting"
+        value={usage ? `${usage.rewrite?.remaining}/${usage.rewrite?.limit}` : '5/5'}
+        note={usage?.aiAvailable ? 'Revisions remaining today' : 'Non-AI tools active'}
+      />
+    </div>
     <div className="section-heading"><div><h2>Research toolkit</h2><p>Choose a task to get started.</p></div><span className="subtle-tag"><ShieldCheck size={14} /> Integrity-led workflow</span></div>
     <div className="tool-grid">
       <ToolCard icon={<WandSparkles />} tone="purple" title="Academic humanizer" description="Improve clarity and flow while preserving your research meaning." onClick={() => setSection('Writing Humanizer')} action="Open editor" />
@@ -396,7 +429,7 @@ function HistoryPage({ revisions }: { revisions: Revision[] }) {
     {selected && <div className="comparison-grid"><div className="panel"><h3>Original</h3><p className="history-text">{selected.originalText}</p></div><div className="panel"><h3>Revised</h3><p className="history-text">{selected.revisedText}</p></div></div>}
   </section>;
 }
-function SettingsPage({ user, dark, setDark, persist, setPersist, logout }: any) {
+function SettingsPage({ user, usage, dark, setDark, persist, setPersist, logout, onLinkGoogle, isGoogleConfigured }: any) {
   return <section className="analysis-page"><div className="page-title-row"><div><p className="eyebrow">PREFERENCES</p><h1>Settings & privacy</h1><p className="muted">Choose how ResearchProof AI behaves in your workspace.</p></div><div className="page-title-icon"><Settings2 /></div></div>
     <div className="settings-list panel">
       <div className="setting-row">
@@ -409,13 +442,32 @@ function SettingsPage({ user, dark, setDark, persist, setPersist, logout }: any)
               <span key={p} className="provider-tag">{p === 'google' ? '✓ Google Connected' : '✓ Password Auth'}</span>
             ))}
           </div>
+          {isGoogleConfigured && !user?.authProviders?.includes('google') && (
+            <div style={{ marginTop: '14px', background: 'var(--surface2)', padding: '12px', borderRadius: '10px', border: '1px solid var(--border)' }}>
+              <strong style={{ fontSize: '11px', display: 'block', marginBottom: '4px' }}>Connect Google Account</strong>
+              <p style={{ fontSize: '10px', color: 'var(--muted)', marginBottom: '10px' }}>Link your Google identity for instant one-click sign-in across devices.</p>
+              <GoogleLogin
+                onSuccess={onLinkGoogle}
+                onError={() => {}}
+                theme={dark ? 'filled_black' : 'outline'}
+                shape="rectangular"
+                size="medium"
+                text="continue_with"
+              />
+            </div>
+          )}
         </div>
       </div>
       <div className="setting-row">
         <div className="setting-icon"><Gauge size={18} /></div>
         <div className="setting-copy">
-          <strong>Daily AI Quota</strong>
-          <p>Daily AI revisions: <strong>{user?.usage?.dailyRequests || 0} / {user?.usage?.dailyLimit || 50}</strong> used today (Resets daily at 00:00 UTC).</p>
+          <strong>Daily Free AI Quota (Phase 1)</strong>
+          <p>
+            AI rewriting: <strong>{usage?.rewrite?.used || 0} / {usage?.rewrite?.limit || 5}</strong> used today (max {usage?.rewrite?.maxWords || 2000} words) · Analysis checks: <strong>{usage?.analysis?.used || 0} / {usage?.analysis?.limit || 10}</strong> used today (max {usage?.analysis?.maxWords || 5000} words).
+          </p>
+          <div style={{ marginTop: '6px', fontSize: '10px', fontWeight: 600, color: usage?.aiAvailable ? '#34c98b' : '#e7a43b' }}>
+            {usage?.aiAvailable ? '● AI Provider Connected and Ready' : '○ AI Provider Unconfigured (Non-AI analysis tools remain fully functional)'}
+          </div>
         </div>
       </div>
       <div className="setting-row"><div className="setting-icon"><Sun size={18} /></div><div className="setting-copy"><strong>Appearance</strong><p>Choose the workspace colour theme.</p></div><button className="secondary small" onClick={() => setDark(!dark)}>{dark ? 'Dark mode' : 'Light mode'} · Toggle</button></div>

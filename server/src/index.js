@@ -11,13 +11,29 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import cookieParser from 'cookie-parser';
 import { OAuth2Client } from 'google-auth-library';
-import { User, Project, Document, Revision, IntegrityReport, AuditEvent } from './models.js';
+import { User, Project, Document, Revision, IntegrityReport, AuditEvent, UsageRecord } from './models.js';
 import { requireAuth } from './middleware.js';
 import { assessWriting, findRepeatedPhrases, checkCitations, humanizeWithAI } from './services.js';
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
 const jwtSecret = process.env.JWT_SECRET || 'researchproof-super-secure-jwt-secret-key-32chars';
+const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'rp_session';
+const SESSION_TTL_HOURS = Number(process.env.SESSION_TTL_HOURS || 24);
+
+// Section 6: Configurable Free Limits
+const FREE_REWRITE_DAILY_LIMIT = Number(process.env.FREE_REWRITE_DAILY_LIMIT || 5);
+const FREE_REWRITE_MAX_WORDS = Number(process.env.FREE_REWRITE_MAX_WORDS || 2000);
+const FREE_ANALYSIS_DAILY_LIMIT = Number(process.env.FREE_ANALYSIS_DAILY_LIMIT || 10);
+const FREE_ANALYSIS_MAX_WORDS = Number(process.env.FREE_ANALYSIS_MAX_WORDS || 5000);
+
+function countWords(str = '') {
+  return str.trim() ? str.trim().split(/\s+/).length : 0;
+}
+
+function getUtcDateKey() {
+  return new Date().toISOString().split('T')[0];
+}
 
 if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 24) {
   console.warn('WARNING: Set JWT_SECRET to a random secret of at least 24 characters in server/.env.');
@@ -29,24 +45,32 @@ app.use(cookieParser());
 app.use(express.json({ limit: '1mb' }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 250, standardHeaders: true, legacyHeaders: false }));
 
-// Session Cookie Management (Section 5)
+// Session Cookie Management (Section 4 & 5)
 function setSessionCookie(res, token) {
   const isProduction = process.env.NODE_ENV === 'production';
-  res.cookie('rp_session', token, {
+  const cookieOpts = {
     httpOnly: true,
     secure: isProduction,
     sameSite: isProduction ? 'none' : 'lax',
-    maxAge: 8 * 60 * 60 * 1000 // 8 hours
-  });
+    maxAge: SESSION_TTL_HOURS * 60 * 60 * 1000
+  };
+  res.cookie('rp_session', token, cookieOpts);
+  if (SESSION_COOKIE_NAME !== 'rp_session') {
+    res.cookie(SESSION_COOKIE_NAME, token, cookieOpts);
+  }
 }
 
 function clearSessionCookie(res) {
   const isProduction = process.env.NODE_ENV === 'production';
-  res.clearCookie('rp_session', {
+  const cookieOpts = {
     httpOnly: true,
     secure: isProduction,
     sameSite: isProduction ? 'none' : 'lax'
-  });
+  };
+  res.clearCookie('rp_session', cookieOpts);
+  if (SESSION_COOKIE_NAME !== 'rp_session') {
+    res.clearCookie(SESSION_COOKIE_NAME, cookieOpts);
+  }
 }
 
 // Google OAuth Verification (Section 2)
@@ -107,6 +131,7 @@ const memProjects = new Map();
 const memDocuments = new Map();
 const memRevisions = new Map();
 const isDbConnected = () => mongoose.connection.readyState === 1;
+app.locals.memUsers = memUsers;
 
 // Pre-seed default demo credentials
 const DEMO_EMAIL = 'demo@researchproof.ai';
@@ -172,37 +197,96 @@ apiRouter.get('/health', (_req, res) => {
   });
 });
 
-// Usage Quota Middleware (Section 9)
-async function checkAiUsage(req, res, next) {
-  try {
-    const userId = req.user.id;
-    const now = new Date();
+// Usage Quota Middleware & Helpers (Section 6)
+async function checkFeatureQuota(feature) {
+  return async function(req, res, next) {
+    try {
+      const isRewrite = feature === 'rewrite';
+      const limit = isRewrite ? FREE_REWRITE_DAILY_LIMIT : FREE_ANALYSIS_DAILY_LIMIT;
+      const maxWords = isRewrite ? FREE_REWRITE_MAX_WORDS : FREE_ANALYSIS_MAX_WORDS;
 
-    if (isDbConnected()) {
-      const user = await User.findById(userId);
-      if (!user) return res.status(401).json({ error: 'User not found.' });
-
-      const lastReset = user.usage?.lastResetDate ? new Date(user.usage.lastResetDate) : new Date(0);
-      const isNewDay = now.toDateString() !== lastReset.toDateString();
-
-      if (isNewDay) {
-        user.usage = { dailyRequests: 1, dailyLimit: user.usage?.dailyLimit || 50, lastResetDate: now };
-        await user.save();
-      } else {
-        if ((user.usage?.dailyRequests || 0) >= (user.usage?.dailyLimit || 50)) {
-          return res.status(429).json({
-            error: 'Daily AI revision quota exceeded. Limit will reset at midnight.',
-            dailyLimit: user.usage?.dailyLimit || 50
+      // 1. Word limit validation
+      if (req.body?.text) {
+        const words = countWords(req.body.text);
+        if (words > maxWords) {
+          return res.status(400).json({
+            error: `Text exceeds the maximum allowed limit of ${maxWords} words for ${feature} (submitted ${words} words).`,
+            maxWords,
+            submittedWords: words
           });
         }
-        await User.findByIdAndUpdate(userId, { $inc: { 'usage.dailyRequests': 1 } });
       }
+
+      // 2. AI availability check for rewrite
+      if (isRewrite) {
+        const hasKey = Boolean(
+          (process.env.AI_API_KEY && process.env.AI_API_KEY.trim()) ||
+          (process.env.REVERSEGPT_API_KEY && process.env.REVERSEGPT_API_KEY.trim())
+        );
+        if (!hasKey) {
+          return res.status(503).json({
+            error: 'AI rewriting is temporarily unavailable. The AI provider is not configured.',
+            code: 'AI_UNAVAILABLE'
+          });
+        }
+      }
+
+      // 3. Quota check
+      const userId = req.user.id;
+      const today = getUtcDateKey();
+
+      if (isDbConnected()) {
+        const usage = await UsageRecord.findOne({ userId, feature, quotaWindow: today }).lean();
+        if (usage && usage.usedCount >= limit) {
+          return res.status(429).json({
+            error: `Daily free ${feature} quota (${limit} requests) reached. Limit resets at 00:00 UTC.`,
+            limit,
+            remaining: 0,
+            resetWindow: today
+          });
+        }
+      } else {
+        const mem = memUsers.get(req.user.email);
+        const count = mem?.usage?.dailyRequests || 0;
+        if (count >= limit) {
+          return res.status(429).json({
+            error: `Daily free ${feature} quota (${limit} requests) reached. Limit resets at 00:00 UTC.`,
+            limit,
+            remaining: 0
+          });
+        }
+      }
+
+      next();
+    } catch (err) {
+      next(err);
     }
-    next();
-  } catch (err) {
-    next(err);
+  };
+}
+
+async function recordFeatureUsage(userId, email, feature) {
+  const today = getUtcDateKey();
+  if (isDbConnected()) {
+    await UsageRecord.findOneAndUpdate(
+      { userId, feature, quotaWindow: today },
+      { $inc: { usedCount: 1 } },
+      { upsert: true, new: true }
+    );
+    await User.findByIdAndUpdate(userId, {
+      $inc: { 'usage.dailyRequests': 1 },
+      $set: { 'usage.lastResetDate': new Date() }
+    });
+  } else {
+    const mem = memUsers.get(email);
+    if (mem) {
+      mem.usage = mem.usage || { dailyRequests: 0, dailyLimit: FREE_REWRITE_DAILY_LIMIT };
+      mem.usage.dailyRequests = (mem.usage.dailyRequests || 0) + 1;
+    }
   }
 }
+
+// Backward-compatible checkAiUsage middleware wrapper
+const checkAiUsage = async (req, res, next) => (await checkFeatureQuota('rewrite'))(req, res, next);
 
 // Auth Routes
 apiRouter.post('/auth/register', async (req, res, next) => {
@@ -219,14 +303,27 @@ apiRouter.post('/auth/register', async (req, res, next) => {
         passwordHash,
         displayName: email.split('@')[0],
         authProviders: ['email'],
+        tokenVersion: 1,
         lastLoginAt: new Date()
       });
-      const token = jwt.sign({ id: user._id.toString(), email: user.email }, jwtSecret, { expiresIn: '8h' });
+      const token = jwt.sign(
+        { id: user._id.toString(), email: user.email, tokenVersion: user.tokenVersion || 1 },
+        jwtSecret,
+        { expiresIn: `${SESSION_TTL_HOURS}h` }
+      );
       setSessionCookie(res, token);
       await recordAudit(user._id, 'USER_REGISTERED', 'User', user._id);
       return res.status(201).json({
         token,
-        user: { id: user._id, email: user.email, displayName: user.displayName, avatarUrl: user.avatarUrl, role: user.role, status: user.status }
+        user: {
+          id: user._id,
+          email: user.email,
+          displayName: user.displayName,
+          avatarUrl: user.avatarUrl,
+          authProviders: user.authProviders || ['email'],
+          role: user.role,
+          status: user.status
+        }
       });
     }
 
@@ -244,15 +341,28 @@ apiRouter.post('/auth/register', async (req, res, next) => {
       authProviders: ['email'],
       role: 'researcher',
       status: 'active',
+      tokenVersion: 1,
       createdAt: new Date(),
       lastLoginAt: new Date()
     };
     memUsers.set(email, newUser);
-    const token = jwt.sign({ id: userId, email }, jwtSecret, { expiresIn: '8h' });
+    const token = jwt.sign(
+      { id: userId, email, tokenVersion: newUser.tokenVersion || 1 },
+      jwtSecret,
+      { expiresIn: `${SESSION_TTL_HOURS}h` }
+    );
     setSessionCookie(res, token);
     res.status(201).json({
       token,
-      user: { id: userId, email, displayName: newUser.displayName, avatarUrl: '', role: 'researcher', status: 'active' }
+      user: {
+        id: userId,
+        email,
+        displayName: newUser.displayName,
+        avatarUrl: '',
+        authProviders: ['email'],
+        role: 'researcher',
+        status: 'active'
+      }
     });
   } catch (e) { next(e); }
 });
@@ -273,12 +383,24 @@ apiRouter.post('/auth/login', async (req, res, next) => {
       }
       user.lastLoginAt = new Date();
       await user.save();
-      const token = jwt.sign({ id: user._id.toString(), email: user.email }, jwtSecret, { expiresIn: '8h' });
+      const token = jwt.sign(
+        { id: user._id.toString(), email: user.email, tokenVersion: user.tokenVersion || 1 },
+        jwtSecret,
+        { expiresIn: `${SESSION_TTL_HOURS}h` }
+      );
       setSessionCookie(res, token);
       await recordAudit(user._id, 'USER_LOGIN', 'User', user._id);
       return res.json({
         token,
-        user: { id: user._id, email: user.email, displayName: user.displayName || user.email.split('@')[0], avatarUrl: user.avatarUrl, role: user.role, status: user.status }
+        user: {
+          id: user._id,
+          email: user.email,
+          displayName: user.displayName || user.email.split('@')[0],
+          avatarUrl: user.avatarUrl,
+          authProviders: user.authProviders || ['email'],
+          role: user.role,
+          status: user.status
+        }
       });
     }
 
@@ -291,11 +413,23 @@ apiRouter.post('/auth/login', async (req, res, next) => {
       return res.status(403).json({ error: 'Account is suspended. Please contact your administrator.' });
     }
     user.lastLoginAt = new Date();
-    const token = jwt.sign({ id: user.id || user._id, email: user.email }, jwtSecret, { expiresIn: '8h' });
+    const token = jwt.sign(
+      { id: user.id || user._id, email: user.email, tokenVersion: user.tokenVersion || 1 },
+      jwtSecret,
+      { expiresIn: `${SESSION_TTL_HOURS}h` }
+    );
     setSessionCookie(res, token);
     res.json({
       token,
-      user: { id: user.id || user._id, email: user.email, displayName: user.displayName || user.email.split('@')[0], avatarUrl: user.avatarUrl || '', role: user.role || 'researcher', status: user.status || 'active' }
+      user: {
+        id: user.id || user._id,
+        email: user.email,
+        displayName: user.displayName || user.email.split('@')[0],
+        avatarUrl: user.avatarUrl || '',
+        authProviders: user.authProviders || ['email'],
+        role: user.role || 'researcher',
+        status: user.status || 'active'
+      }
     });
   } catch (e) { next(e); }
 });
@@ -318,10 +452,19 @@ apiRouter.post('/auth/google', async (req, res, next) => {
       // 1. Search by Google ID first
       user = await User.findOne({ googleId });
 
-      // 2. If not found by googleId, check by email to link account
+      // 2. If not found by googleId, check by email
       if (!user) {
-        user = await User.findOne({ email });
-        if (user) {
+        const existingByEmail = await User.findOne({ email });
+        if (existingByEmail) {
+          // If existing account has password authentication and is not yet linked
+          if (existingByEmail.passwordHash && !existingByEmail.googleId) {
+            return res.status(409).json({
+              error: 'An account with this email already exists using password authentication. Please sign in with your password to link your Google account.',
+              code: 'ACCOUNT_LINKING_REQUIRED',
+              email
+            });
+          }
+          user = existingByEmail;
           user.googleId = googleId;
           if (!user.authProviders?.includes('google')) {
             user.authProviders = [...(user.authProviders || []), 'google'];
@@ -339,9 +482,11 @@ apiRouter.post('/auth/google', async (req, res, next) => {
             displayName,
             avatarUrl,
             authProviders: ['google'],
+            emailVerified: true,
             role: 'researcher',
             status: 'active',
-            lastLoginAt: new Date()
+            lastLoginAt: new Date(),
+            usage: { dailyRequests: 0, dailyLimit: FREE_REWRITE_DAILY_LIMIT, lastResetDate: new Date() }
           });
           await recordAudit(user._id, 'USER_REGISTERED_GOOGLE', 'User', user._id);
         }
@@ -357,7 +502,11 @@ apiRouter.post('/auth/google', async (req, res, next) => {
         return res.status(403).json({ error: 'Your account is suspended. Please contact your administrator.' });
       }
 
-      const token = jwt.sign({ id: user._id.toString(), email: user.email }, jwtSecret, { expiresIn: '8h' });
+      const token = jwt.sign(
+        { id: user._id.toString(), email: user.email, tokenVersion: user.tokenVersion || 1 },
+        jwtSecret,
+        { expiresIn: `${SESSION_TTL_HOURS}h` }
+      );
       setSessionCookie(res, token);
       await recordAudit(user._id, 'USER_LOGIN_GOOGLE', 'User', user._id);
 
@@ -371,7 +520,7 @@ apiRouter.post('/auth/google', async (req, res, next) => {
           authProviders: user.authProviders || ['google'],
           role: user.role,
           status: user.status,
-          usage: user.usage || { dailyRequests: 0, dailyLimit: 50 }
+          usage: user.usage || { dailyRequests: 0, dailyLimit: FREE_REWRITE_DAILY_LIMIT }
         }
       });
     }
@@ -379,8 +528,16 @@ apiRouter.post('/auth/google', async (req, res, next) => {
     // In-memory fallback
     user = [...memUsers.values()].find(u => u.googleId === googleId);
     if (!user) {
-      user = memUsers.get(email);
-      if (user) {
+      const existing = memUsers.get(email);
+      if (existing) {
+        if (existing.passwordHash && !existing.googleId) {
+          return res.status(409).json({
+            error: 'An account with this email already exists using password authentication. Please sign in with your password to link your Google account.',
+            code: 'ACCOUNT_LINKING_REQUIRED',
+            email
+          });
+        }
+        user = existing;
         user.googleId = googleId;
         user.avatarUrl = avatarUrl || user.avatarUrl;
         if (!user.authProviders?.includes('google')) {
@@ -397,9 +554,11 @@ apiRouter.post('/auth/google', async (req, res, next) => {
           displayName,
           avatarUrl,
           authProviders: ['google'],
+          emailVerified: true,
           role: 'researcher',
           status: 'active',
-          usage: { dailyRequests: 0, dailyLimit: 50 },
+          tokenVersion: 1,
+          usage: { dailyRequests: 0, dailyLimit: FREE_REWRITE_DAILY_LIMIT },
           createdAt: new Date(),
           lastLoginAt: new Date()
         };
@@ -411,7 +570,11 @@ apiRouter.post('/auth/google', async (req, res, next) => {
       return res.status(403).json({ error: 'Your account is suspended. Please contact your administrator.' });
     }
 
-    const token = jwt.sign({ id: user._id || user.id, email: user.email }, jwtSecret, { expiresIn: '8h' });
+    const token = jwt.sign(
+      { id: user._id || user.id, email: user.email, tokenVersion: user.tokenVersion || 1 },
+      jwtSecret,
+      { expiresIn: `${SESSION_TTL_HOURS}h` }
+    );
     setSessionCookie(res, token);
 
     res.json({
@@ -424,7 +587,7 @@ apiRouter.post('/auth/google', async (req, res, next) => {
         authProviders: user.authProviders || ['google'],
         role: user.role || 'researcher',
         status: user.status || 'active',
-        usage: user.usage || { dailyRequests: 0, dailyLimit: 50 }
+        usage: user.usage || { dailyRequests: 0, dailyLimit: FREE_REWRITE_DAILY_LIMIT }
       }
     });
   } catch (err) {
@@ -433,10 +596,160 @@ apiRouter.post('/auth/google', async (req, res, next) => {
   }
 });
 
-// Logout endpoint (Section 4 & 5)
-apiRouter.post('/auth/logout', (_req, res) => {
+// Secure Account Linking Endpoint (Section 3)
+apiRouter.post('/auth/link-google', requireAuth, async (req, res, next) => {
+  try {
+    const googleSchema = z.object({ credential: z.string().min(1, 'Google credential token is required.') });
+    const parsed = googleSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid Google credential.' });
+    }
+
+    const googleProfile = await googleTokenVerifier(parsed.data.credential);
+    const { googleId, email, avatarUrl } = googleProfile;
+
+    if (email.toLowerCase() !== req.user.email.toLowerCase()) {
+      return res.status(400).json({
+        error: `Google account email (${email}) does not match your signed-in account (${req.user.email}).`
+      });
+    }
+
+    if (isDbConnected()) {
+      const conflict = await User.findOne({ googleId, _id: { $ne: req.user.id } });
+      if (conflict) {
+        return res.status(409).json({ error: 'This Google account is already linked to another ResearchProof user.' });
+      }
+
+      const user = await User.findById(req.user.id);
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+
+      user.googleId = googleId;
+      if (!user.authProviders?.includes('google')) {
+        user.authProviders = [...(user.authProviders || []), 'google'];
+      }
+      if (avatarUrl && !user.avatarUrl) user.avatarUrl = avatarUrl;
+      await user.save();
+      await recordAudit(user._id, 'USER_ACCOUNT_LINKED_GOOGLE', 'User', user._id);
+
+      return res.json({
+        success: true,
+        message: 'Google account linked successfully.',
+        user: {
+          id: user._id,
+          email: user.email,
+          displayName: user.displayName,
+          avatarUrl: user.avatarUrl,
+          authProviders: user.authProviders,
+          role: user.role,
+          status: user.status
+        }
+      });
+    }
+
+    // In-memory fallback
+    const mem = memUsers.get(req.user.email);
+    if (!mem) return res.status(404).json({ error: 'User not found.' });
+    mem.googleId = googleId;
+    if (!mem.authProviders?.includes('google')) {
+      mem.authProviders = [...(mem.authProviders || []), 'google'];
+    }
+    if (avatarUrl && !mem.avatarUrl) mem.avatarUrl = avatarUrl;
+
+    res.json({
+      success: true,
+      message: 'Google account linked successfully.',
+      user: {
+        id: mem.id || mem._id,
+        email: mem.email,
+        displayName: mem.displayName,
+        avatarUrl: mem.avatarUrl,
+        authProviders: mem.authProviders,
+        role: mem.role || 'researcher',
+        status: mem.status || 'active'
+      }
+    });
+  } catch (err) {
+    console.error('Account linking error:', err.message);
+    res.status(401).json({ error: err.message || 'Failed to verify Google account.' });
+  }
+});
+
+// Logout endpoint with server-side session invalidation (Section 4 & 5)
+apiRouter.post('/auth/logout', async (req, res) => {
+  try {
+    let token = req.cookies?.[SESSION_COOKIE_NAME] || req.cookies?.rp_session || req.cookies?.researchproof_session || '';
+    if (!token && req.headers.authorization) {
+      token = req.headers.authorization.startsWith('Bearer ')
+        ? req.headers.authorization.slice(7).trim()
+        : req.headers.authorization.trim();
+    }
+    if (token) {
+      try {
+        const decoded = jwt.decode(token);
+        if (decoded?.id || decoded?.email) {
+          if (isDbConnected() && decoded.id) {
+            await User.findByIdAndUpdate(decoded.id, { $inc: { tokenVersion: 1 } });
+            await recordAudit(decoded.id, 'USER_LOGOUT', 'User', decoded.id);
+          } else {
+            const mem = (decoded.email && memUsers.get(decoded.email)) ||
+              [...memUsers.values()].find(u => u._id === decoded.id || u.id === decoded.id);
+            if (mem) mem.tokenVersion = (mem.tokenVersion || 1) + 1;
+          }
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
   clearSessionCookie(res);
   res.json({ success: true, message: 'Logged out successfully.' });
+});
+
+// Free Usage Limits Endpoint (Section 6)
+apiRouter.get('/usage/me', requireAuth, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const today = getUtcDateKey();
+    let rewriteUsed = 0;
+    let analysisUsed = 0;
+
+    if (isDbConnected()) {
+      const records = await UsageRecord.find({ userId, quotaWindow: today }).lean();
+      for (const r of records) {
+        if (r.feature === 'rewrite') rewriteUsed = r.usedCount;
+        if (r.feature === 'analysis') analysisUsed = r.usedCount;
+      }
+    } else {
+      const mem = memUsers.get(req.user.email);
+      rewriteUsed = mem?.usage?.dailyRequests || 0;
+    }
+
+    const tomorrowUtc = new Date();
+    tomorrowUtc.setUTCHours(24, 0, 0, 0);
+
+    const hasAiKey = Boolean(
+      (process.env.AI_API_KEY && process.env.AI_API_KEY.trim()) ||
+      (process.env.REVERSEGPT_API_KEY && process.env.REVERSEGPT_API_KEY.trim())
+    );
+
+    res.json({
+      date: today,
+      aiAvailable: hasAiKey,
+      rewrite: {
+        used: rewriteUsed,
+        limit: FREE_REWRITE_DAILY_LIMIT,
+        remaining: Math.max(0, FREE_REWRITE_DAILY_LIMIT - rewriteUsed),
+        maxWords: FREE_REWRITE_MAX_WORDS
+      },
+      analysis: {
+        used: analysisUsed,
+        limit: FREE_ANALYSIS_DAILY_LIMIT,
+        remaining: Math.max(0, FREE_ANALYSIS_DAILY_LIMIT - analysisUsed),
+        maxWords: FREE_ANALYSIS_MAX_WORDS
+      },
+      resetAt: tomorrowUtc.toISOString()
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Profile endpoints
@@ -476,22 +789,42 @@ apiRouter.get(['/auth/me', '/me'], requireAuth, async (req, res) => {
   }
 });
 
-// Writing Analysis
-apiRouter.post(['/analyze/writing', '/analysis/writing'], requireAuth, (req, res) => {
-  const parsed = textSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Text is required and must be under 50,000 characters.' });
-  res.json(assessWriting(parsed.data.text));
+// Writing Analysis (Section 6: Analysis Limits)
+apiRouter.post(['/analyze/writing', '/analysis/writing'], requireAuth, async (req, res, next) => {
+  try {
+    const parsed = textSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Text is required and must be under 50,000 characters.' });
+    const words = countWords(parsed.data.text);
+    if (words > FREE_ANALYSIS_MAX_WORDS) {
+      return res.status(400).json({
+        error: `Text exceeds the analysis limit of ${FREE_ANALYSIS_MAX_WORDS} words (submitted ${words} words).`,
+        maxWords: FREE_ANALYSIS_MAX_WORDS
+      });
+    }
+    await recordFeatureUsage(req.user.id, req.user.email, 'analysis');
+    res.json(assessWriting(parsed.data.text));
+  } catch (e) { next(e); }
 });
 
 // Similarity / Originality
-apiRouter.post(['/analyze/originality', '/analysis/similarity'], requireAuth, (req, res) => {
-  const parsed = textSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Text is required and must be under 50,000 characters.' });
-  res.json({
-    repeatedPhrases: findRepeatedPhrases(parsed.data.text),
-    scope: 'Within-document phrase repetition only',
-    externalDatabaseChecked: false
-  });
+apiRouter.post(['/analyze/originality', '/analysis/similarity'], requireAuth, async (req, res, next) => {
+  try {
+    const parsed = textSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Text is required and must be under 50,000 characters.' });
+    const words = countWords(parsed.data.text);
+    if (words > FREE_ANALYSIS_MAX_WORDS) {
+      return res.status(400).json({
+        error: `Text exceeds the analysis limit of ${FREE_ANALYSIS_MAX_WORDS} words (submitted ${words} words).`,
+        maxWords: FREE_ANALYSIS_MAX_WORDS
+      });
+    }
+    await recordFeatureUsage(req.user.id, req.user.email, 'analysis');
+    res.json({
+      repeatedPhrases: findRepeatedPhrases(parsed.data.text),
+      scope: 'Within-document phrase repetition only',
+      externalDatabaseChecked: false
+    });
+  } catch (e) { next(e); }
 });
 
 // Citation Verification (with Crossref DOI resolution)
@@ -499,12 +832,20 @@ apiRouter.post(['/analyze/citations', '/analysis/citations'], requireAuth, async
   try {
     const parsed = textSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Text is required and must be under 50,000 characters.' });
+    const words = countWords(parsed.data.text);
+    if (words > FREE_ANALYSIS_MAX_WORDS) {
+      return res.status(400).json({
+        error: `Text exceeds the analysis limit of ${FREE_ANALYSIS_MAX_WORDS} words (submitted ${words} words).`,
+        maxWords: FREE_ANALYSIS_MAX_WORDS
+      });
+    }
+    await recordFeatureUsage(req.user.id, req.user.email, 'analysis');
     const results = await checkCitations(parsed.data.text);
     res.json(results);
   } catch (e) { next(e); }
 });
 
-// AI Revision / Humanizer (with usage quota enforcement - Section 9)
+// AI Revision / Humanizer (with usage quota enforcement - Section 6)
 apiRouter.post(['/humanize', '/revisions/humanize'], requireAuth, checkAiUsage, async (req, res, next) => {
   try {
     const schema = textSchema.extend({
@@ -518,6 +859,7 @@ apiRouter.post(['/humanize', '/revisions/humanize'], requireAuth, checkAiUsage, 
     if (!parsed.success) return res.status(400).json({ error: 'Provide text under 50,000 characters and valid options.' });
     
     const result = await humanizeWithAI(parsed.data);
+    await recordFeatureUsage(req.user.id, req.user.email, 'rewrite');
     let saved = false;
 
     if (parsed.data.saveRevision && process.env.PERSIST_DOCUMENT_TEXT !== 'false') {
