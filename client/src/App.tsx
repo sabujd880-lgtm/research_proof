@@ -8,7 +8,13 @@ import {
   AlertTriangle, AlertCircle, ExternalLink, Printer, Eye, Edit3, GitCompare, Search
 } from 'lucide-react';
 
-const API = import.meta.env.VITE_API_URL || '/api';
+function resolveApiUrl() {
+  const envUrl = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '');
+  if (!envUrl) return '/api';
+  if (envUrl.endsWith('/api')) return envUrl;
+  return `${envUrl}/api`;
+}
+const API = resolveApiUrl();
 const DEFAULT_GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '387878022617-624p2r5hfa278npj531373cc8lf64t1e.apps.googleusercontent.com';
 
 // Google Identity Services (GSI) origin support detection
@@ -267,17 +273,19 @@ export default function App() {
   const [persist, setPersist] = useState(true);
   const [googleClientId, setGoogleClientId] = useState<string>(DEFAULT_GOOGLE_CLIENT_ID);
 
-  // Dynamic Google OAuth configuration resolution (from backend /api/auth/config if not baked into bundle)
+  // Dynamic Google OAuth configuration resolution (from backend /api/auth/config)
   useEffect(() => {
     fetch(`${API}/auth/config`)
       .then(r => (r.ok ? r.json() : null))
       .then(cfg => {
-        if (cfg?.googleClientId && !googleClientId) {
-          setGoogleClientId(cfg.googleClientId);
+        if (cfg?.googleClientId && cfg.googleClientId.trim().length > 10) {
+          setGoogleClientId(cfg.googleClientId.trim());
         }
       })
-      .catch(() => {});
-  }, [googleClientId]);
+      .catch((err) => {
+        console.warn('Backend auth config check failed or offline:', err);
+      });
+  }, []);
 
   const isGoogleConfigured = Boolean(
     googleClientId &&
@@ -843,7 +851,13 @@ export default function App() {
             <div className="google-btn-wrap">
               <GoogleLogin
                 onSuccess={handleGoogleSuccess}
-                onError={() => setAuthError('Google sign-in encountered an error.')}
+                onError={() => {
+                  setAuthError(
+                    'Google Sign-In failed. Please ensure ' +
+                    (typeof window !== 'undefined' ? window.location.origin : 'your domain') +
+                    ' is added under "Authorized JavaScript origins" in Google Cloud Console, or sign in with email/password below.'
+                  );
+                }}
                 theme={dark ? 'filled_black' : 'outline'}
                 shape="rectangular"
                 size="large"
@@ -5538,7 +5552,7 @@ function SettingsPage({ user, usage, dark, setDark, persist, setPersist, isCompa
                 <div className="google-btn-wrap" style={{ display: 'inline-block' }}>
                   <GoogleLogin
                     onSuccess={onLinkGoogle}
-                    onError={() => setError?.('Google account linking encountered an error.')}
+                    onError={() => setError?.('Google account linking failed. Please verify that this domain is added under "Authorized JavaScript origins" in Google Cloud Console, or check that popups are not blocked.')}
                     theme={dark ? 'filled_black' : 'outline'}
                     shape="rectangular"
                     size="medium"
