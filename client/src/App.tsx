@@ -3458,6 +3458,10 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
   const [excludeSmallPhrases, setExcludeSmallPhrases] = useState<boolean>(false);
   const [minPhraseWords, setMinPhraseWords] = useState<number>(5);
   const [filterTab, setFilterTab] = useState<'all' | 'overlap' | 'repeat' | 'doi'>('all');
+  const [activeDetailTab, setActiveDetailTab] = useState<'overview' | 'matches' | 'doi' | 'ai' | 'history'>('overview');
+  const [scanHistory, setScanHistory] = useState<any[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState<boolean>(false);
+  const [scanStatus, setScanStatus] = useState<'idle' | 'scanning' | 'completed' | 'partial' | 'failed'>('idle');
   const [showCertModal, setShowCertModal] = useState<boolean>(false);
   const [resolveState, setResolveState] = useState<{ matchId: string; passage: string; mode: string; busy: boolean; proposed: string | null } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -3469,11 +3473,34 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
     }
   }, [text]);
 
+  // Load scan history when token is present or tab switched
+  async function loadHistory() {
+    if (!token) return;
+    setLoadingHistory(true);
+    try {
+      const res = await request('/textguard/scans', token, undefined, 'GET');
+      if (Array.isArray(res)) {
+        setScanHistory(res);
+      }
+    } catch {
+      // Non-blocking history load
+    } finally {
+      setLoadingHistory(false);
+    }
+  }
+
+  useEffect(() => {
+    if (token) {
+      loadHistory();
+    }
+  }, [token]);
+
   const wordCount = useMemo(() => manuscript.trim() ? manuscript.trim().split(/\s+/).length : 0, [manuscript]);
 
   async function runScan(customOpts: any = {}) {
     if (!manuscript.trim()) return;
     setBusy(true);
+    setScanStatus('scanning');
     setBotChallengeDetected(false);
     try {
       const payload = {
@@ -3489,11 +3516,16 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
       const res = await request('/textguard/scan', token, payload, 'POST');
       if (res.isBotChallenge) {
         setBotChallengeDetected(true);
+        setScanStatus('failed');
+      } else {
+        setScanStatus(res.status === 'partial' ? 'partial' : 'completed');
       }
       setScanResult(res);
       setViewMode('interactive');
+      loadHistory();
       onSuccess?.('TextGuard deep scan completed with similarity and Crossref verification.');
     } catch (e: any) {
+      setScanStatus('failed');
       if (e.message?.includes('Security verification') || e.message?.includes('bot protection') || e.message?.includes('Cloudflare')) {
         setBotChallengeDetected(true);
       }
@@ -3885,54 +3917,244 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
           </div>
         </div>
 
-        {/* Right Pane: TextGuard Authenticity Hub & Source Match Inspector */}
+        {/* Right Pane: Authenticity & Sources Hub — Industrial Analytics Dashboard */}
         <div className="tg-pane">
+          {/* Dashboard Header Bar */}
           <div className="tg-pane-head">
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <ShieldCheck size={16} color="#e11d48" />
               <span style={{ letterSpacing: '0.5px' }}>AUTHENTICITY & SOURCES HUB</span>
             </div>
-            {scanResult && (
-              <span className={`originality-score-pill ${scanResult.similarityScore > 25 ? 'low' : scanResult.similarityScore > 12 ? 'moderate' : 'high'}`}>
-                {scanResult.similarityScore < 12 ? 'Clean & Authentic' : scanResult.similarityScore <= 25 ? 'Moderate Overlap' : 'Elevated Similarity'}
-              </span>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {/* Scan State Pill */}
+              <div className="tg-status-indicator">
+                <span className={`tg-status-dot ${scanStatus}`} />
+                <span>
+                  {scanStatus === 'scanning' ? 'Scanning...' :
+                   scanStatus === 'completed' ? 'Scan Completed' :
+                   scanStatus === 'partial' ? 'Partial Results' :
+                   scanStatus === 'failed' ? 'Scan Failed' : 'Not Started'}
+                </span>
+              </div>
+              {scanResult && (
+                <span className={`tg-metric-badge ${scanResult.similarityScore > 25 ? 'elevated' : scanResult.similarityScore > 12 ? 'moderate' : 'clean'}`}>
+                  {scanResult.similarityScore < 12 ? 'Clean & Authentic' : scanResult.similarityScore <= 25 ? 'Similarity: Moderate' : 'Similarity Coverage: Elevated'}
+                </span>
+              )}
+            </div>
           </div>
 
-          {/* Radial Gauge Section */}
-          <div className="tg-gauge-section">
-            <RadialGauge
-              value={scanResult ? (100 - scanResult.similarityScore) : 100}
-              subtitle={scanResult ? (scanResult.similarityScore <= 12 ? 'Optimal' : 'Review') : 'Optimal'}
-              label="Originality"
-              color="#10b981"
-            />
-            <RadialGauge
-              value={scanResult?.similarityScore ?? 0}
-              subtitle={scanResult?.similarityScore > 25 ? 'Elevated' : scanResult?.similarityScore > 12 ? 'Moderate' : 'Low Overlap'}
-              label="Similarity"
-              color={scanResult?.similarityScore > 25 ? '#ef4444' : scanResult?.similarityScore > 12 ? '#f59e0b' : '#3b82f6'}
-            />
+          {/* 4 Primary Industrial Metric Cards */}
+          <div className="tg-metrics-grid">
+            {/* Card 1 — Similarity Coverage */}
+            <div
+              className={`tg-metric-card ${activeDetailTab === 'matches' ? 'active' : ''}`}
+              onClick={() => setActiveDetailTab('matches')}
+              title="Click to view Matched Sources breakdown"
+            >
+              <div className="tg-metric-header">
+                <span className="tg-metric-label">Similarity Coverage</span>
+                {scanResult ? (
+                  <span className={`tg-metric-badge ${scanResult.similarityScore > 25 ? 'elevated' : scanResult.similarityScore > 12 ? 'moderate' : 'clean'}`}>
+                    {scanResult.similarityScore > 25 ? 'Elevated' : scanResult.similarityScore > 12 ? 'Moderate' : 'Low Overlap'}
+                  </span>
+                ) : (
+                  <span className="tg-metric-badge neutral">Awaiting Scan</span>
+                )}
+              </div>
+              <div className="tg-metric-main">
+                <span className="tg-metric-value">{scanResult ? scanResult.similarityScore : '—'}</span>
+                {scanResult && <span className="tg-metric-unit">%</span>}
+              </div>
+              <div className="tg-metric-progress-track">
+                <div
+                  className="tg-metric-progress-fill"
+                  style={{
+                    width: scanResult ? `${Math.min(100, Math.max(0, scanResult.similarityScore))}%` : '0%',
+                    background: scanResult?.similarityScore > 25 ? '#ef4444' : scanResult?.similarityScore > 12 ? '#f59e0b' : '#10b981'
+                  }}
+                />
+              </div>
+              <div className="tg-metric-footer">
+                <span>{scanResult ? `${scanResult.matchedPassages?.length || 0} matching passages` : 'No passages scanned'}</span>
+                <button
+                  type="button"
+                  className="tg-metric-action-link"
+                  onClick={(e) => { e.stopPropagation(); setActiveDetailTab('matches'); }}
+                >
+                  Review Matches →
+                </button>
+              </div>
+            </div>
+
+            {/* Card 2 — Unmatched Text */}
+            <div
+              className={`tg-metric-card ${activeDetailTab === 'overview' ? 'active' : ''}`}
+              onClick={() => setActiveDetailTab('overview')}
+              title="Click to view manuscript analysis overview"
+            >
+              <div className="tg-metric-header">
+                <span className="tg-metric-label">Unmatched Text</span>
+                <span className="tg-metric-badge clean">Baseline</span>
+              </div>
+              <div className="tg-metric-main">
+                <span className="tg-metric-value">{scanResult ? (100 - scanResult.similarityScore) : '—'}</span>
+                {scanResult && <span className="tg-metric-unit">%</span>}
+              </div>
+              <div className="tg-metric-progress-track">
+                <div
+                  className="tg-metric-progress-fill"
+                  style={{
+                    width: scanResult ? `${Math.max(0, 100 - scanResult.similarityScore)}%` : '0%',
+                    background: '#10b981'
+                  }}
+                />
+              </div>
+              <div className="tg-metric-footer">
+                <span title="Proportion with no matches across checked corpora; does not certify absolute originality">
+                  No matches in corpora*
+                </span>
+                <button
+                  type="button"
+                  className="tg-metric-action-link"
+                  onClick={(e) => { e.stopPropagation(); setActiveDetailTab('overview'); }}
+                >
+                  Details →
+                </button>
+              </div>
+            </div>
+
+            {/* Card 3 — Reference Verification */}
             {(() => {
               const doiTotal = scanResult?.doiVerification?.total ?? 0;
               const doiVerified = scanResult?.doiVerification?.verified ?? 0;
-              const doiPct = doiTotal > 0 ? Math.round((doiVerified / doiTotal) * 100) : (doiTotal === 0 ? 0 : 100);
+              const hasNoDoi = !scanResult || doiTotal === 0;
               return (
-                <RadialGauge
-                  value={doiPct}
-                  displayValue={`${doiVerified}/${doiTotal}`}
-                  subtitle={doiTotal > 0 ? `${doiPct}% Valid` : '0 Linked'}
-                  label="DOI Verified"
-                  color="#0284c7"
-                />
+                <div
+                  className={`tg-metric-card ${activeDetailTab === 'doi' ? 'active' : ''}`}
+                  onClick={() => setActiveDetailTab('doi')}
+                  title="Click to view DOI Reference Verification table"
+                >
+                  <div className="tg-metric-header">
+                    <span className="tg-metric-label">Ref Verification</span>
+                    <span className={`tg-metric-badge ${hasNoDoi ? 'neutral' : doiVerified === doiTotal ? 'clean' : 'moderate'}`}>
+                      {hasNoDoi ? 'No DOI refs' : `${doiVerified}/${doiTotal} Valid`}
+                    </span>
+                  </div>
+                  <div className="tg-metric-main">
+                    <span className="tg-metric-value">
+                      {hasNoDoi ? '0' : `${doiVerified}/${doiTotal}`}
+                    </span>
+                    <span className="tg-metric-unit">{hasNoDoi ? 'DOIs' : 'verified'}</span>
+                  </div>
+                  <div className="tg-metric-progress-track">
+                    <div
+                      className="tg-metric-progress-fill"
+                      style={{
+                        width: doiTotal > 0 ? `${Math.round((doiVerified / doiTotal) * 100)}%` : '0%',
+                        background: '#0284c7'
+                      }}
+                    />
+                  </div>
+                  <div className="tg-metric-footer">
+                    <span>{hasNoDoi ? 'No DOI references' : `${doiTotal} scholarly items`}</span>
+                    <button
+                      type="button"
+                      className="tg-metric-action-link"
+                      onClick={(e) => { e.stopPropagation(); setActiveDetailTab('doi'); }}
+                    >
+                      View References →
+                    </button>
+                  </div>
+                </div>
               );
             })()}
-            <RadialGauge
-              value={scanResult?.aiLikelihood ?? 12}
-              subtitle={scanResult?.aiLikelihood > 35 ? 'AI Risk' : 'Human Trace'}
-              label="AI Footprint"
-              color="#8876ee"
-            />
+
+            {/* Card 4 — AI-Authorship Indicator */}
+            {(() => {
+              const aiVal = scanResult?.aiLikelihood ?? (scanResult ? 12 : null);
+              const aiUncertainty = scanResult?.aiAssessment?.uncertaintyBand || '± 15%';
+              return (
+                <div
+                  className={`tg-metric-card ${activeDetailTab === 'ai' ? 'active' : ''}`}
+                  onClick={() => setActiveDetailTab('ai')}
+                  title="Click to view AI Stylistic Analysis & Burstiness indicators"
+                >
+                  <div className="tg-metric-header">
+                    <span className="tg-metric-label">AI-Authorship</span>
+                    <span className={`tg-metric-badge ${!aiVal ? 'neutral' : aiVal > 35 ? 'moderate' : 'clean'}`}>
+                      {!aiVal ? 'Advisory' : aiVal > 35 ? 'Review Pattern' : 'Low AI Trace'}
+                    </span>
+                  </div>
+                  <div className="tg-metric-main">
+                    <span className="tg-metric-value">{aiVal !== null ? aiVal : '—'}</span>
+                    {aiVal !== null && <span className="tg-metric-unit">% ({aiUncertainty})</span>}
+                  </div>
+                  <div className="tg-metric-progress-track">
+                    <div
+                      className="tg-metric-progress-fill"
+                      style={{
+                        width: aiVal !== null ? `${Math.min(100, Math.max(0, aiVal))}%` : '0%',
+                        background: '#8876ee'
+                      }}
+                    />
+                  </div>
+                  <div className="tg-metric-footer">
+                    <span title="Statistical stylistic probability score; advisory indicator only, not proof of authorship">
+                      Stylistic probability*
+                    </span>
+                    <button
+                      type="button"
+                      className="tg-metric-action-link"
+                      onClick={(e) => { e.stopPropagation(); setActiveDetailTab('ai'); }}
+                    >
+                      View Analysis →
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Clean Horizontal Stacked Coverage Progress Bar */}
+          <div className="tg-coverage-panel">
+            <div className="tg-coverage-header">
+              <strong>Corpus Coverage Distribution</strong>
+              <span style={{ fontSize: '10.5px', color: 'var(--muted)' }}>
+                {scanResult ? `${scanResult.analyzedWords || wordCount} words analyzed` : '0 words analyzed'}
+              </span>
+            </div>
+            <div className="tg-stacked-bar-container">
+              {scanResult ? (
+                <>
+                  <div
+                    className="tg-bar-segment matched"
+                    style={{ width: `${Math.min(100, Math.max(0, scanResult.similarityScore))}%` }}
+                    title={`Matched Text: ${scanResult.similarityScore}%`}
+                  />
+                  <div
+                    className="tg-bar-segment unmatched"
+                    style={{ width: `${Math.max(0, 100 - scanResult.similarityScore)}%` }}
+                    title={`Unmatched Text: ${100 - scanResult.similarityScore}%`}
+                  />
+                </>
+              ) : (
+                <div style={{ width: '100%', height: '100%', background: 'var(--soft)' }} />
+              )}
+            </div>
+            <div className="tg-coverage-legend">
+              <span className="tg-legend-item">
+                <span className="tg-legend-color" style={{ background: '#ef4444' }} />
+                Matched Overlap ({scanResult ? `${scanResult.similarityScore}%` : '0%'})
+              </span>
+              <span className="tg-legend-item">
+                <span className="tg-legend-color" style={{ background: '#10b981' }} />
+                Unmatched Text ({scanResult ? `${100 - scanResult.similarityScore}%` : '100%'})
+              </span>
+              <span style={{ marginLeft: 'auto', fontSize: '9.5px', color: 'var(--muted)', fontStyle: 'italic' }}>
+                *Unmatched coverage reflects absence of overlap in queried repositories; not a guarantee of originality.
+              </span>
+            </div>
           </div>
 
           {/* Exclusion Toggles Bar */}
@@ -3979,235 +4201,607 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
             </div>
           </div>
 
-          {/* Matched Sources Header & Filter Tabs */}
-          <div style={{ padding: '10px 20px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border)' }}>
-            <div className="qb-modes" style={{ gap: '4px' }}>
-              <button
-                className={`qb-mode-btn ${filterTab === 'all' ? 'active' : ''}`}
-                onClick={() => setFilterTab('all')}
-                style={{ padding: '4px 8px', fontSize: '10px' }}
-              >
-                All ({scanResult?.matchedPassages?.length || 0})
-              </button>
-              <button
-                className={`qb-mode-btn ${filterTab === 'overlap' ? 'active' : ''}`}
-                onClick={() => setFilterTab('overlap')}
-                style={{ padding: '4px 8px', fontSize: '10px' }}
-              >
-                Overlaps
-              </button>
-              <button
-                className={`qb-mode-btn ${filterTab === 'repeat' ? 'active' : ''}`}
-                onClick={() => setFilterTab('repeat')}
-                style={{ padding: '4px 8px', fontSize: '10px' }}
-              >
-                Repeated
-              </button>
-              <button
-                className={`qb-mode-btn ${filterTab === 'doi' ? 'active' : ''}`}
-                onClick={() => setFilterTab('doi')}
-                style={{ padding: '4px 8px', fontSize: '10px' }}
-              >
-                DOIs
-              </button>
-            </div>
-            <span style={{ fontSize: '10px', color: 'var(--muted)' }}>
-              {scanResult?.analyzedWords ? `${scanResult.analyzedWords} words compared` : ''}
-            </span>
+          {/* 5 Tab Detail Sections Header */}
+          <div className="tg-tabs-nav">
+            <button
+              type="button"
+              className={`tg-tab-btn ${activeDetailTab === 'overview' ? 'active' : ''}`}
+              onClick={() => setActiveDetailTab('overview')}
+            >
+              <FileCheck2 size={13} />
+              Overview
+            </button>
+            <button
+              type="button"
+              className={`tg-tab-btn ${activeDetailTab === 'matches' ? 'active' : ''}`}
+              onClick={() => setActiveDetailTab('matches')}
+            >
+              <GitCompare size={13} />
+              Matched Sources
+              <span className="tg-tab-count-pill">{scanResult?.matchedPassages?.length || 0}</span>
+            </button>
+            <button
+              type="button"
+              className={`tg-tab-btn ${activeDetailTab === 'doi' ? 'active' : ''}`}
+              onClick={() => setActiveDetailTab('doi')}
+            >
+              <BookOpenCheck size={13} />
+              DOI Verification
+              <span className="tg-tab-count-pill">{scanResult?.doiVerification?.total || 0}</span>
+            </button>
+            <button
+              type="button"
+              className={`tg-tab-btn ${activeDetailTab === 'ai' ? 'active' : ''}`}
+              onClick={() => setActiveDetailTab('ai')}
+            >
+              <Sparkles size={13} />
+              AI Analysis
+            </button>
+            <button
+              type="button"
+              className={`tg-tab-btn ${activeDetailTab === 'history' ? 'active' : ''}`}
+              onClick={() => { setActiveDetailTab('history'); loadHistory(); }}
+            >
+              <History size={13} />
+              Scan History
+              <span className="tg-tab-count-pill">{scanHistory.length}</span>
+            </button>
           </div>
 
-          {/* Matched Sources Cards List */}
-          <div className="tg-matches-box">
-            {!scanResult ? (
-              <div style={{ textAlign: 'center', padding: '50px 20px', color: 'var(--muted)' }}>
-                <FileCheck2 size={28} style={{ opacity: 0.4, marginBottom: '8px' }} />
-                <p style={{ margin: 0, fontSize: '12px' }}>Click "Deep Scan" to analyze manuscript originality.</p>
+          {/* Tabbed Detail Content Panels */}
+          <div className="tg-tab-content-area">
+            {/* TAB 1: OVERVIEW */}
+            {activeDetailTab === 'overview' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <table className="tg-data-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: '35%' }}>Audit Metric</th>
+                      <th>Observed Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><strong>Document Title</strong></td>
+                      <td>{activeDoc?.title || scanResult?.documentTitle || 'Academic Manuscript Draft'}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>Similarity Coverage</strong></td>
+                      <td>
+                        <strong>{scanResult ? `${scanResult.similarityScore}%` : 'Not Scanned'}</strong>
+                        <span style={{ marginLeft: '8px', color: 'var(--muted)', fontSize: '10px' }}>
+                          ({scanResult ? (scanResult.similarityScore < 12 ? 'Within acceptable institutional thresholds' : 'Elevated similarity requires citation review') : '—'})
+                        </span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><strong>Unmatched Text Coverage</strong></td>
+                      <td>
+                        <strong>{scanResult ? `${100 - scanResult.similarityScore}%` : '—'}</strong>
+                        <span style={{ marginLeft: '8px', color: 'var(--muted)', fontSize: '10px' }}>
+                          (Proportion of text with no lexical matches across checked corpora)
+                        </span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><strong>Words Compared</strong></td>
+                      <td>{scanResult ? `${scanResult.analyzedWords || wordCount} words (${wordCount} total in manuscript)` : `${wordCount} words`}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>Matching Passages Found</strong></td>
+                      <td>{scanResult ? `${scanResult.matchedPassages?.length || 0} passages across ${scanResult.distinctSourcesCount || 0} distinct sources` : '—'}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>Scholarly DOIs Extracted</strong></td>
+                      <td>
+                        {scanResult?.doiVerification?.total ? (
+                          `${scanResult.doiVerification.verified} verified out of ${scanResult.doiVerification.total} references`
+                        ) : (
+                          'No DOI references detected in manuscript text'
+                        )}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><strong>Corpus Scope</strong></td>
+                      <td>{scanResult?.corpusCoverage || 'Authorized institutional repository, user document history, and Crossref scholarly registry.'}</td>
+                    </tr>
+                    <tr>
+                      <td><strong>Cryptographic SHA-256</strong></td>
+                      <td style={{ fontFamily: 'monospace', fontSize: '9.5px', color: 'var(--muted)' }}>
+                        {scanResult?.sha256 || 'Pending scan completion'}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                {/* Advisory Disclaimer */}
+                <div className="tg-advisory-banner info">
+                  <CircleHelp size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                  <div>
+                    <strong>Interpretive Guidance:</strong> Text similarity coverage indicates verbatim or close-paraphrase lexical overlap with indexed records. It does not certify academic misconduct or originality. Properly formatted citations and methodological phrases should be evaluated in context.
+                  </div>
+                </div>
+
+                {scanResult && (
+                  <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="secondary small"
+                      onClick={() => setShowCertModal(true)}
+                    >
+                      <ShieldCheck size={12} /> View Integrity Certificate
+                    </button>
+                    <button
+                      type="button"
+                      className="primary small"
+                      onClick={handleDownloadPdf}
+                      disabled={generatingPdf}
+                    >
+                      <Download size={12} className={generatingPdf ? 'spin' : ''} />
+                      {generatingPdf ? 'Compiling PDF...' : 'Download PDF Report'}
+                    </button>
+                  </div>
+                )}
               </div>
-            ) : filteredMatches.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '50px 20px', color: 'var(--muted)' }}>
-                <ShieldCheck size={28} style={{ color: '#10b981', marginBottom: '8px' }} />
-                <strong style={{ display: 'block', color: 'var(--text)', fontSize: '13px' }}>No matches found in this category</strong>
-                <p style={{ margin: '4px 0 0', fontSize: '11px' }}>Your text demonstrates high originality and standard scholarly citation attribution.</p>
-              </div>
-            ) : (
-              filteredMatches.map((m: any, idx: number) => {
-                const isSelected = selectedMatchId === m.id;
-                const isResolveOpen = resolveState?.matchId === m.id;
-                const isDoi = m.type === 'scholarly_citation_reference';
-                const isOverlap = m.type === 'internal_passage_overlap';
+            )}
 
-                return (
-                  <div
-                    key={m.id || idx}
-                    id={m.id}
-                    className={`tg-match-card ${isSelected ? 'active' : ''}`}
-                  >
-                    <div className="tg-match-card-head">
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span className={`tg-badge-match ${isDoi ? 'doi' : isOverlap ? 'overlap' : 'repeat'}`}>
-                          {isDoi ? 'Crossref DOI' : isOverlap ? 'Verbatim Overlap' : 'Repeated Phrase'}
-                        </span>
-                        <strong style={{ fontSize: '11px', color: 'var(--text)' }}>
-                          {m.sourceLocation}
-                        </strong>
-                      </div>
-                      {m.matchPercentage && (
-                        <span style={{ fontSize: '10px', fontWeight: 700, color: '#e11d48' }}>
-                          {m.matchPercentage}% match
-                        </span>
-                      )}
-                    </div>
+            {/* TAB 2: MATCHED SOURCES */}
+            {activeDetailTab === 'matches' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {/* Sub-filter tabs */}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                  <div className="qb-modes" style={{ gap: '4px' }}>
+                    <button
+                      className={`qb-mode-btn ${filterTab === 'all' ? 'active' : ''}`}
+                      onClick={() => setFilterTab('all')}
+                      style={{ padding: '4px 8px', fontSize: '10px' }}
+                    >
+                      All ({scanResult?.matchedPassages?.length || 0})
+                    </button>
+                    <button
+                      className={`qb-mode-btn ${filterTab === 'overlap' ? 'active' : ''}`}
+                      onClick={() => setFilterTab('overlap')}
+                      style={{ padding: '4px 8px', fontSize: '10px' }}
+                    >
+                      Verbatim Overlaps
+                    </button>
+                    <button
+                      className={`qb-mode-btn ${filterTab === 'repeat' ? 'active' : ''}`}
+                      onClick={() => setFilterTab('repeat')}
+                      style={{ padding: '4px 8px', fontSize: '10px' }}
+                    >
+                      Repeated Phrases
+                    </button>
+                    <button
+                      className={`qb-mode-btn ${filterTab === 'doi' ? 'active' : ''}`}
+                      onClick={() => setFilterTab('doi')}
+                      style={{ padding: '4px 8px', fontSize: '10px' }}
+                    >
+                      DOIs
+                    </button>
+                  </div>
+                  <span style={{ fontSize: '10.5px', color: 'var(--muted)' }}>
+                    {filteredMatches.length} items shown
+                  </span>
+                </div>
 
-                    <div className="tg-excerpt-grid">
-                      <div className="tg-excerpt-side">
-                        <small>Your Manuscript</small>
-                        <p>“{m.excerpt}”</p>
-                      </div>
-                      <div className="tg-excerpt-side">
-                        <small>{isDoi ? 'Linked Scholarly Registry' : 'Document Location'}</small>
-                        <p style={{ color: 'var(--muted)' }}>
-                          {isDoi ? m.detail : m.targetLocation || m.detail}
-                        </p>
-                      </div>
-                    </div>
+                {!scanResult ? (
+                  <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--muted)' }}>
+                    <FileCheck2 size={28} style={{ opacity: 0.4, marginBottom: '8px' }} />
+                    <p style={{ margin: 0, fontSize: '12px' }}>Click "Deep Scan" to analyze manuscript similarity and sources.</p>
+                  </div>
+                ) : filteredMatches.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--muted)' }}>
+                    <ShieldCheck size={28} style={{ color: '#10b981', marginBottom: '8px' }} />
+                    <strong style={{ display: 'block', color: 'var(--text)', fontSize: '13px' }}>No matches found in this category</strong>
+                    <p style={{ margin: '4px 0 0', fontSize: '11px' }}>Your text demonstrates high originality and standard scholarly citation attribution.</p>
+                  </div>
+                ) : (
+                  filteredMatches.map((m: any, idx: number) => {
+                    const isSelected = selectedMatchId === m.id;
+                    const isResolveOpen = resolveState?.matchId === m.id;
+                    const isDoi = m.type === 'scholarly_citation_reference';
+                    const isOverlap = m.type === 'internal_passage_overlap';
 
-                    <div className="tg-match-actions">
-                      <div className="tg-match-left">
-                        <span className="tg-word-pill">
-                          <FileText size={11} />
-                          {m.wordCount || (m.matchText || m.fullText || m.excerpt || '').trim().split(/\s+/).filter(Boolean).length} words
-                        </span>
+                    return (
+                      <div
+                        key={m.id || idx}
+                        id={m.id}
+                        className={`tg-match-card ${isSelected ? 'active' : ''}`}
+                      >
+                        <div className="tg-match-card-head">
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span className={`tg-badge-match ${isDoi ? 'doi' : isOverlap ? 'overlap' : 'repeat'}`}>
+                              {isDoi ? 'Crossref DOI' : isOverlap ? 'Verbatim Overlap' : 'Repeated Phrase'}
+                            </span>
+                            <strong style={{ fontSize: '11px', color: 'var(--text)' }}>
+                              {m.sourceLocation}
+                            </strong>
+                          </div>
+                          {m.matchPercentage && (
+                            <span style={{ fontSize: '10px', fontWeight: 700, color: '#e11d48' }}>
+                              {m.matchPercentage}% match
+                            </span>
+                          )}
+                        </div>
 
-                        {m.sourceLink && (
-                          <a
-                            href={m.sourceLink}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={{ fontSize: '11px', color: '#8876ee', textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
-                          >
-                            View Open Source <ExternalLink size={11} />
-                          </a>
+                        <div className="tg-excerpt-grid">
+                          <div className="tg-excerpt-side">
+                            <small>Your Manuscript</small>
+                            <p>“{m.excerpt}”</p>
+                          </div>
+                          <div className="tg-excerpt-side">
+                            <small>{isDoi ? 'Linked Scholarly Registry' : 'Document Location'}</small>
+                            <p style={{ color: 'var(--muted)' }}>
+                              {isDoi ? m.detail : m.targetLocation || m.detail}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="tg-match-actions">
+                          <div className="tg-match-left">
+                            <span className="tg-word-pill">
+                              <FileText size={11} />
+                              {m.wordCount || (m.matchText || m.fullText || m.excerpt || '').trim().split(/\s+/).filter(Boolean).length} words
+                            </span>
+
+                            {m.sourceLink && (
+                              <a
+                                href={m.sourceLink}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ fontSize: '11px', color: '#8876ee', textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                              >
+                                View Open Source <ExternalLink size={11} />
+                              </a>
+                            )}
+                          </div>
+
+                          {!isDoi && (
+                            <div className="tg-match-right">
+                              {onSendToHumanizer && (
+                                <button
+                                  className="tg-btn-transfer"
+                                  onClick={() => onSendToHumanizer(m.matchText || m.fullText || m.excerpt)}
+                                  title="Transfer passage to AI Text Humanizer workspace"
+                                >
+                                  <span>Open in Humanizer</span>
+                                  <ExternalLink size={11} />
+                                </button>
+                              )}
+                              <button
+                                className={`tg-btn-humanize ${isResolveOpen ? 'open' : ''}`}
+                                onClick={() => {
+                                  if (isResolveOpen) setResolveState(null);
+                                  else handleGenerateRewrite(m, 'humanize');
+                                }}
+                              >
+                                {isResolveOpen ? <X size={12} /> : <Sparkles size={12} />}
+                                {isResolveOpen ? 'Close Resolve' : '⚡ Fix with Humanizer'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Inline Quick Resolve Drawer */}
+                        {isResolveOpen && (
+                          <div className="tg-resolve-card">
+                            <div className="tg-resolve-head">
+                              <div className="tg-resolve-title">
+                                <Sparkles size={13} />
+                                <span>⚡ Humanize & Paraphrase to Resolve</span>
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                {resolveState?.busy && <RefreshCw size={12} className="spin" />}
+                                <button
+                                  className="tg-resolve-close"
+                                  onClick={() => setResolveState(null)}
+                                  title="Close resolve panel"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="tg-resolve-modes">
+                              <button
+                                className={`tg-mode-chip ${resolveState?.mode === 'humanize' ? 'active' : ''}`}
+                                onClick={() => handleGenerateRewrite(m, 'humanize')}
+                                disabled={resolveState?.busy}
+                              >
+                                🛡️ TextGuard Humanizer
+                              </button>
+                              <button
+                                className={`tg-mode-chip ${resolveState?.mode === 'academic-clarity' ? 'active' : ''}`}
+                                onClick={() => handleGenerateRewrite(m, 'academic-clarity')}
+                                disabled={resolveState?.busy}
+                              >
+                                🎓 Academic Clarity
+                              </button>
+                              <button
+                                className={`tg-mode-chip ${resolveState?.mode === 'standard' ? 'active' : ''}`}
+                                onClick={() => handleGenerateRewrite(m, 'standard')}
+                                disabled={resolveState?.busy}
+                              >
+                                ⚡ Standard
+                              </button>
+                              <button
+                                className={`tg-mode-chip ${resolveState?.mode === 'formal-scientific' ? 'active' : ''}`}
+                                onClick={() => handleGenerateRewrite(m, 'formal-scientific')}
+                                disabled={resolveState?.busy}
+                              >
+                                🔬 Formal Scientific
+                              </button>
+                            </div>
+
+                            {resolveState?.proposed ? (
+                              <>
+                                <div className="tg-resolve-diff">
+                                  <div className="tg-diff-head">
+                                    <span className="tg-diff-label">PROPOSED REWRITE</span>
+                                    <span className="tg-diff-words">
+                                      {resolveState.proposed.trim().split(/\s+/).filter(Boolean).length} words
+                                    </span>
+                                  </div>
+                                  <div style={{ color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
+                                    {resolveState.proposed}
+                                  </div>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', flexWrap: 'wrap' }}>
+                                  <button
+                                    className="secondary small"
+                                    onClick={() => handleGenerateRewrite(m, resolveState.mode)}
+                                    disabled={resolveState.busy}
+                                  >
+                                    Try Another
+                                  </button>
+                                  <button
+                                    className="primary small"
+                                    style={{ background: '#059669', borderColor: '#059669', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                                    onClick={() => handleAcceptRewrite(resolveState.passage, resolveState.proposed!, m)}
+                                  >
+                                    <Check size={12} /> ✓ Accept & Replace in Manuscript
+                                  </button>
+                                </div>
+                              </>
+                            ) : resolveState?.busy ? (
+                              <div style={{ padding: '20px 16px', textAlign: 'center', fontSize: '12px', color: 'var(--muted)' }}>
+                                <RefreshCw size={16} className="spin" style={{ display: 'block', margin: '0 auto 8px', color: '#ea580c' }} />
+                                Generating authentic humanized academic prose...
+                              </div>
+                            ) : null}
+                          </div>
                         )}
                       </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
 
-                      {!isDoi && (
-                        <div className="tg-match-right">
-                          {onSendToHumanizer && (
-                            <button
-                              className="tg-btn-transfer"
-                              onClick={() => onSendToHumanizer(m.matchText || m.fullText || m.excerpt)}
-                              title="Transfer passage to AI Text Humanizer workspace"
-                            >
-                              <span>Open in Humanizer</span>
-                              <ExternalLink size={11} />
-                            </button>
-                          )}
-                          <button
-                            className={`tg-btn-humanize ${isResolveOpen ? 'open' : ''}`}
-                            onClick={() => {
-                              if (isResolveOpen) setResolveState(null);
-                              else handleGenerateRewrite(m, 'humanize');
-                            }}
-                          >
-                            {isResolveOpen ? <X size={12} /> : <Sparkles size={12} />}
-                            {isResolveOpen ? 'Close Resolve' : '⚡ Fix with Humanizer'}
-                          </button>
-                        </div>
-                      )}
-                    </div>
+            {/* TAB 3: DOI VERIFICATION */}
+            {activeDetailTab === 'doi' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <strong>Scholarly DOI References Audit</strong>
+                  <span style={{ fontSize: '10.5px', color: 'var(--muted)' }}>
+                    Crossref Open Registry
+                  </span>
+                </div>
 
-                    {/* Inline Quick Resolve Drawer */}
-                    {isResolveOpen && (
-                      <div className="tg-resolve-card">
-                        <div className="tg-resolve-head">
-                          <div className="tg-resolve-title">
-                            <Sparkles size={13} />
-                            <span>⚡ Humanize & Paraphrase to Resolve</span>
-                          </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            {resolveState?.busy && <RefreshCw size={12} className="spin" />}
-                            <button
-                              className="tg-resolve-close"
-                              onClick={() => setResolveState(null)}
-                              title="Close resolve panel"
-                            >
-                              <X size={12} />
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="tg-resolve-modes">
-                          <button
-                            className={`tg-mode-chip ${resolveState?.mode === 'humanize' ? 'active' : ''}`}
-                            onClick={() => handleGenerateRewrite(m, 'humanize')}
-                            disabled={resolveState?.busy}
-                          >
-                            🛡️ TextGuard Humanizer
-                          </button>
-                          <button
-                            className={`tg-mode-chip ${resolveState?.mode === 'academic-clarity' ? 'active' : ''}`}
-                            onClick={() => handleGenerateRewrite(m, 'academic-clarity')}
-                            disabled={resolveState?.busy}
-                          >
-                            🎓 Academic Clarity
-                          </button>
-                          <button
-                            className={`tg-mode-chip ${resolveState?.mode === 'standard' ? 'active' : ''}`}
-                            onClick={() => handleGenerateRewrite(m, 'standard')}
-                            disabled={resolveState?.busy}
-                          >
-                            ⚡ Standard
-                          </button>
-                          <button
-                            className={`tg-mode-chip ${resolveState?.mode === 'formal-scientific' ? 'active' : ''}`}
-                            onClick={() => handleGenerateRewrite(m, 'formal-scientific')}
-                            disabled={resolveState?.busy}
-                          >
-                            🔬 Formal Scientific
-                          </button>
-                        </div>
-
-                        {resolveState?.proposed ? (
-                          <>
-                            <div className="tg-resolve-diff">
-                              <div className="tg-diff-head">
-                                <span className="tg-diff-label">PROPOSED REWRITE</span>
-                                <span className="tg-diff-words">
-                                  {resolveState.proposed.trim().split(/\s+/).filter(Boolean).length} words
-                                </span>
-                              </div>
-                              <div style={{ color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
-                                {resolveState.proposed}
-                              </div>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', flexWrap: 'wrap' }}>
-                              <button
-                                className="secondary small"
-                                onClick={() => handleGenerateRewrite(m, resolveState.mode)}
-                                disabled={resolveState.busy}
-                              >
-                                Try Another
-                              </button>
-                              <button
-                                className="primary small"
-                                style={{ background: '#059669', borderColor: '#059669', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
-                                onClick={() => handleAcceptRewrite(resolveState.passage, resolveState.proposed!, m)}
-                              >
-                                <Check size={12} /> ✓ Accept & Replace in Manuscript
-                              </button>
-                            </div>
-                          </>
-                        ) : resolveState?.busy ? (
-                          <div style={{ padding: '20px 16px', textAlign: 'center', fontSize: '12px', color: 'var(--muted)' }}>
-                            <RefreshCw size={16} className="spin" style={{ display: 'block', margin: '0 auto 8px', color: '#ea580c' }} />
-                            Generating authentic humanized academic prose...
-                          </div>
-                        ) : null}
-                      </div>
-                    )}
+                {!scanResult?.doiVerification?.references?.length ? (
+                  <div style={{ textAlign: 'center', padding: '36px 20px', color: 'var(--muted)', background: 'var(--surface2)', borderRadius: '10px' }}>
+                    <BookOpenCheck size={28} style={{ opacity: 0.5, marginBottom: '8px' }} />
+                    <strong style={{ display: 'block', color: 'var(--text)', fontSize: '12.5px' }}>No DOI references detected</strong>
+                    <p style={{ margin: '4px 0 0', fontSize: '11px', maxWidth: '420px', marginInline: 'auto' }}>
+                      This manuscript does not contain extracted DOI identifiers (e.g., 10.xxxx/yyyy). To verify citations, include standard DOI links in your bibliography.
+                    </p>
                   </div>
-                );
-              })
+                ) : (
+                  <table className="tg-data-table">
+                    <thead>
+                      <tr>
+                        <th>Identifier / DOI</th>
+                        <th>Resolution Status</th>
+                        <th>Matched Metadata / Journal</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scanResult.doiVerification.references.map((r: any, idx: number) => (
+                        <tr key={idx}>
+                          <td>
+                            <strong style={{ display: 'block', fontFamily: 'monospace', fontSize: '10.5px' }}>
+                              {r.doi || r.rawCitation?.slice(0, 40) || 'DOI Reference'}
+                            </strong>
+                            {r.doi && (
+                              <a
+                                href={`https://doi.org/${r.doi}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ fontSize: '10px', color: '#6366f1', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+                              >
+                                doi.org/{r.doi} <ExternalLink size={9} />
+                              </a>
+                            )}
+                          </td>
+                          <td>
+                            <span className={`tg-metric-badge ${r.status === 'verified' ? 'clean' : r.status === 'partial' ? 'moderate' : 'elevated'}`}>
+                              {r.status === 'verified' ? 'Verified' : r.status === 'partial' ? 'Partial' : 'Unverified'}
+                            </span>
+                          </td>
+                          <td>
+                            <div style={{ fontSize: '11px', color: 'var(--text)' }}>
+                              {r.title || r.detail || 'Metadata record retrieved from open Crossref scholarly index'}
+                            </div>
+                            {r.journal && (
+                              <div style={{ fontSize: '10px', color: 'var(--muted)', marginTop: '2px' }}>
+                                <em>{r.journal}</em> {r.year ? `(${r.year})` : ''}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                <div className="tg-advisory-banner info">
+                  <CircleHelp size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                  <div>
+                    <strong>Verification Criteria:</strong> ResearchProof AI queries open Crossref registries to confirm DOI authenticity, matching article titles, published years, and indexed journals against author bibliography citations.
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 4: AI ANALYSIS */}
+            {activeDetailTab === 'ai' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <div className="tg-ai-card">
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Sparkles size={16} color="#8876ee" />
+                      <strong>AI Stylistic Authorship Assessment</strong>
+                    </div>
+                    <span className="tg-metric-badge neutral">
+                      Provider: Internal Heuristic Analyzer (Local)
+                    </span>
+                  </div>
+
+                  <div className="tg-ai-metrics-row">
+                    <div className="tg-ai-submetric">
+                      <small>Stylistic AI Likelihood</small>
+                      <strong>{scanResult?.aiLikelihood ?? 12}%</strong>
+                    </div>
+                    <div className="tg-ai-submetric">
+                      <small>Uncertainty Band</small>
+                      <strong>{scanResult?.aiAssessment?.uncertaintyBand || '± 15%'}</strong>
+                    </div>
+                    <div className="tg-ai-submetric">
+                      <small>Burstiness & Cadence</small>
+                      <strong>{scanResult?.aiAssessment?.burstinessEvaluation || 'Dynamic variance (Human cadence)'}</strong>
+                    </div>
+                  </div>
+
+                  {scanResult?.aiAssessment?.indicators?.length > 0 && (
+                    <div style={{ marginTop: '8px' }}>
+                      <strong style={{ fontSize: '11px', display: 'block', marginBottom: '6px' }}>Observed Stylistic Patterns:</strong>
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        {scanResult.aiAssessment.indicators.map((ind: string, idx: number) => (
+                          <span key={idx} className="tg-metric-badge moderate">
+                            {ind}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Clear Uncertainty Explanation */}
+                <div className="tg-advisory-banner warning">
+                  <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
+                  <div>
+                    <strong>Critical Advisory Notice:</strong>
+                    <p style={{ margin: '4px 0 0', fontSize: '10.5px', lineHeight: '1.5' }}>
+                      {scanResult?.aiAssessment?.advisoryNotice ||
+                       'Statistical indicators cannot definitively prove human vs. AI authorship. Text generated by non-native English speakers or highly structured academic writing can produce false positives. Never use this score as sole proof of academic misconduct.'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="tg-advisory-banner info">
+                  <CircleHelp size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+                  <div>
+                    <strong>Methodology & Limitations:</strong>
+                    <p style={{ margin: '4px 0 0', fontSize: '10.5px', lineHeight: '1.5' }}>
+                      {scanResult?.aiAssessment?.limitations ||
+                       'Analysis is heuristic-based, examining sentence length variance (burstiness), vocabulary distribution, and formulaic AI transition patterns. No external commercial detector database is queried.'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 5: SCAN HISTORY */}
+            {activeDetailTab === 'history' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <strong>Previous TextGuard Scans</strong>
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={loadHistory}
+                    disabled={loadingHistory}
+                    style={{ fontSize: '10px' }}
+                  >
+                    Refresh ↻
+                  </button>
+                </div>
+
+                {loadingHistory ? (
+                  <div style={{ textAlign: 'center', padding: '30px', color: 'var(--muted)', fontSize: '11px' }}>
+                    <RefreshCw size={16} className="spin" style={{ display: 'block', margin: '0 auto 6px' }} />
+                    Loading scan audit records...
+                  </div>
+                ) : scanHistory.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '36px 20px', color: 'var(--muted)', background: 'var(--surface2)', borderRadius: '10px' }}>
+                    <History size={26} style={{ opacity: 0.5, marginBottom: '6px' }} />
+                    <strong style={{ display: 'block', color: 'var(--text)', fontSize: '12px' }}>No scan history found</strong>
+                    <p style={{ margin: '4px 0 0', fontSize: '11px' }}>Run a deep scan on your manuscript to record audit history.</p>
+                  </div>
+                ) : (
+                  <table className="tg-data-table">
+                    <thead>
+                      <tr>
+                        <th>Date & Time</th>
+                        <th>Document Title</th>
+                        <th>Similarity</th>
+                        <th>DOIs</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scanHistory.map((s: any) => {
+                        const sid = s._id || s.id;
+                        return (
+                          <tr key={sid}>
+                            <td style={{ whiteSpace: 'nowrap', fontSize: '10px', color: 'var(--muted)' }}>
+                              {new Date(s.createdAt).toLocaleDateString()} {new Date(s.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </td>
+                            <td>
+                              <strong>{s.documentTitle || 'Untitled Draft'}</strong>
+                              <div style={{ fontSize: '9.5px', color: 'var(--muted)' }}>
+                                {s.analyzedWordCount || s.totalWords || 0} words analyzed
+                              </div>
+                            </td>
+                            <td>
+                              <span className={`tg-metric-badge ${s.similarityCoverage > 25 ? 'elevated' : s.similarityCoverage > 12 ? 'moderate' : 'clean'}`}>
+                                {s.similarityCoverage || 0}%
+                              </span>
+                            </td>
+                            <td>
+                              <span style={{ fontSize: '10.5px' }}>
+                                {s.doiVerification?.verified ?? 0}/{s.doiVerification?.total ?? 0}
+                              </span>
+                            </td>
+                            <td>
+                              <a
+                                href={`${API}/textguard/scans/${sid}/report`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="tg-metric-action-link"
+                                style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+                              >
+                                <Download size={11} /> PDF Report
+                              </a>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
             )}
           </div>
         </div>

@@ -3334,6 +3334,11 @@ apiRouter.post('/textguard/scan', requireAuth, async (req, res, next) => {
       authorizedDocuments: userAuthorizedDocs
     });
 
+    // Run AI authorship indicators assessment
+    const aiAssessment = assessAiAuthorship(text);
+    scanResult.aiAssessment = aiAssessment;
+    scanResult.aiLikelihood = aiAssessment.aiLikelihood;
+
     // Meaning preservation validation if a revision is being audited
     let meaningValidation = null;
     if (revisedText && typeof revisedText === 'string') {
