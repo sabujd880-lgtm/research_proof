@@ -144,6 +144,20 @@ async function verifyGoogleToken(idToken) {
     throw new Error('Google email is not verified.');
   }
 
+  if (payload.exp && Number(payload.exp) * 1000 < Date.now()) {
+    throw new Error('Google token has expired.');
+  }
+
+  if (payload.iss && !['accounts.google.com', 'https://accounts.google.com'].includes(payload.iss)) {
+    throw new Error('Google token issuer is invalid.');
+  }
+
+  if (expectedClientId && expectedClientId !== 'your-google-oauth-client-id.apps.googleusercontent.com') {
+    if (payload.aud && payload.aud !== expectedClientId) {
+      throw new Error('Token audience mismatch: credential was not issued for this client ID.');
+    }
+  }
+
   return {
     googleId: payload.sub,
     email: payload.email.toLowerCase(),
@@ -548,6 +562,21 @@ apiRouter.post('/auth/login', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Public Auth Configuration (exposes Client ID for dynamic frontend initialization)
+apiRouter.get('/auth/config', (_req, res) => {
+  const rawClientId = process.env.GOOGLE_CLIENT_ID || '';
+  const isConfigured = Boolean(
+    rawClientId &&
+    rawClientId !== 'your-google-oauth-client-id.apps.googleusercontent.com' &&
+    rawClientId.trim().length > 10
+  );
+  res.json({
+    googleClientId: isConfigured ? rawClientId : '',
+    googleConfigured: isConfigured,
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
 // Google Authentication (Section 2 & 4)
 apiRouter.post('/auth/google', async (req, res, next) => {
   try {
@@ -761,6 +790,12 @@ apiRouter.post('/auth/link-google', requireAuth, async (req, res, next) => {
     }
 
     // In-memory fallback
+    for (const [otherEmail, otherUser] of memUsers.entries()) {
+      if (otherEmail.toLowerCase() !== req.user.email.toLowerCase() && otherUser.googleId === googleId) {
+        return res.status(409).json({ error: 'This Google account is already linked to another ResearchProof user.' });
+      }
+    }
+
     const mem = memUsers.get(req.user.email);
     if (!mem) return res.status(404).json({ error: 'User not found.' });
     mem.googleId = googleId;

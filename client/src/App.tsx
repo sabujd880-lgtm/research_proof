@@ -9,12 +9,18 @@ import {
 } from 'lucide-react';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
-const isGoogleConfigured = Boolean(
-  GOOGLE_CLIENT_ID &&
-  !GOOGLE_CLIENT_ID.includes('your-google-oauth-client-id') &&
-  GOOGLE_CLIENT_ID.trim().length > 10
+const DEFAULT_GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+
+// Google Identity Services (GSI) origin support detection
+const isLocalhostOrigin = typeof window !== 'undefined' && (
+  window.location.hostname === 'localhost' ||
+  window.location.hostname === '127.0.0.1' ||
+  window.location.hostname === '[::1]'
 );
+const isHttpsOrigin = typeof window !== 'undefined' && window.location.protocol === 'https:';
+// Google Identity Services requires HTTPS or localhost loopback
+const isOriginSupportedByGoogle = isLocalhostOrigin || isHttpsOrigin;
+const isLanHttpOrigin = typeof window !== 'undefined' && !isLocalhostOrigin && !isHttpsOrigin;
 
 type User = {
   id: string;
@@ -259,6 +265,25 @@ export default function App() {
   const [section, setSection] = useState('Writing Studio');
   const [dark, setDark] = useState(true);
   const [persist, setPersist] = useState(true);
+  const [googleClientId, setGoogleClientId] = useState<string>(DEFAULT_GOOGLE_CLIENT_ID);
+
+  // Dynamic Google OAuth configuration resolution (from backend /api/auth/config if not baked into bundle)
+  useEffect(() => {
+    fetch(`${API}/auth/config`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(cfg => {
+        if (cfg?.googleClientId && !googleClientId) {
+          setGoogleClientId(cfg.googleClientId);
+        }
+      })
+      .catch(() => {});
+  }, [googleClientId]);
+
+  const isGoogleConfigured = Boolean(
+    googleClientId &&
+    !googleClientId.includes('your-google-oauth-client-id') &&
+    googleClientId.trim().length > 10
+  );
 
   // Collapsible Navigation & Responsive Sidebar State
   const [isCompact, setIsCompact] = useState<boolean>(() => {
@@ -812,8 +837,8 @@ export default function App() {
         <h1>ResearchProof <span>AI</span></h1>
         <p className="muted">Rigorous scientific writing assistance and research integrity platform.</p>
 
-        {/* REM: One-click Google Sign-In and divider are rendered only when VITE_GOOGLE_CLIENT_ID is active */}
-        {isGoogleConfigured && (
+        {/* Google Authentication Section */}
+        {isGoogleConfigured && isOriginSupportedByGoogle ? (
           <>
             <div className="google-btn-wrap">
               <GoogleLogin
@@ -828,7 +853,33 @@ export default function App() {
             </div>
             <div className="auth-divider">or continue with email</div>
           </>
-        )}
+        ) : isLanHttpOrigin ? (
+          <>
+            <div className="google-diagnostic-box lan">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, fontSize: '11px', color: '#f59e0b', marginBottom: '2px' }}>
+                <AlertTriangle size={14} />
+                <span>Google Sign-In: HTTPS / Localhost Required</span>
+              </div>
+              <p style={{ margin: 0, fontSize: '10.5px', color: 'var(--muted)', lineHeight: '1.4' }}>
+                Google Identity Services disables OAuth on plain HTTP local network IPs ({typeof window !== 'undefined' ? window.location.hostname : 'LAN'}). Sign in with your password below, or access via <a href={`http://localhost:${typeof window !== 'undefined' ? window.location.port || '5173' : '5173'}`} style={{ color: '#8876ee', textDecoration: 'underline' }}>localhost</a>.
+              </p>
+            </div>
+            <div className="auth-divider">sign in with email & password</div>
+          </>
+        ) : !isGoogleConfigured ? (
+          <>
+            <div className="google-diagnostic-box unconfigured">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, fontSize: '11px', color: 'var(--muted)', marginBottom: '2px' }}>
+                <CircleHelp size={14} />
+                <span>Google Sign-In (Unconfigured)</span>
+              </div>
+              <p style={{ margin: 0, fontSize: '10.5px', color: 'var(--muted)', lineHeight: '1.4' }}>
+                Google OAuth Web Client is not configured on this deployment. Sign in with email and password below.
+              </p>
+            </div>
+            <div className="auth-divider">sign in with email & password</div>
+          </>
+        ) : null}
 
         <form onSubmit={authenticate} className="auth-form">
           <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@university.edu" /></label>
@@ -843,10 +894,11 @@ export default function App() {
       </div>
     );
 
+    const canInitializeGoogle = Boolean(isGoogleConfigured && isOriginSupportedByGoogle && googleClientId);
     return (
       <div className={`auth-page ${dark ? 'dark' : ''}`}>
-        {isGoogleConfigured ? (
-          <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+        {canInitializeGoogle ? (
+          <GoogleOAuthProvider clientId={googleClientId}>
             {authContent}
           </GoogleOAuthProvider>
         ) : (
@@ -1946,6 +1998,9 @@ export default function App() {
               logout={logout}
               onLinkGoogle={handleLinkGoogle}
               isGoogleConfigured={isGoogleConfigured}
+              isOriginSupportedByGoogle={isOriginSupportedByGoogle}
+              isLanHttpOrigin={isLanHttpOrigin}
+              googleClientId={googleClientId}
               token={token}
               setMessage={setMessage}
               setError={setError}
@@ -1957,8 +2012,9 @@ export default function App() {
     </div>
   );
 
-  return isGoogleConfigured ? (
-    <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+  const canInitializeGoogle = Boolean(isGoogleConfigured && isOriginSupportedByGoogle && googleClientId);
+  return canInitializeGoogle ? (
+    <GoogleOAuthProvider clientId={googleClientId}>
       {appShellContent}
     </GoogleOAuthProvider>
   ) : (
@@ -4362,7 +4418,7 @@ function HistoryPage({ revisions, token }: { revisions: Revision[]; token?: stri
   );
 }
 
-function SettingsPage({ user, usage, dark, setDark, persist, setPersist, isCompact, setIsCompact, logout, onLinkGoogle, isGoogleConfigured, token, setMessage, setError }: any) {
+function SettingsPage({ user, usage, dark, setDark, persist, setPersist, isCompact, setIsCompact, logout, onLinkGoogle, isGoogleConfigured, isOriginSupportedByGoogle, isLanHttpOrigin, googleClientId, token, setMessage, setError }: any) {
   const [displayName, setDisplayName] = useState(user?.displayName || '');
   const [citationStyle, setCitationStyle] = useState('apa');
   const [rewriteMode, setRewriteMode] = useState('academic-clarity');
@@ -4448,20 +4504,57 @@ function SettingsPage({ user, usage, dark, setDark, persist, setPersist, isCompa
                 <span key={p} className="provider-tag">{p === 'google' ? '✓ Google Connected' : '✓ Password Auth'}</span>
               ))}
             </div>
-            {isGoogleConfigured && !user?.authProviders?.includes('google') && (
-              <div style={{ marginTop: '14px', background: 'var(--surface2)', padding: '12px', borderRadius: '10px', border: '1px solid var(--border)' }}>
-                <strong style={{ fontSize: '11px', display: 'block', marginBottom: '4px' }}>Connect Google Account</strong>
-                <p style={{ fontSize: '10px', color: 'var(--muted)', marginBottom: '10px' }}>Link your Google identity for instant one-click sign-in across devices.</p>
-                <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+
+            {/* Google Account Linking Section */}
+            {user?.authProviders?.includes('google') ? (
+              <div style={{ marginTop: '14px', background: 'var(--surface2)', padding: '12px 14px', borderRadius: '10px', border: '1px solid #10b98144' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#10b981', fontWeight: 700, fontSize: '11.5px' }}>
+                  <Check size={16} />
+                  <span>Google Account Connected</span>
+                </div>
+                <p style={{ fontSize: '10.5px', color: 'var(--muted)', margin: '4px 0 0 0', lineHeight: '1.4' }}>
+                  Your Google identity ({user.email}) is securely linked. You can sign in using either Google or your password.
+                </p>
+              </div>
+            ) : isGoogleConfigured && isOriginSupportedByGoogle ? (
+              <div style={{ marginTop: '14px', background: 'var(--surface2)', padding: '14px', borderRadius: '10px', border: '1px solid var(--border)' }}>
+                <strong style={{ fontSize: '11.5px', display: 'block', marginBottom: '4px' }}>Connect Google Account</strong>
+                <p style={{ fontSize: '10.5px', color: 'var(--muted)', marginBottom: '12px', lineHeight: '1.4' }}>
+                  Link your Google identity for instant one-click sign-in and verified researcher profile status.
+                </p>
+                <div className="google-btn-wrap" style={{ display: 'inline-block' }}>
                   <GoogleLogin
                     onSuccess={onLinkGoogle}
-                    onError={() => {}}
+                    onError={() => setError?.('Google account linking encountered an error.')}
                     theme={dark ? 'filled_black' : 'outline'}
                     shape="rectangular"
                     size="medium"
                     text="continue_with"
                   />
-                </GoogleOAuthProvider>
+                </div>
+              </div>
+            ) : isLanHttpOrigin ? (
+              <div style={{ marginTop: '14px', background: 'var(--surface2)', padding: '14px', borderRadius: '10px', border: '1px solid #f59e0b44' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#f59e0b', fontWeight: 700, fontSize: '11.5px' }}>
+                  <AlertTriangle size={15} />
+                  <span>Google Linking Unavailable on HTTP LAN</span>
+                </div>
+                <p style={{ fontSize: '10.5px', color: 'var(--muted)', margin: '6px 0 0 0', lineHeight: '1.4' }}>
+                  Google Identity Services strictly enforces HTTPS. OAuth linking cannot be initiated over plain HTTP network IPs (<code>{typeof window !== 'undefined' ? window.location.hostname : 'LAN'}</code>).
+                </p>
+                <p style={{ fontSize: '10.5px', color: 'var(--text)', margin: '6px 0 0 0', lineHeight: '1.4' }}>
+                  To link your Google account, open ResearchProof AI via <a href={`http://localhost:${typeof window !== 'undefined' ? window.location.port || '5173' : '5173'}`} style={{ color: '#8876ee', textDecoration: 'underline' }}>http://localhost:{typeof window !== 'undefined' ? window.location.port || '5173' : '5173'}</a> or through your production HTTPS URL.
+                </p>
+              </div>
+            ) : (
+              <div style={{ marginTop: '14px', background: 'var(--surface2)', padding: '14px', borderRadius: '10px', border: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--muted)', fontWeight: 700, fontSize: '11.5px' }}>
+                  <CircleHelp size={15} />
+                  <span>Connect Google Account (Configuration Required)</span>
+                </div>
+                <p style={{ fontSize: '10.5px', color: 'var(--muted)', margin: '6px 0 0 0', lineHeight: '1.4' }}>
+                  Google OAuth Web Client is not configured on this environment. Set <code>VITE_GOOGLE_CLIENT_ID</code> in the frontend environment or <code>GOOGLE_CLIENT_ID</code> in backend settings to activate one-click Google account linking.
+                </p>
               </div>
             )}
           </div>

@@ -483,4 +483,108 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     assert.equal(optionsRes.headers.get('access-control-allow-credentials'), 'true', 'Must allow credentials for cross-site cookie session');
   });
 
+  // --- Test 21: Public Auth Configuration Endpoint (/api/auth/config) ---
+  await t.test('21. Public Auth Configuration Endpoint (/api/auth/config)', async () => {
+    const configRes = await api('/api/auth/config');
+    assert.equal(configRes.status, 200, 'Auth config should return 200 OK');
+    assert.ok('googleConfigured' in configRes.body, 'Must include googleConfigured boolean flag');
+    assert.ok('googleClientId' in configRes.body, 'Must include googleClientId');
+    assert.ok(!('clientSecret' in configRes.body), 'Must never expose Google Client Secret');
+  });
+
+  // --- Test 22: Mismatched Email Rejection on Account Linking ---
+  await t.test('22. Mismatched email rejection on account linking (/api/auth/link-google)', async () => {
+    // Register user A
+    const userAEmail = `user-a-${Date.now()}@university.edu`;
+    const regRes = await api('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email: userAEmail, password: 'SecurePassword123!' })
+    });
+    assert.equal(regRes.status, 201);
+    const userAToken = regRes.body.token;
+
+    // Attempt to link a Google account with DIFFERENT email
+    setGoogleTokenVerifier(async () => ({
+      googleId: `google-diff-${Date.now()}`,
+      email: `different-email-${Date.now()}@gmail.com`,
+      displayName: 'Different User',
+      avatarUrl: '',
+      emailVerified: true
+    }));
+
+    const linkRes = await api('/api/auth/link-google', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${userAToken}` },
+      body: JSON.stringify({ credential: 'MISMATCHED_EMAIL_TOKEN' })
+    });
+
+    assert.equal(linkRes.status, 400, 'Should reject mismatched email with 400 Bad Request');
+    assert.match(linkRes.body.error, /does not match/i);
+  });
+
+  // --- Test 23: Duplicate Google Identity Conflict (409 Conflict) ---
+  await t.test('23. Duplicate Google identity conflict rejection', async () => {
+    const sharedGoogleId = `shared-google-${Date.now()}`;
+    const userBEmail = `user-b-${Date.now()}@university.edu`;
+    const userCEmail = `user-c-${Date.now()}@university.edu`;
+
+    // 1. Register User B and link sharedGoogleId
+    const regB = await api('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email: userBEmail, password: 'SecurePassword123!' })
+    });
+    assert.equal(regB.status, 201);
+    const tokenB = regB.body.token;
+
+    setGoogleTokenVerifier(async () => ({
+      googleId: sharedGoogleId,
+      email: userBEmail,
+      displayName: 'User B',
+      avatarUrl: '',
+      emailVerified: true
+    }));
+
+    const linkB = await api('/api/auth/link-google', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokenB}` },
+      body: JSON.stringify({ credential: 'TOKEN_B' })
+    });
+    assert.equal(linkB.status, 200, 'User B linking should succeed');
+
+    // 2. Register User C
+    const regC = await api('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email: userCEmail, password: 'SecurePassword123!' })
+    });
+    assert.equal(regC.status, 201);
+    const tokenC = regC.body.token;
+
+    // 3. User C attempts to link the SAME sharedGoogleId
+    setGoogleTokenVerifier(async () => ({
+      googleId: sharedGoogleId,
+      email: userCEmail,
+      displayName: 'User C',
+      avatarUrl: '',
+      emailVerified: true
+    }));
+
+    const linkC = await api('/api/auth/link-google', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokenC}` },
+      body: JSON.stringify({ credential: 'TOKEN_C' })
+    });
+
+    assert.equal(linkC.status, 409, 'Should reject duplicate Google ID linking with 409 Conflict');
+    assert.match(linkC.body.error, /already linked/i);
+  });
+
+  // --- Test 24: Unauthenticated Account Linking Rejection (401) ---
+  await t.test('24. Unauthenticated account linking rejection', async () => {
+    const unauthLink = await api('/api/auth/link-google', {
+      method: 'POST',
+      body: JSON.stringify({ credential: 'SOME_TOKEN' })
+    });
+    assert.equal(unauthLink.status, 401, 'Should require authentication with 401');
+  });
+
 });
