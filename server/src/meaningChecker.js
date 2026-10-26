@@ -4,6 +4,8 @@
  * Verifies that revisions preserve:
  * - Negations and empirical claims (prevents finding reversals)
  * - Statistical values (p-values, confidence intervals, sample sizes, effect sizes)
+ * - Test statistics (t-statistics, F-statistics, degrees of freedom)
+ * - Descriptive statistics (means, standard deviations, correlations)
  * - Numbers and percentages
  * - Units of measurement
  * - Citation markers ([1], (Author, 2020))
@@ -20,7 +22,12 @@ const PATTERNS = {
   dates: /\b((?:18|19|20)\d{2})\b/g,
   citations: /(\[(?:\d+(?:[–,\s-]+\d+)*)\]|\([A-Z][a-zA-Z\s'-]+(?:et al\.?)?,?\s*(?:18|19|20)\d{2}[a-z]?(?:;\s*[A-Z][a-zA-Z\s'-]+(?:et al\.?)?,?\s*(?:18|19|20)\d{2}[a-z]?)*\))/g,
   quotes: /(?:["“][^"”]+["”]|'[^']{3,}')/g,
-  units: /\b(\d+(?:\.\d+)?)\s*(mg\/dL|μg\/mL|mg\/kg|μg|mg|kg|g|ng|pg|mL|μL|L|dL|mM|μM|nM|M|mol|mmol|nm|μm|mm|cm|m|km|kDa|bp|kbp|ms|sec|min|hr|hours?|days?|weeks?|years?|Hz|kHz|MHz|GHz|°C|°F|K|mV|V|mA|A|mmHg|kPa|Pa|rpm|J|kJ|cal|kcal)\b/gi
+  units: /\b(\d+(?:\.\d+)?)\s*(mg\/dL|μg\/mL|mg\/kg|μg|mg|kg|g|ng|pg|mL|μL|L|dL|mM|μM|nM|M|mol|mmol|nm|μm|mm|cm|m|km|kDa|bp|kbp|ms|sec|min|hr|hours?|days?|weeks?|years?|Hz|kHz|MHz|GHz|°C|°F|K|mV|V|mA|A|mmHg|kPa|Pa|rpm|J|kJ|cal|kcal)\b/gi,
+  tStats: /\bt\s*\(\s*(\d+)\s*\)\s*=\s*([-\d.]+)/gi,
+  fStats: /\bF\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*=\s*([-\d.]+)/gi,
+  means: /\b(?:[mM]|mean)\s*=\s*([-\d.]+)/gi,
+  sds: /\b(?:SD|sd)\s*=\s*([-\d.]+)/gi,
+  correlations: /\br\s*=\s*([-\d.]+)/gi
 };
 
 // Words that indicate negation or absence
@@ -30,6 +37,24 @@ const NEGATION_TRIGGERS = [
   'failed to', 'fail to', 'fails to', 'lacked', 'lacks', 'lacking',
   'absence of', 'without', 'excluding', 'ruled out', 'inability to'
 ];
+
+/**
+ * Normalizes numerical and statistical strings for equivalence checking
+ */
+export function normalizeStatisticalValue(val = '') {
+  if (typeof val !== 'string') return '';
+  return String(val)
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/^([a-z]+)=/i, '$1=')
+    .replace(/=0\./g, '=.')
+    .replace(/<0\./g, '<.')
+    .replace(/>0\./g, '>.')
+    .replace(/\[0\./g, '[.')
+    .replace(/,0\./g, ',.')
+    .replace(/^([<>=≤≥])0\./, '$1.')
+    .replace(/^p([<>=≤≥])/, 'p$1');
+}
 
 /**
  * Extracts all matches of a regex into a clean string array
@@ -52,7 +77,6 @@ function checkNegationReversals(original, revised) {
   const origLower = original.toLowerCase();
   const revLower = revised.toLowerCase();
 
-  // 1. Identify clauses with research claims
   const claimWords = [
     'significant', 'difference', 'effect', 'correlation', 'association',
     'demonstrate', 'demonstrated', 'show', 'showed', 'observe', 'observed',
@@ -63,9 +87,7 @@ function checkNegationReversals(original, revised) {
     const origHasNeg = origLower.includes(neg);
     const revHasNeg = revLower.includes(neg);
 
-    // If negation was present in original but removed in revision
     if (origHasNeg && !revHasNeg) {
-      // Check if it co-occurs with an empirical claim word
       const affectsClaim = claimWords.some(w => origLower.includes(w));
       warnings.push({
         category: 'negation',
@@ -77,10 +99,9 @@ function checkNegationReversals(original, revised) {
         revisedValue: '(affirmative)',
         excerpt: original.slice(0, 120)
       });
-      break; // Single critical negation warning suffices
+      break;
     }
 
-    // If negation was added where original was affirmative
     if (!origHasNeg && revHasNeg) {
       const affectsClaim = claimWords.some(w => revLower.includes(w));
       warnings.push({
@@ -101,18 +122,18 @@ function checkNegationReversals(original, revised) {
 }
 
 /**
- * Validates statistical numbers (p-values, CIs, effect sizes, sample sizes)
+ * Validates statistical numbers (p-values, CIs, effect sizes, sample sizes, t/F statistics, M, SD)
  */
 function checkStatisticalPreservation(original, revised) {
   const warnings = [];
 
-  // P-values
+  // 1. P-values
   const origP = extractMatches(original, PATTERNS.pValues);
   const revP = extractMatches(revised, PATTERNS.pValues);
   for (const p of origP) {
-    const normalized = p.replace(/\s+/g, '').toLowerCase();
-    const found = revP.some(rp => rp.replace(/\s+/g, '').toLowerCase() === normalized);
-    if (!found) {
+    const normalized = normalizeStatisticalValue(p);
+    const foundExact = revP.some(rp => normalizeStatisticalValue(rp) === normalized);
+    if (!foundExact) {
       warnings.push({
         category: 'statistic',
         severity: 'critical',
@@ -124,7 +145,7 @@ function checkStatisticalPreservation(original, revised) {
     }
   }
 
-  // Sample sizes
+  // 2. Sample sizes
   const origN = extractMatches(original, PATTERNS.sampleSizes);
   const revN = extractMatches(revised, PATTERNS.sampleSizes);
   for (const n of origN) {
@@ -141,7 +162,7 @@ function checkStatisticalPreservation(original, revised) {
     }
   }
 
-  // Confidence intervals
+  // 3. Confidence intervals
   const origCI = extractMatches(original, PATTERNS.confidenceIntervals);
   const revCI = extractMatches(revised, PATTERNS.confidenceIntervals);
   for (const ci of origCI) {
@@ -154,6 +175,40 @@ function checkStatisticalPreservation(original, revised) {
         originalValue: ci,
         revisedValue: revCI.join(', ') || '(missing)',
         excerpt: ci
+      });
+    }
+  }
+
+  // 4. t-statistics
+  const origT = extractMatches(original, PATTERNS.tStats);
+  const revT = extractMatches(revised, PATTERNS.tStats);
+  for (const t of origT) {
+    const norm = t.replace(/\s+/g, '').toLowerCase();
+    if (!revT.some(rt => rt.replace(/\s+/g, '').toLowerCase() === norm)) {
+      warnings.push({
+        category: 'statistic',
+        severity: 'critical',
+        detail: `Test statistic "${t}" was modified or removed in revision.`,
+        originalValue: t,
+        revisedValue: revT.join(', ') || '(missing)',
+        excerpt: t
+      });
+    }
+  }
+
+  // 5. F-statistics
+  const origF = extractMatches(original, PATTERNS.fStats);
+  const revF = extractMatches(revised, PATTERNS.fStats);
+  for (const f of origF) {
+    const norm = f.replace(/\s+/g, '').toLowerCase();
+    if (!revF.some(rf => rf.replace(/\s+/g, '').toLowerCase() === norm)) {
+      warnings.push({
+        category: 'statistic',
+        severity: 'critical',
+        detail: `F-statistic "${f}" was modified or removed in revision.`,
+        originalValue: f,
+        revisedValue: revF.join(', ') || '(missing)',
+        excerpt: f
       });
     }
   }
@@ -262,4 +317,165 @@ export function auditMeaningPreservation(original = '', revised = '') {
   ];
 
   return warnings;
+}
+
+/**
+ * Complete empirical fact validation with categorization
+ * @param {string} original
+ * @param {string} revised
+ * @returns {object} Structured validation result with preserved/changed lists
+ */
+export function validateEmpiricalFacts(original = '', revised = '') {
+  const warnings = auditMeaningPreservation(original, revised);
+
+  // Extract all empirical artifacts from original
+  const artifacts = [
+    ...extractMatches(original, PATTERNS.pValues).map(v => ({ type: 'p-value', value: v })),
+    ...extractMatches(original, PATTERNS.sampleSizes).map(v => ({ type: 'sample-size', value: v })),
+    ...extractMatches(original, PATTERNS.confidenceIntervals).map(v => ({ type: 'confidence-interval', value: v })),
+    ...extractMatches(original, PATTERNS.tStats).map(v => ({ type: 't-statistic', value: v })),
+    ...extractMatches(original, PATTERNS.fStats).map(v => ({ type: 'F-statistic', value: v })),
+    ...extractMatches(original, PATTERNS.percentages).map(v => ({ type: 'percentage', value: v })),
+    ...extractMatches(original, PATTERNS.citations).map(v => ({ type: 'citation', value: v }))
+  ];
+
+  const preservedItems = [];
+  const changedItems = [];
+  const formattingOnlyItems = [];
+
+  const revNorm = normalizeStatisticalValue(revised);
+  artifacts.forEach(item => {
+    const rawVal = item.value;
+    const normVal = normalizeStatisticalValue(rawVal);
+    const hasRawInRev = revised.includes(rawVal);
+    const hasNormInRev = revNorm.includes(normVal);
+
+    if (hasRawInRev) {
+      preservedItems.push({ ...item, status: 'preserved', display: rawVal });
+    } else if (hasNormInRev) {
+      formattingOnlyItems.push({ ...item, status: 'formatting_only', display: rawVal, note: 'Equivalent statistical value with altered typography' });
+    } else {
+      changedItems.push({ ...item, status: 'altered_or_missing', display: rawVal });
+    }
+  });
+
+  const hasCriticalWarnings = warnings.some(w => w.severity === 'critical');
+  const canAccept = !hasCriticalWarnings && changedItems.length === 0;
+
+  return {
+    isValid: canAccept,
+    canAcceptWithoutWarning: canAccept,
+    hasCriticalWarnings,
+    summary: {
+      totalFactsChecked: artifacts.length,
+      preservedCount: preservedItems.length,
+      formattingOnlyCount: formattingOnlyItems.length,
+      changedCount: changedItems.length,
+      warningsCount: warnings.length
+    },
+    preservedItems,
+    formattingOnlyItems,
+    changedItems,
+    preserved: preservedItems,
+    formattingOnly: formattingOnlyItems,
+    changed: changedItems,
+    warnings
+  };
+}
+
+/**
+ * Detailed empirical comparison between two versions of a manuscript
+ * Highlights changed citations, statistical values, p-values, sample sizes, and polarity
+ */
+export function compareManuscriptVersions(originalText = '', revisedText = '', metadata = {}) {
+  const origNorm = String(originalText || '');
+  const revNorm = String(revisedText || '');
+
+  const wordCountOrig = origNorm.trim() ? origNorm.trim().split(/\s+/).filter(Boolean).length : 0;
+  const wordCountRev = revNorm.trim() ? revNorm.trim().split(/\s+/).filter(Boolean).length : 0;
+  const wordCountDelta = wordCountRev - wordCountOrig;
+
+  // 1. Empirical Fact Validation (p-values, stats, negation)
+  const validation = validateEmpiricalFacts(origNorm, revNorm);
+
+  // 2. Citation Extraction & Comparison
+  const origCitations = extractMatches(origNorm, PATTERNS.citations);
+  const revCitations = extractMatches(revNorm, PATTERNS.citations);
+
+  const origCiteSet = new Set(origCitations);
+  const revCiteSet = new Set(revCitations);
+
+  const citationsAdded = revCitations.filter(c => !origCiteSet.has(c));
+  const citationsRemoved = origCitations.filter(c => !revCiteSet.has(c));
+  const citationsPreserved = origCitations.filter(c => revCiteSet.has(c));
+
+  // 3. Statistical Values Detailed Breakdown
+  const origPValues = extractMatches(origNorm, PATTERNS.pValues);
+  const revPValues = extractMatches(revNorm, PATTERNS.pValues);
+
+  const origSampleSizes = extractMatches(origNorm, PATTERNS.sampleSizes);
+  const revSampleSizes = extractMatches(revNorm, PATTERNS.sampleSizes);
+
+  // 4. Directional Polarity & Negation
+  const negationWarnings = checkNegationReversals(origNorm, revNorm);
+
+  // 5. Delta Executive Summary
+  const summaryParts = [];
+  summaryParts.push(`Manuscript length shifted from ${wordCountOrig} to ${wordCountRev} words (${wordCountDelta >= 0 ? '+' : ''}${wordCountDelta} words).`);
+  if (validation.changedItems.length === 0) {
+    summaryParts.push('All empirical claims, p-values, and quantitative figures are fully preserved.');
+  } else {
+    summaryParts.push(`${validation.changedItems.length} empirical fact(s) were modified or omitted.`);
+  }
+  if (citationsAdded.length || citationsRemoved.length) {
+    summaryParts.push(`Citations: +${citationsAdded.length} added, -${citationsRemoved.length} removed.`);
+  } else {
+    summaryParts.push('Citation markers remain consistent.');
+  }
+
+  const summaryText = summaryParts.join(' ');
+
+  return {
+    documentTitle: metadata.title || 'Manuscript Version Comparison',
+    timestamp: new Date().toISOString(),
+    wordCountDelta,
+    comparisonSummary: summaryText,
+    semanticDeltaSummary: summaryText,
+    metrics: {
+      originalWordCount: wordCountOrig,
+      revisedWordCount: wordCountRev,
+      wordCountDelta,
+      percentChange: wordCountOrig > 0 ? Math.round((wordCountDelta / wordCountOrig) * 100) : 0,
+      factsPreservedCount: validation.summary.preservedCount,
+      factsAlteredCount: validation.summary.changedCount,
+      criticalWarningsCount: validation.warnings.filter(w => w.severity === 'critical').length
+    },
+    citations: {
+      added: Array.from(new Set(citationsAdded)),
+      removed: Array.from(new Set(citationsRemoved)),
+      preserved: Array.from(new Set(citationsPreserved))
+    },
+    statistics: {
+      originalPValues: origPValues,
+      revisedPValues: revPValues,
+      originalSampleSizes: origSampleSizes,
+      revisedSampleSizes: revSampleSizes,
+      originalStats: {
+        pValues: origPValues,
+        sampleSizes: origSampleSizes
+      },
+      revisedStats: {
+        pValues: revPValues,
+        sampleSizes: revSampleSizes
+      }
+    },
+    empiricalDeltas: {
+      preserved: validation.preservedItems,
+      altered: validation.changedItems,
+      alteredAssertions: validation.changedItems,
+      potentialReversals: negationWarnings,
+      warnings: validation.warnings,
+      hasReversals: negationWarnings.length > 0
+    }
+  };
 }

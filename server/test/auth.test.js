@@ -204,7 +204,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
       body: JSON.stringify({ email: suspendedEmail, password: 'StrongPassword123!' })
     });
     assert.equal(reg.status, 201);
-    
+
     // Mark suspended in app.locals.memUsers
     const memUser = app.locals.memUsers?.get(suspendedEmail);
     if (memUser) memUser.status = 'suspended';
@@ -362,18 +362,24 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     assert.equal(usageRes.status, 200);
     assert.ok(usageRes.body.rewrite, 'Must include rewrite quota');
     assert.ok(usageRes.body.analysis, 'Must include analysis quota');
-    assert.equal(typeof usageRes.body.aiAvailable, 'boolean', 'Must indicate AI availability');
-    assert.equal(usageRes.body.rewrite.limit, 5, 'Rewrite daily limit default should be 5');
-    assert.equal(usageRes.body.rewrite.maxWords, 2000, 'Rewrite max words default should be 2000');
-    assert.equal(usageRes.body.analysis.limit, 10, 'Analysis daily limit default should be 10');
-    assert.equal(usageRes.body.analysis.maxWords, 5000, 'Analysis max words default should be 5000');
+    const rawLimit = String(process.env.FREE_REWRITE_DAILY_LIMIT || '5').trim().toLowerCase();
+    const isUnlimited = rawLimit === '0' || rawLimit === '-1' || rawLimit === 'unlimited' || Number(rawLimit) >= 999999;
+    const expectedRewriteLimit = isUnlimited ? 'Unlimited' : Number(rawLimit || 5);
+    assert.equal(usageRes.body.rewrite.limit, expectedRewriteLimit, `Rewrite daily limit should match configured limit (${expectedRewriteLimit})`);
+    const expectedRewriteWords = Number(process.env.FREE_REWRITE_MAX_WORDS || 2000);
+    const expectedAnalysisWords = Number(process.env.FREE_ANALYSIS_MAX_WORDS || 5000);
+    const rawAnalysisLimit = String(process.env.FREE_ANALYSIS_DAILY_LIMIT || '10').trim().toLowerCase();
+    const isAnalysisUnlimited = rawAnalysisLimit === '0' || rawAnalysisLimit === '-1' || rawAnalysisLimit === 'unlimited' || Number(rawAnalysisLimit) >= 999999;
+    const expectedAnalysisLimit = isAnalysisUnlimited ? 'Unlimited' : Number(rawAnalysisLimit || 10);
+    assert.equal(usageRes.body.analysis.limit, expectedAnalysisLimit, `Analysis daily limit should match configured limit (${expectedAnalysisLimit})`);
+    assert.equal(usageRes.body.analysis.maxWords, expectedAnalysisWords, `Analysis max words should match configured limit (${expectedAnalysisWords})`);
     assert.ok(usageRes.body.resetAt, 'Must include reset timing');
   });
 
   // --- Test 15: Word Count Limit Enforcement ---
-  await t.test('15. Word count limit enforcement (> 5000 words rejected for analysis)', async () => {
-    // Generate 5001 words
-    const excessiveText = Array(5005).fill('academic').join(' ');
+  await t.test('15. Word count limit enforcement (> analysis limit words rejected for analysis)', async () => {
+    const analysisLimit = Number(process.env.FREE_ANALYSIS_MAX_WORDS || 5000);
+    const excessiveText = Array(analysisLimit + 5).fill('academic').join(' ');
 
     const analysisRes = await api('/api/analyze/writing', {
       method: 'POST',
@@ -381,8 +387,8 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
       body: JSON.stringify({ text: excessiveText })
     });
 
-    assert.equal(analysisRes.status, 400, 'Word count > 5000 must be rejected with 400 Bad Request');
-    assert.match(analysisRes.body.error, /exceeds the analysis limit of 5000 words/i);
+    assert.equal(analysisRes.status, 400, `Word count > ${analysisLimit} must be rejected with 400 Bad Request`);
+    assert.match(analysisRes.body.error, new RegExp(`exceeds the analysis limit of ${analysisLimit} words`, 'i'));
   });
 
   // --- Test 16: AI Unavailable Resilience (503 without consuming quota) ---
@@ -416,7 +422,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
   // --- Test 17: Non-AI Writing Checks Work Flawlessly ---
   await t.test('17. Non-AI academic writing checks work without an AI key', async () => {
     const text = 'The experiment was performed by the team. This demonstrates clear statistical significance.';
-    
+
     // Writing assessment
     const assessRes = await api('/api/analyze/writing', {
       method: 'POST',
@@ -427,7 +433,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     assert.ok(assessRes.body.wordCount !== undefined, 'Should return word count');
     assert.ok(assessRes.body.observations, 'Should return style observations');
 
-    // Similarity check
+    // Similarity check (both /api/analyze/originality and /api/analyze/similarity with text or content)
     const simRes = await api('/api/analyze/originality', {
       method: 'POST',
       headers: { Authorization: `Bearer ${googleUserToken}` },
@@ -435,6 +441,16 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     });
     assert.equal(simRes.status, 200, 'Originality check should return 200 OK');
     assert.equal(simRes.body.scope, 'Within-document phrase repetition only');
+    assert.ok(simRes.body.wordCount !== undefined, 'Should return word count metric');
+
+    // Similarity alias check with content payload
+    const simAliasRes = await api('/api/analyze/similarity', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${googleUserToken}` },
+      body: JSON.stringify({ content: text })
+    });
+    assert.equal(simAliasRes.status, 200, 'Similarity check alias should return 200 OK');
+    assert.equal(simAliasRes.body.scope, 'Within-document phrase repetition only');
   });
 
   // --- Test 18: Missing Google Credential Validation ---

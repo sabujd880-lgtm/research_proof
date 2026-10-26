@@ -230,6 +230,14 @@ test('ResearchProof AI — Phase 5 APA 7 Manuscript Converter Suite', async (t) 
     assert.ok(entryNames.includes('researchproof-apa7-manuscript/latexmkrc'), 'Must contain latexmkrc');
     assert.ok(entryNames.includes('researchproof-apa7-manuscript/conversion-report.json'), 'Must contain conversion-report.json');
     assert.ok(entryNames.some(e => e.startsWith('researchproof-apa7-manuscript/sections/')), 'Must contain modular sections');
+
+    // Verify Overleaf segment data
+    assert.ok(projectResult.standaloneMainTex, 'Must return standaloneMainTex for 1-click Overleaf paste');
+    assert.ok(projectResult.modularMainTex, 'Must return modularMainTex for modular Overleaf structures');
+    assert.ok(Array.isArray(projectResult.sections), 'Must return sections segment array');
+    assert.strictEqual(projectResult.sections.length, 2, 'Must parse 2 sections');
+    assert.strictEqual(projectResult.sections[0].heading, 'Introduction');
+    assert.strictEqual(projectResult.sections[1].heading, 'Method');
   });
 
   // 9. Compiler Fallback Verification (Render environment compatibility)
@@ -308,6 +316,10 @@ test('ResearchProof AI — Phase 5 APA 7 Manuscript Converter Suite', async (t) 
     assert.strictEqual(convertRes.body.template, 'apa7');
     assert.strictEqual(convertRes.body.variant, 'student');
     assert.ok(convertRes.body.artifactReferences.zipSize > 0);
+    assert.ok(convertRes.body.mainTex, 'Must return full mainTex');
+    assert.ok(convertRes.body.standaloneMainTex, 'Must return standaloneMainTex for Overleaf paste');
+    assert.ok(Array.isArray(convertRes.body.sections), 'Must return sections array');
+    assert.strictEqual(convertRes.body.sections.length, 2);
 
     const jobId = convertRes.body.jobId;
 

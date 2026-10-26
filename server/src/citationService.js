@@ -117,6 +117,28 @@ export async function lookupDoiMetadata(rawDoi, isDbConnected = false) {
     const journal = Array.isArray(item['container-title']) ? item['container-title'][0] : (item['container-title'] || '');
     const authors = normalizeAuthors(item.author);
 
+    const updates = Array.isArray(item['update-to']) ? item['update-to'] : [];
+    const relation = item.relation || {};
+    const titleLower = title.toLowerCase();
+    const isRetracted = Boolean(
+      updates.some(u => String(u.type || u.label || '').toLowerCase().includes('retract')) ||
+      relation['is-retracted-by'] ||
+      titleLower.includes('retracted') ||
+      titleLower.startsWith('retraction:')
+    );
+    const hasCorrection = Boolean(
+      updates.some(u => String(u.type || u.label || '').toLowerCase().includes('correct')) ||
+      relation['is-corrected-by'] ||
+      titleLower.includes('erratum') ||
+      titleLower.includes('corrigendum')
+    );
+    let retractionNotice = '';
+    if (isRetracted) {
+      retractionNotice = 'Publisher retraction notice recorded on Crossref';
+    } else if (hasCorrection) {
+      retractionNotice = 'Formal erratum or author correction published on Crossref';
+    }
+
     const metadata = {
       doi,
       title: title.replace(/<[^>]+>/g, '').trim(),
@@ -128,7 +150,10 @@ export async function lookupDoiMetadata(rawDoi, isDbConnected = false) {
       pages: item.page || '',
       publisher: item.publisher || '',
       metadataSource: 'crossref',
-      verificationStatus: 'verified',
+      verificationStatus: isRetracted ? 'retracted' : 'verified',
+      isRetracted,
+      hasCorrection,
+      retractionNotice,
       rawUrl: item.URL || `https://doi.org/${doi}`
     };
 
@@ -420,16 +445,36 @@ export function validateDocumentCitations(text = '', citations = []) {
     }
   });
 
+  // Check library items for active retraction/correction notices
+  const retractedReferences = [];
+  for (const c of citations) {
+    const isRetracted = Boolean(
+      c.isRetracted ||
+      (c.title && c.title.toLowerCase().includes('retracted')) ||
+      c.verificationStatus === 'retracted' ||
+      c.rawMetadata?.isRetracted
+    );
+    if (isRetracted) {
+      retractedReferences.push({
+        doi: normalizeDoi(c.doi),
+        title: c.title,
+        detail: `WARNING: Cited reference "${c.title}" has an active retraction or correction notice.`
+      });
+    }
+  }
+
   return {
-    valid: missingCitations.length === 0 && duplicateReferences.length === 0,
+    valid: missingCitations.length === 0 && duplicateReferences.length === 0 && retractedReferences.length === 0,
     totalCitationsInLibrary: citations.length,
     missingCitations,
     uncitedReferences,
     duplicateReferences,
+    retractedReferences,
     summary: {
       citedDoisCount: citedDois.size,
       citedAuthorYearsCount: citedAuthorYears.length,
-      citedBracketNumbersCount: citedNumbers.size
+      citedBracketNumbersCount: citedNumbers.size,
+      retractedCount: retractedReferences.length
     }
   };
 }

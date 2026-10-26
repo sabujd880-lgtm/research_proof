@@ -64,24 +64,147 @@ export async function importDocxFromBuffer(buffer, originalFilename = 'Imported_
     throw err;
   }
 
-  // 3. Derive title from first non-empty line or filename
+  // 3. Derive structured metadata and title
+  const metadata = extractManuscriptMetadata(rawText, originalFilename);
   const firstLine = rawText.split('\n').map(l => l.trim()).filter(Boolean)[0];
-  const title = (firstLine && firstLine.length < 160)
+  const derivedTitle = (firstLine && firstLine.length < 160 && !/^(abstract|keywords|contents)/i.test(firstLine))
     ? firstLine
-    : originalFilename.replace(/\.docx$/i, '').replace(/[_-]/g, ' ');
+    : (metadata.title || originalFilename.replace(/\.docx$/i, '').replace(/[_-]/g, ' '));
 
   const sanitizedHtml = sanitizeExtractedHtml(rawHtml);
   const wordCount = rawText.split(/\s+/).filter(Boolean).length;
   const characterCount = rawText.length;
 
   return {
-    title,
+    title: derivedTitle,
     content: rawText,
+    text: rawText,
     htmlContent: sanitizedHtml,
     wordCount,
     characterCount,
+    metadata,
     warnings: warnings.slice(0, 10)
   };
+}
+
+/**
+ * Automatically extracts structured manuscript metadata (Title, Authors, Affiliation, Abstract, Keywords, etc.)
+ * from raw document text using robust heuristic analysis.
+ */
+export function extractManuscriptMetadata(text = '', originalFilename = '') {
+  const result = {
+    title: '',
+    authors: '',
+    affiliation: '',
+    abstract: '',
+    keywords: '',
+    runningHead: '',
+    course: '',
+    instructor: '',
+    dueDate: '',
+    degree: '',
+    department: '',
+    advisor: '',
+    defenseDate: ''
+  };
+
+  if (!text || typeof text !== 'string') return result;
+
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return result;
+
+  // 1. Title Extraction
+  let titleIndex = -1;
+  for (let i = 0; i < Math.min(lines.length, 5); i++) {
+    const l = lines[i];
+    if (/^(abstract|keywords|table of contents|contents|chapter|introduction)/i.test(l)) continue;
+    if (/^(by|author|date|course|professor|supervisor):/i.test(l)) continue;
+    if (l.length >= 3 && l.length <= 200) {
+      result.title = l.replace(/^#+\s*/, '').trim();
+      titleIndex = i;
+      break;
+    }
+  }
+
+  if (!result.title && originalFilename) {
+    result.title = originalFilename.replace(/\.docx$/i, '').replace(/[_-]/g, ' ');
+  }
+
+  // 2. Abstract Extraction
+  const abstractMatch = text.match(/(?:^|\n)\s*(?:#+\s*)?(?:ABSTRACT|Abstract)[:.]?\s*\n+([\s\S]*?)(?=(?:\n\s*(?:#+\s*)?(?:Keywords|Key\s*words|Index\s*Terms|Introduction|1\.?\s*Introduction|Chapter\s*1)\b)|\n{3,}|$)/i);
+  if (abstractMatch && abstractMatch[1]) {
+    result.abstract = abstractMatch[1].trim().replace(/\s+/g, ' ').slice(0, 1500);
+  }
+
+  // 3. Keywords Extraction
+  const keywordsMatch = text.match(/(?:Keywords|Key\s*words|Index\s*Terms)[:.]\s*([^\n\r]+)/i);
+  if (keywordsMatch && keywordsMatch[1]) {
+    result.keywords = keywordsMatch[1].trim().replace(/\.$/, '');
+  }
+
+  // 4. Running Head Extraction
+  const runningHeadMatch = text.match(/(?:Running\s*Head|Short\s*Title)[:.]\s*([^\n\r]+)/i);
+  if (runningHeadMatch && runningHeadMatch[1]) {
+    result.runningHead = runningHeadMatch[1].trim().slice(0, 50).toUpperCase();
+  } else if (result.title) {
+    result.runningHead = result.title.replace(/[^a-zA-Z0-9\s]/g, '').slice(0, 50).trim().toUpperCase();
+  }
+
+  // 5. Author(s) & Affiliation Scanning
+  const explicitAuthorMatch = text.match(/(?:Authors?|By|Written by|Prepared by)[:.]\s*([^\n\r]+)/i);
+  if (explicitAuthorMatch && explicitAuthorMatch[1]) {
+    result.authors = explicitAuthorMatch[1].trim();
+  }
+
+  const explicitAffilMatch = text.match(/(?:Affiliation|Institution|University|Department)[:.]\s*([^\n\r]+)/i);
+  if (explicitAffilMatch && explicitAffilMatch[1]) {
+    result.affiliation = explicitAffilMatch[1].trim();
+  }
+
+  if (titleIndex >= 0 && (!result.authors || !result.affiliation)) {
+    const candidateLines = lines.slice(titleIndex + 1, Math.min(titleIndex + 8, lines.length));
+    for (const line of candidateLines) {
+      if (/^(abstract|keywords|table|chapter|introduction)/i.test(line)) break;
+      
+      const isAffiliation = /(university|college|institute|department|faculty|school\s+of|laboratory|center\s+for|hospital)/i.test(line);
+      const isCourseOrDate = /(course|instructor|professor|date|semester|fall|spring|202\d)/i.test(line);
+      const isDegreeOrThesis = /(dissertation|thesis|fulfillment|degree\s+of|doctor\s+of|master\s+of)/i.test(line);
+
+      if (isAffiliation && !result.affiliation) {
+        result.affiliation = line;
+      } else if (!result.authors && !isAffiliation && !isCourseOrDate && !isDegreeOrThesis && line.length < 100) {
+        if (/^[A-Za-z\u00C0-\u024F\u0980-\u09FF\u0900-\u097F\u0600-\u06FF\s,.\-&]+$/.test(line) && line.split(/\s+/).length <= 10) {
+          result.authors = line;
+        }
+      }
+    }
+  }
+
+  // 6. Student Metadata Scanning
+  const courseMatch = text.match(/(?:Course|Class|Subject)[:.]\s*([^\n\r]+)/i);
+  if (courseMatch) result.course = courseMatch[1].trim();
+
+  const instructorMatch = text.match(/(?:Instructor|Professor|Lecturer)[:.]\s*([^\n\r]+)/i);
+  if (instructorMatch) result.instructor = instructorMatch[1].trim();
+
+  const dateMatch = text.match(/(?:Due\s*Date|Submission\s*Date|Date)[:.]\s*([^\n\r]+)/i);
+  if (dateMatch) result.dueDate = dateMatch[1].trim();
+
+  // 7. Thesis & Dissertation Metadata Scanning
+  const degreeMatch = text.match(/(?:degree\s+of|requirements\s+for\s+the\s+degree\s+of|in\s+candidacy\s+for\s+the\s+degree\s+of)\s+([^\n\r,]+)/i)
+    || text.match(/(Doctor\s+of\s+Philosophy|Master\s+of\s+Science|Master\s+of\s+Arts|Doctor\s+of\s+Education|Ph\.?D\.?|M\.?S\.?|M\.?A\.?)/i);
+  if (degreeMatch) result.degree = (degreeMatch[1] || degreeMatch[0]).trim();
+
+  const advisorMatch = text.match(/(?:Thesis\s*Advisor|Dissertation\s*Advisor|Supervisor|Committee\s*Chair|Major\s*Professor)[:.]\s*([^\n\r]+)/i);
+  if (advisorMatch) result.advisor = advisorMatch[1].trim();
+
+  const deptMatch = text.match(/(?:Department\s+of\s+[^\n\r,]+|Faculty\s+of\s+[^\n\r,]+|School\s+of\s+[^\n\r,]+)/i);
+  if (deptMatch) result.department = deptMatch[0].trim();
+
+  const defenseMatch = text.match(/(?:Date\s+of\s+Defense|Defense\s+Date|Approved\s+on|Graduation\s+Date)[:.]\s*([^\n\r]+)/i);
+  if (defenseMatch) result.defenseDate = defenseMatch[1].trim();
+
+  return result;
 }
 
 /**

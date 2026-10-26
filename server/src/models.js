@@ -18,6 +18,13 @@ const userSchema = new mongoose.Schema({
     persistDocumentText: { type: Boolean, default: true },
     allowAiProcessing: { type: Boolean, default: true }
   },
+  preferences: {
+    theme: { type: String, default: 'dark' },
+    compactSidebar: { type: Boolean, default: false },
+    defaultCitationStyle: { type: String, default: 'apa' },
+    defaultRewriteMode: { type: String, default: 'academic-clarity' },
+    meaningPreservationStrictness: { type: String, default: 'high' }
+  },
   usage: {
     dailyRequests: { type: Number, default: 0 },
     dailyLimit: { type: Number, default: 50 },
@@ -213,7 +220,7 @@ const latexJobSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   sourceDocumentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null },
   template: { type: String, enum: ['apa7'], default: 'apa7', required: true },
-  variant: { type: String, enum: ['student', 'professional'], default: 'student', required: true },
+  variant: { type: String, enum: ['student', 'professional', 'thesis', 'dissertation', 'custom'], default: 'student', required: true },
   metadata: {
     title: { type: String, required: true, trim: true },
     authors: [{
@@ -248,10 +255,47 @@ const latexJobSchema = new mongoose.Schema({
     tablesCount: { type: Number, default: 0 }
   },
   mainTexSnippet: { type: String, default: '' },
+  mainTex: { type: String, default: '' },
+  standaloneMainTex: { type: String, default: '' },
+  modularMainTex: { type: String, default: '' },
+  bibContent: { type: String, default: '' },
+  sections: { type: Array, default: [] },
   report: { type: mongoose.Schema.Types.Mixed, default: {} },
   expirationTimestamp: { type: Date, default: () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) }
 }, { timestamps: true });
 latexJobSchema.index({ userId: 1, createdAt: -1 });
+
+// Phase 6: TextGuard Plagiarism & Authenticity Scan Tracker
+const textGuardScanSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null },
+  documentTitle: { type: String, default: 'Untitled Document' },
+  analyzedWordCount: { type: Number, default: 0 },
+  similarityCoverage: { type: Number, default: 0 },
+  unmatchedCoverage: { type: Number, default: 100 },
+  matchedPassageCount: { type: Number, default: 0 },
+  distinctSourceCount: { type: Number, default: 0 },
+  doiVerification: {
+    total: { type: Number, default: 0 },
+    verified: { type: Number, default: 0 },
+    partial: { type: Number, default: 0 },
+    notFound: { type: Number, default: 0 },
+    retracted: { type: Number, default: 0 },
+    references: { type: Array, default: [] }
+  },
+  matches: { type: Array, default: [] },
+  passages: { type: Array, default: [] },
+  sha256: { type: String, default: '' },
+  status: { type: String, enum: ['completed', 'failed', 'bot_blocked'], default: 'completed', index: true },
+  statusMessage: { type: String, default: '' },
+  comparisonCorpus: { type: Array, default: [] },
+  exclusions: {
+    excludeQuotes: { type: Boolean, default: false },
+    excludeBibliography: { type: Boolean, default: false }
+  },
+  meaningValidation: { type: mongoose.Schema.Types.Mixed, default: null }
+}, { timestamps: true });
+textGuardScanSchema.index({ userId: 1, createdAt: -1 });
 
 export const User = mongoose.model('User', userSchema);
 export const Project = mongoose.model('Project', projectSchema);
@@ -266,5 +310,7 @@ export const UsageEvent = mongoose.model('UsageEvent', usageEventSchema);
 export const DailyUsageAggregate = mongoose.model('DailyUsageAggregate', dailyUsageAggregateSchema);
 export const DataDeletionJob = mongoose.model('DataDeletionJob', dataDeletionJobSchema);
 export const LatexJob = mongoose.model('LatexJob', latexJobSchema);
+export const TextGuardScan = mongoose.model('TextGuardScan', textGuardScanSchema);
+
 
 

@@ -1,9 +1,18 @@
 import AdmZip from 'adm-zip';
 import path from 'path';
+import {
+  resolveDocumentLanguage,
+  detectScripts,
+  wrapMixedLanguageSegments,
+  generateUnicodePreamble,
+  LANGUAGE_REGISTRY,
+  SCRIPT_DEFINITIONS
+} from './multilingualRegistry.js';
 
 /**
- * APA 7 Word-to-LaTeX Manuscript Converter Engine
- * Implements APA 7 Student Paper (`stu`) and Professional Manuscript (`man`) standards.
+ * APA 7 Word-to-LaTeX Multilingual Manuscript Converter Engine
+ * Implements APA 7 Student Paper (`stu`) and Professional Manuscript (`man`) standards
+ * with native Unicode typesetting for Indic, Arabic/Urdu, CJK, and European languages.
  */
 
 // Characters requiring LaTeX escaping in plain text
@@ -22,6 +31,7 @@ const LATEX_SPECIAL_CHARS = [
 
 /**
  * Escapes plain text for LaTeX while preserving math mode segments and statistical formulas.
+ * Preserves all Unicode code points (Bengali, Hindi, Tamil, Arabic, Chinese, etc.) intact.
  */
 export function escapeLatex(text = '', preserveMath = true) {
   if (typeof text !== 'string') return '';
@@ -79,12 +89,6 @@ export function escapeLatex(text = '', preserveMath = true) {
 
 /**
  * Maps heading levels to APA 7 LaTeX sectioning commands.
- * APA 7 Heading Hierarchy:
- * Level 1: Centered, Bold, Title Case -> \section{...}
- * Level 2: Flush Left, Bold, Title Case -> \subsection{...}
- * Level 3: Flush Left, Bold Italic, Title Case -> \subsubsection{...}
- * Level 4: Indented, Bold, Title Case, Ending with a period -> \paragraph{...}
- * Level 5: Indented, Bold Italic, Title Case, Ending with a period -> \subparagraph{...}
  */
 export function mapHeadingToApa7(title, level = 1) {
   const safeTitle = escapeLatex(title.trim());
@@ -107,17 +111,19 @@ export function mapHeadingToApa7(title, level = 1) {
 }
 
 /**
- * Normalizes an author name into a BibTeX citation key (e.g. 'smith2024apa').
+ * Normalizes an author name into a BibTeX citation key.
  */
 export function generateCitationKey(author = 'author', year = '2024', title = 'ref') {
-  const cleanAuthor = author.replace(/[^a-zA-Z]/g, '').toLowerCase().slice(0, 10) || 'author';
+  // Transliterate or clean non-ASCII for citation keys
+  const cleanAuthor = author.replace(/[^a-zA-Z0-9]/g, '').toLowerCase().slice(0, 10) || 'author';
   const cleanYear = year.replace(/[^0-9]/g, '').slice(0, 4) || '2024';
-  const cleanTitle = title.replace(/[^a-zA-Z]/g, '').toLowerCase().slice(0, 6) || 'study';
+  const cleanTitle = title.replace(/[^a-zA-Z0-9]/g, '').toLowerCase().slice(0, 6) || 'study';
   return `${cleanAuthor}${cleanYear}${cleanTitle}`;
 }
 
 /**
  * Converts citation metadata into clean BibTeX format for biblatex with style=apa.
+ * Preserves Unicode author names, multilingual book/journal titles, and DOIs.
  */
 export function generateBibtex(citations = []) {
   if (!Array.isArray(citations) || citations.length === 0) {
@@ -126,7 +132,6 @@ export function generateBibtex(citations = []) {
       duplicateWarnings: []
     };
   }
-
 
   const seenDois = new Set();
   const duplicateWarnings = [];
@@ -143,7 +148,6 @@ export function generateBibtex(citations = []) {
       }
     }
 
-    // Extract first author family name
     let firstAuthorFamily = 'Author';
     let authorListStr = 'Unknown Author';
     if (Array.isArray(cite.authors) && cite.authors.length > 0) {
@@ -186,7 +190,6 @@ export function generateBibtex(citations = []) {
 
 /**
  * Maps in-text citations in manuscript text to \parencite{key} and \textcite{key}.
- * Plain-text citations that cannot be reliably matched are retained with a warning.
  */
 export function resolveInTextCitations(text, citations = []) {
   if (!text) return { resolvedText: '', warnings: [] };
@@ -194,7 +197,6 @@ export function resolveInTextCitations(text, citations = []) {
   const warnings = [];
   let resolvedText = text;
 
-  // Build a lookup map from author/year and DOIs to citationKey
   const citeMap = new Map();
   citations.forEach((c) => {
     const key = c.citationKey || generateCitationKey(
@@ -210,8 +212,8 @@ export function resolveInTextCitations(text, citations = []) {
     citeMap.set(key.toLowerCase(), key);
   });
 
-  // Regex for parenthetical citations: (Smith, 2020) or (Smith & Jones, 2020)
-  const PAREN_REGEX = /\(([A-Z][a-zA-Z\s&]+),\s*(\d{4})\)/g;
+  // Parenthetical citations: (Smith, 2020)
+  const PAREN_REGEX = /\(([A-Z\u00C0-\u024F\u0980-\u09FF\u0900-\u097F\u0600-\u06FF\u4E00-\u9FFF][a-zA-Z\u00C0-\u024F\u0980-\u09FF\u0900-\u097F\u0600-\u06FF\u4E00-\u9FFF\s&]+),\s*(\d{4})\)/g;
   resolvedText = resolvedText.replace(PAREN_REGEX, (fullMatch, authorStr, yearStr) => {
     const firstAuthor = authorStr.split(/[\s&,]+/)[0].toLowerCase();
     const lookupKey = `${firstAuthor}_${yearStr}`;
@@ -227,8 +229,8 @@ export function resolveInTextCitations(text, citations = []) {
     return fullMatch;
   });
 
-  // Regex for narrative citations: Smith (2020) demonstrated
-  const NARRATIVE_REGEX = /\b([A-Z][a-zA-Z]+)\s*\(\s*(\d{4})\s*\)/g;
+  // Narrative citations: Smith (2020)
+  const NARRATIVE_REGEX = /\b([A-Z\u00C0-\u024F\u0980-\u09FF\u0900-\u097F\u0600-\u06FF\u4E00-\u9FFF][a-zA-Z\u00C0-\u024F\u0980-\u09FF\u0900-\u097F\u0600-\u06FF\u4E00-\u9FFF]+)\s*\(\s*(\d{4})\s*\)/g;
   resolvedText = resolvedText.replace(NARRATIVE_REGEX, (fullMatch, authorStr, yearStr) => {
     const lookupKey = `${authorStr.toLowerCase()}_${yearStr}`;
     const key = citeMap.get(lookupKey);
@@ -284,31 +286,46 @@ export function formatApaTable(tableData, tableIndex = 1) {
 }
 
 /**
- * Generates the complete, compilable main.tex APA 7 manuscript.
+ * Generates the complete, compilable main.tex APA 7 manuscript with multilingual support.
  */
 export function generateApa7MainTex(options = {}) {
   const {
-    variant = 'student', // 'student' | 'professional'
+    variant = 'student',
     title = 'Untitled Manuscript',
     authors = [],
     affiliations = [],
     abstract = '',
     keywords = [],
-    // Student variant fields
     course = '',
     instructor = '',
     dueDate = '',
-    // Professional variant fields
     runningHead = '',
     authorNote = '',
     sections = [],
-    hasBibliography = true
+    hasBibliography = true,
+    documentLanguage = 'en',
+    documentMode = 'mixed',
+    engine = 'xelatex',
+    detectedScripts = [],
+    modular = false,
+    embedBib = false,
+    bibContent = '',
+    degree = '',
+    department = '',
+    advisor = '',
+    defenseDate = '',
+    customFormatName = '',
+    customClassOptions = '',
+    customPreamble = ''
   } = options;
 
   const isStudent = variant === 'student';
-  const classOption = isStudent ? 'stu' : 'man';
+  const isThesis = variant === 'thesis' || variant === 'dissertation';
+  const isCustom = variant === 'custom';
+  const classOption = isCustom
+    ? (customClassOptions && customClassOptions.trim() ? customClassOptions.trim() : 'man')
+    : (isStudent ? 'stu' : 'man');
 
-  // Format Authors and Affiliations
   let authorStr = 'Author Name';
   if (Array.isArray(authors) && authors.length > 0) {
     authorStr = authors.map(a => typeof a === 'string' ? a : (a.name || 'Author')).join(' \\and ');
@@ -321,8 +338,34 @@ export function generateApa7MainTex(options = {}) {
     affiliationStr = authors.map(a => a.affiliation).filter(Boolean).join(' \\and ');
   }
 
-  let preamble = `\\documentclass[${classOption},12pt]{apa7}\n\n`;
-  preamble += `\\usepackage[american]{babel}\n`;
+  let preamble = '';
+
+  // Embedded filecontents block for standalone zero-config Overleaf compilation
+  if (embedBib && bibContent && hasBibliography) {
+    preamble += `\\begin{filecontents*}{\\jobname.bib}\n${bibContent.trim()}\n\\end{filecontents*}\n\n`;
+  }
+
+  preamble += `\\documentclass[${classOption},12pt]{apa7}\n\n`;
+
+  if (isCustom && customPreamble && customPreamble.trim()) {
+    preamble += `% Custom Institutional Format Configuration\n${customPreamble.trim()}\n\n`;
+  }
+
+  // Multilingual & Unicode packages configuration
+  const langConfig = LANGUAGE_REGISTRY[documentLanguage] || LANGUAGE_REGISTRY.en;
+  const isUnicodeEngine = engine === 'xelatex' || engine === 'lualatex' || langConfig.script !== 'latin';
+
+  if (isUnicodeEngine) {
+    preamble += generateUnicodePreamble({
+      primaryLanguage: langConfig.code,
+      detectedScripts,
+      documentMode,
+      engine
+    });
+  } else {
+    preamble += `\\usepackage[american]{babel}\n`;
+  }
+
   preamble += `\\usepackage{csquotes}\n`;
   preamble += `\\usepackage{amsmath}\n`;
   preamble += `\\usepackage{graphicx}\n`;
@@ -332,12 +375,16 @@ export function generateApa7MainTex(options = {}) {
 
   if (hasBibliography) {
     preamble += `\\usepackage[style=apa,backend=biber]{biblatex}\n`;
-    preamble += `\\addbibresource{references.bib}\n\n`;
+    if (embedBib && bibContent) {
+      preamble += `\\addbibresource{\\jobname.bib}\n\n`;
+    } else {
+      preamble += `\\addbibresource{references.bib}\n\n`;
+    }
   } else {
     preamble += `\n`;
   }
 
-  // Manuscript Metadata
+  // Metadata
   preamble += `\\title{${escapeLatex(title)}}\n`;
   preamble += `\\author{${escapeLatex(authorStr)}}\n`;
   preamble += `\\affiliation{${escapeLatex(affiliationStr)}}\n`;
@@ -346,6 +393,20 @@ export function generateApa7MainTex(options = {}) {
     if (course) preamble += `\\course{${escapeLatex(course)}}\n`;
     if (instructor) preamble += `\\professor{${escapeLatex(instructor)}}\n`;
     if (dueDate) preamble += `\\duedate{${escapeLatex(dueDate)}}\n`;
+  } else if (isThesis) {
+    if (runningHead) {
+      preamble += `\\shorttitle{${escapeLatex(runningHead.slice(0, 50).toUpperCase())}}\n`;
+    }
+    const thesisNotes = [];
+    if (degree) thesisNotes.push(`A dissertation/thesis submitted in partial fulfillment of the requirements for the degree of ${degree}`);
+    if (department) thesisNotes.push(`Department: ${department}`);
+    if (advisor) thesisNotes.push(`Thesis Advisor/Supervisor: ${advisor}`);
+    if (defenseDate) thesisNotes.push(`Defense/Graduation Date: ${defenseDate}`);
+    if (authorNote) thesisNotes.push(authorNote);
+
+    if (thesisNotes.length > 0) {
+      preamble += `\\authornote{${escapeLatex(thesisNotes.join('. '))}}\n`;
+    }
   } else {
     if (runningHead) {
       preamble += `\\shorttitle{${escapeLatex(runningHead.slice(0, 50).toUpperCase())}}\n`;
@@ -355,7 +416,6 @@ export function generateApa7MainTex(options = {}) {
     }
   }
 
-  // Abstract & Keywords
   if (abstract && abstract.trim()) {
     preamble += `\\abstract{${escapeLatex(abstract.trim())}}\n`;
   }
@@ -366,8 +426,13 @@ export function generateApa7MainTex(options = {}) {
   let body = `\\begin{document}\n\n`;
   body += `\\maketitle\n\n`;
 
-  // Content Sections
-  if (Array.isArray(sections) && sections.length > 0) {
+  // Sections
+  if (modular && Array.isArray(sections) && sections.length > 0) {
+    sections.forEach((sec, idx) => {
+      const safeName = (sec.heading || `section${idx + 1}`).toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 20);
+      body += `\\input{sections/${safeName}.tex}\n\n`;
+    });
+  } else if (Array.isArray(sections) && sections.length > 0) {
     sections.forEach((sec, idx) => {
       if (sec.heading) {
         body += `${mapHeadingToApa7(sec.heading, sec.level || 1)}\n\n`;
@@ -380,7 +445,7 @@ export function generateApa7MainTex(options = {}) {
       }
     });
   } else {
-    body += `\\section{Introduction}\n\nThis manuscript was converted using ResearchProof AI Phase 5 APA 7 Studio.\n\n`;
+    body += `\\section{Introduction}\n\nThis manuscript was converted using ResearchProof AI Phase 5 Multilingual APA 7 Studio.\n\n`;
   }
 
   if (hasBibliography) {
@@ -393,11 +458,35 @@ export function generateApa7MainTex(options = {}) {
 }
 
 /**
- * Creates standard latexmkrc configuration file for automated Biber + LaTeX build.
+ * Creates standard latexmkrc configured for Unicode engines (XeLaTeX/LuaLaTeX) or pdfLaTeX.
  */
-export function generateLatexmkrc() {
+export function generateLatexmkrc(engine = 'xelatex') {
+  if (engine === 'xelatex') {
+    return [
+      `# ResearchProof AI — latexmkrc (XeLaTeX Unicode Engine)`,
+      `$pdf_mode = 5;`,
+      `$xelatex = 'xelatex -interaction=nonstopmode -synctex=1 %O %S';`,
+      `$biber = 'biber %O %S';`,
+      `$bibtex_use = 2;`,
+      `$clean_ext = 'bbl bcf fdb_latexmk fls run.xml synctex.gz xdv';`,
+      `$max_repeat = 5;`,
+      ``
+    ].join('\n');
+  } else if (engine === 'lualatex') {
+    return [
+      `# ResearchProof AI — latexmkrc (LuaLaTeX Unicode Engine)`,
+      `$pdf_mode = 4;`,
+      `$lualatex = 'lualatex -interaction=nonstopmode -synctex=1 %O %S';`,
+      `$biber = 'biber %O %S';`,
+      `$bibtex_use = 2;`,
+      `$clean_ext = 'bbl bcf fdb_latexmk fls run.xml synctex.gz';`,
+      `$max_repeat = 5;`,
+      ``
+    ].join('\n');
+  }
+
   return [
-    `# ResearchProof AI — latexmkrc`,
+    `# ResearchProof AI — latexmkrc (pdfLaTeX Engine)`,
     `$pdf_mode = 1;`,
     `$pdflatex = 'pdflatex -interaction=nonstopmode -synctex=1 %O %S';`,
     `$biber = 'biber %O %S';`,
@@ -411,20 +500,30 @@ export function generateLatexmkrc() {
 /**
  * Creates user-friendly README with local and Overleaf compilation instructions.
  */
-export function generateReadme(variant, title) {
-  const modeStr = variant === 'student' ? 'APA 7 Student Paper' : 'APA 7 Professional Manuscript';
+export function generateReadme(variant, title, engine = 'xelatex', languageConfig = {}) {
+  const modeStr = variant === 'student'
+    ? 'APA 7 Student Paper'
+    : (variant === 'thesis' || variant === 'dissertation'
+        ? 'APA 7 Thesis & Dissertation'
+        : (variant === 'custom' ? 'Custom / Uploaded Institutional Template' : 'APA 7 Professional Manuscript'));
+  const engineStr = engine === 'xelatex' ? 'XeLaTeX (Recommended for Unicode)' : (engine === 'lualatex' ? 'LuaLaTeX' : 'pdfLaTeX');
+  const langName = languageConfig.name || 'Multilingual';
+
   return [
     `# ${title}`,
-    `Generated by ResearchProof AI — Phase 5 APA 7 LaTeX Studio`,
+    `Generated by ResearchProof AI — Phase 5 Multilingual APA 7 LaTeX Studio`,
     `Format: ${modeStr}`,
+    `Primary Language: ${langName}`,
+    `Recommended Engine: ${engineStr}`,
     ``,
     `## Directory Structure`,
     `\`\`\`text`,
     `├── main.tex                 # Primary compilable APA 7 LaTeX source`,
     `├── references.bib           # BibLaTeX bibliography entries (style=apa)`,
+    `├── language-config.json     # Multilingual metadata, scripts, and font specs`,
     `├── latexmkrc                # Automation script for latexmk + biber`,
     `├── conversion-report.json   # Full conversion audit & integrity warnings`,
-    `├── sections/                # Modular manuscript sections (if partitioned)`,
+    `├── sections/                # Modular manuscript sections`,
     `├── figures/                 # Extracted images and visual assets`,
     `├── tables/                  # Formatted tabular structures`,
     `└── README.md                # Compilation instructions`,
@@ -434,27 +533,24 @@ export function generateReadme(variant, title) {
     ``,
     `### Method 1: Using latexmk (Recommended)`,
     `\`\`\`bash`,
-    `latexmk -pdf main.tex`,
+    engine === 'xelatex' ? `latexmk -pdfxe main.tex` : (engine === 'lualatex' ? `latexmk -pdflua main.tex` : `latexmk -pdf main.tex`),
     `\`\`\``,
     ``,
-    `### Method 2: Manual LaTeX & Biber Sequence`,
+    `### Method 2: Manual Unicode Sequence`,
     `\`\`\`bash`,
-    `pdflatex main.tex`,
-    `biber main`,
-    `pdflatex main.tex`,
-    `pdflatex main.tex`,
+    engine === 'xelatex' ? `xelatex main.tex\nbiber main\nxelatex main.tex\nxelatex main.tex` : `pdflatex main.tex\nbiber main\npdflatex main.tex\npdflatex main.tex`,
     `\`\`\``,
     ``,
     `### Method 3: Overleaf Import`,
     `1. Create a "New Project" -> "Upload Project".`,
     `2. Upload this complete ZIP archive.`,
-    `3. In Overleaf Settings, verify the TeX Engine is set to **pdfLaTeX** and the TeX Live version is at least **2021**.`,
+    `3. In Overleaf Settings, set **LaTeX Engine** to **${engine === 'lualatex' ? 'LuaLaTeX' : 'XeLaTeX'}**.`,
     `4. Click **Recompile**.`,
     ``,
-    `## Package Requirements`,
-    `- \`apa7\` document class`,
-    `- \`biblatex\` with \`biber\` backend`,
-    `- Standard CTAN packages: \`amsmath\`, \`graphicx\`, \`booktabs\`, \`longtable\`, \`csquotes\`, \`babel\``,
+    `## Font Requirements`,
+    `For non-Latin scripts (Indic, Arabic, CJK), install the Google Noto fonts:`,
+    `- Ubuntu/Debian: \`sudo apt-get install fonts-noto-core fonts-noto-cjk fonts-noto-extra fonts-sil-amiri\``,
+    `- macOS: Download from Google Fonts or install via \`brew install --cask font-noto-serif-bengali\` etc.`,
     ``,
     `*Protected by ResearchProof AI Verification Protocol.*`
   ].join('\n');
@@ -462,7 +558,7 @@ export function generateReadme(variant, title) {
 
 /**
  * Main conversion pipeline that takes raw text or parsed DOCX structure,
- * builds the multi-file APA 7 project, and packages it into a ZIP buffer.
+ * builds the multi-file APA 7 multilingual project, and packages it into a ZIP buffer.
  */
 export async function convertToApa7Project(inputData = {}) {
   const {
@@ -477,10 +573,20 @@ export async function convertToApa7Project(inputData = {}) {
     dueDate = '',
     runningHead = '',
     authorNote = '',
+    degree = '',
+    department = '',
+    advisor = '',
+    defenseDate = '',
+    customFormatName = '',
+    customClassOptions = '',
+    customPreamble = '',
     rawText = '',
     citations = [],
     tables = [],
-    sections: inputSections = []
+    sections: inputSections = [],
+    documentLanguage = 'auto',
+    documentMode = 'mixed',
+    engine = 'auto'
   } = inputData;
 
   const warnings = [];
@@ -510,48 +616,114 @@ export async function convertToApa7Project(inputData = {}) {
         message: 'No running head specified. APA 7 Professional manuscripts typically include a running head (max 50 chars).'
       });
     }
+  } else if (variant === 'thesis' || variant === 'dissertation') {
+    if (!degree) {
+      warnings.push({
+        category: 'metadata',
+        severity: 'info',
+        message: 'Degree (e.g. Master of Science, Ph.D.) was not specified for Thesis/Dissertation.'
+      });
+    }
+  } else if (variant === 'custom') {
+    if (customFormatName) {
+      warnings.push({
+        category: 'metadata',
+        severity: 'info',
+        message: `Custom template applied: ${customFormatName}`
+      });
+    }
   }
 
-  // Parse Sections from rawText or structured input
+  // 1. Multilingual Resolution & Script Detection
+  const fullCorpus = `${title} ${abstract} ${rawText}`;
+  const langResolution = resolveDocumentLanguage(fullCorpus, documentLanguage);
+  const primaryLang = langResolution.language;
+  const scriptAnalysis = langResolution.scriptAnalysis;
+
+  // Determine effective engine
+  let effectiveEngine = engine;
+  if (!effectiveEngine || effectiveEngine === 'auto') {
+    if (primaryLang.script !== 'latin' || scriptAnalysis.isMixed || scriptAnalysis.isRtl) {
+      effectiveEngine = 'xelatex';
+    } else {
+      effectiveEngine = 'xelatex'; // Default modern Unicode engine
+    }
+  }
+
+  // 2. Parse Sections
   let parsedSections = [];
   if (Array.isArray(inputSections) && inputSections.length > 0) {
     parsedSections = [...inputSections];
   } else if (rawText && rawText.trim()) {
-    // Break paragraphs and headings
     const lines = rawText.split(/\r?\n\r?\n/);
     let currentSec = { heading: 'Introduction', level: 1, content: '' };
     lines.forEach(block => {
       const trimmed = block.trim();
       if (!trimmed) return;
-      // Heading detection heuristic: lines starting with # or Title Case short lines
-      if (trimmed.startsWith('#')) {
-        const hashMatch = trimmed.match(/^(#{1,5})\s+(.+)/);
+      const subLines = trimmed.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      const firstLine = subLines[0] || '';
+
+      if (firstLine.startsWith('#')) {
+        const hashMatch = firstLine.match(/^(#{1,5})\s+(.+)/);
         if (hashMatch) {
           if (currentSec.content || currentSec.heading !== 'Introduction') {
             parsedSections.push(currentSec);
           }
           currentSec = {
-            heading: hashMatch[2],
+            heading: hashMatch[2].trim(),
             level: hashMatch[1].length,
             content: ''
           };
+          const rest = subLines.slice(1).join('\n\n');
+          if (rest) {
+            const { resolvedText, warnings: citeWarns } = resolveInTextCitations(rest, citations);
+            warnings.push(...citeWarns);
+            let escapedParagraph = escapeLatex(resolvedText);
+            if (documentMode === 'mixed') {
+              escapedParagraph = wrapMixedLanguageSegments(escapedParagraph, primaryLang.script);
+            }
+            currentSec.content += (currentSec.content ? '\n\n' : '') + escapedParagraph;
+          }
           return;
         }
       }
 
-      // Check for section headings like "Method", "Results", "Discussion"
-      if (/^(Introduction|Method|Methods|Results|Discussion|Conclusion|References)$/i.test(trimmed)) {
+      // Check standard academic and thesis section headings on first line of block
+      const headingMatch = firstLine.match(/^(?:(?:Chapter\s+\d+|[0-9]+(?:\.[0-9]+)*)\s*[:.-]?\s*)?(Abstract|Introduction|Background|Related\s*Work|Literature\s*Review|Theoretical\s*Framework|Methodology|Methods|Materials\s*and\s*Methods|Experimental\s*Setup|Experiment\s*\d*|Results|Findings|Data\s*Analysis|Discussion|Limitations|Conclusion|Conclusions|Future\s*Work|Acknowledgements?|Dedication|References|Bibliography|Appendix|Appendices)$/i);
+      if (headingMatch && firstLine.length < 90) {
         if (currentSec.content || currentSec.heading !== 'Introduction') {
           parsedSections.push(currentSec);
         }
-        currentSec = { heading: trimmed, level: 1, content: '' };
+        let level = 1;
+        const numPrefixMatch = firstLine.match(/^([0-9]+(?:\.[0-9]+)*)/);
+        if (numPrefixMatch) {
+          level = (numPrefixMatch[1].match(/\./g) || []).length + 1;
+        }
+        currentSec = { heading: firstLine, level: Math.min(level, 5), content: '' };
+        const rest = subLines.slice(1).join('\n\n');
+        if (rest) {
+          const { resolvedText, warnings: citeWarns } = resolveInTextCitations(rest, citations);
+          warnings.push(...citeWarns);
+          let escapedParagraph = escapeLatex(resolvedText);
+          if (documentMode === 'mixed') {
+            escapedParagraph = wrapMixedLanguageSegments(escapedParagraph, primaryLang.script);
+          }
+          currentSec.content += (currentSec.content ? '\n\n' : '') + escapedParagraph;
+        }
         return;
       }
 
       const { resolvedText, warnings: citeWarns } = resolveInTextCitations(trimmed, citations);
       warnings.push(...citeWarns);
 
-      currentSec.content += (currentSec.content ? '\n\n' : '') + escapeLatex(resolvedText);
+      let escapedParagraph = escapeLatex(resolvedText);
+
+      // Mode B: Mixed Language segment wrapping
+      if (documentMode === 'mixed') {
+        escapedParagraph = wrapMixedLanguageSegments(escapedParagraph, primaryLang.script);
+      }
+
+      currentSec.content += (currentSec.content ? '\n\n' : '') + escapedParagraph;
     });
     parsedSections.push(currentSec);
   }
@@ -576,7 +748,7 @@ export async function convertToApa7Project(inputData = {}) {
     warnings.push({ category: 'bibliography', severity: 'warning', message: msg });
   });
 
-  // Generate main.tex
+  // Generate main.tex (standard full document with references.bib)
   const mainTex = generateApa7MainTex({
     variant,
     title,
@@ -589,18 +761,126 @@ export async function convertToApa7Project(inputData = {}) {
     dueDate,
     runningHead,
     authorNote,
+    degree,
+    department,
+    advisor,
+    defenseDate,
+    customFormatName,
+    customClassOptions,
+    customPreamble,
     sections: parsedSections,
-    hasBibliography: citations.length > 0
+    hasBibliography: citations.length > 0,
+    documentLanguage: primaryLang.code,
+    documentMode,
+    engine: effectiveEngine,
+    detectedScripts: scriptAnalysis.detectedScripts,
+    modular: false
   });
 
-  const latexmkrc = generateLatexmkrc();
-  const readme = generateReadme(variant, title);
+  // Generate modular main.tex (segments with \input{sections/...})
+  const modularMainTex = generateApa7MainTex({
+    variant,
+    title,
+    authors,
+    affiliations,
+    abstract,
+    keywords,
+    course,
+    instructor,
+    dueDate,
+    runningHead,
+    authorNote,
+    degree,
+    department,
+    advisor,
+    defenseDate,
+    customFormatName,
+    customClassOptions,
+    customPreamble,
+    sections: parsedSections,
+    hasBibliography: citations.length > 0,
+    documentLanguage: primaryLang.code,
+    documentMode,
+    engine: effectiveEngine,
+    detectedScripts: scriptAnalysis.detectedScripts,
+    modular: true
+  });
+
+  // Generate standalone main.tex with embedded filecontents bibliography for 1-click Overleaf paste
+  const standaloneMainTex = generateApa7MainTex({
+    variant,
+    title,
+    authors,
+    affiliations,
+    abstract,
+    keywords,
+    course,
+    instructor,
+    dueDate,
+    runningHead,
+    authorNote,
+    degree,
+    department,
+    advisor,
+    defenseDate,
+    customFormatName,
+    customClassOptions,
+    customPreamble,
+    sections: parsedSections,
+    hasBibliography: citations.length > 0,
+    documentLanguage: primaryLang.code,
+    documentMode,
+    engine: effectiveEngine,
+    detectedScripts: scriptAnalysis.detectedScripts,
+    modular: false,
+    embedBib: true,
+    bibContent
+  });
+
+  const sectionsList = parsedSections.map((sec, idx) => {
+    const safeName = (sec.heading || `section${idx + 1}`).toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 20);
+    const secTex = `${mapHeadingToApa7(sec.heading, sec.level || 1)}\n\n${sec.content || ''}\n`;
+    return {
+      name: safeName,
+      filename: `sections/${safeName}.tex`,
+      heading: sec.heading || `Section ${idx + 1}`,
+      level: sec.level || 1,
+      content: secTex
+    };
+  });
+
+  const latexmkrc = generateLatexmkrc(effectiveEngine);
+  const readme = generateReadme(variant, title, effectiveEngine, primaryLang);
+
+  const languageConfig = {
+    documentLanguage: primaryLang.code,
+    languageName: primaryLang.name,
+    nativeName: primaryLang.nativeName,
+    primaryScript: SCRIPT_DEFINITIONS[primaryLang.script]?.name || primaryLang.script,
+    direction: primaryLang.direction,
+    documentMode,
+    engine: effectiveEngine,
+    selectedEngine: effectiveEngine,
+    recommendedEngine: primaryLang.recommendedEngine || effectiveEngine,
+    fontFamily: primaryLang.fontFamily,
+    font: primaryLang.fontFamily,
+    requiredFonts: [primaryLang.fontFamily, ...(primaryLang.fallbackFonts || [])],
+    fallbackFonts: primaryLang.fallbackFonts,
+    detectedScripts: scriptAnalysis.detectedScripts,
+    detectedScriptDetails: scriptAnalysis.detectedScriptDetails,
+    scriptDistribution: scriptAnalysis.distribution,
+    isMixed: scriptAnalysis.isMixed,
+    isMixedScript: scriptAnalysis.isMixed,
+    isRtl: scriptAnalysis.isRtl
+  };
 
   const report = {
-    converterVersion: '5.0.0-apa7',
+    converterVersion: '5.1.0-multilingual-apa7',
     generatedAt: new Date().toISOString(),
     template: 'apa7',
     variant,
+    language: languageConfig,
+    languageConfig,
     metadata: {
       title,
       authorsCount: authors.length,
@@ -611,43 +891,58 @@ export async function convertToApa7Project(inputData = {}) {
     sectionsCount: parsedSections.length,
     referencesCount: citations.length,
     warnings,
-    compilationRecommendation: 'Use latexmk with pdf mode or Overleaf pdfLaTeX compiler.'
+    compilationRecommendation: `Use ${effectiveEngine === 'lualatex' ? 'lualatex' : 'xelatex'} with fontspec and polyglossia.`
   };
 
   // Build ZIP Archive with AdmZip
   const zip = new AdmZip();
-  const ROOT_DIR = 'researchproof-apa7-manuscript/';
+  const ROOT_DIR = 'researchproof-multilingual-apa7/';
+  const LEGACY_DIR = 'researchproof-apa7-manuscript/'; // Legacy mirror for phase 5 tests
 
-  zip.addFile(`${ROOT_DIR}main.tex`, Buffer.from(mainTex, 'utf8'));
-  zip.addFile(`${ROOT_DIR}references.bib`, Buffer.from(bibContent, 'utf8'));
-  zip.addFile(`${ROOT_DIR}README.md`, Buffer.from(readme, 'utf8'));
-  zip.addFile(`${ROOT_DIR}latexmkrc`, Buffer.from(latexmkrc, 'utf8'));
-  zip.addFile(`${ROOT_DIR}conversion-report.json`, Buffer.from(JSON.stringify(report, null, 2), 'utf8'));
+  const fileBundle = [
+    { name: 'main.tex', content: mainTex },
+    { name: 'main_modular.tex', content: modularMainTex },
+    { name: 'references.bib', content: bibContent },
+    { name: 'README.md', content: readme },
+    { name: 'latexmkrc', content: latexmkrc },
+    { name: 'language-config.json', content: JSON.stringify(languageConfig, null, 2) },
+    { name: 'conversion-report.json', content: JSON.stringify(report, null, 2) }
+  ];
 
-  // Add modular section files
-  parsedSections.forEach((sec, idx) => {
-    const safeName = (sec.heading || `section${idx + 1}`).toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 20);
-    const secTex = `${mapHeadingToApa7(sec.heading, sec.level || 1)}\n\n${sec.content}\n`;
-    zip.addFile(`${ROOT_DIR}sections/${safeName}.tex`, Buffer.from(secTex, 'utf8'));
+  fileBundle.forEach(f => {
+    zip.addFile(`${ROOT_DIR}${f.name}`, Buffer.from(f.content, 'utf8'));
+    zip.addFile(`${LEGACY_DIR}${f.name}`, Buffer.from(f.content, 'utf8'));
   });
 
-  // Add tables and figures directory placeholders
+  sectionsList.forEach((sec) => {
+    zip.addFile(`${ROOT_DIR}${sec.filename}`, Buffer.from(sec.content, 'utf8'));
+    zip.addFile(`${LEGACY_DIR}${sec.filename}`, Buffer.from(sec.content, 'utf8'));
+  });
+
   zip.addFile(`${ROOT_DIR}figures/README.md`, Buffer.from('# Figures Directory\nPlace figure image files (.png, .pdf, .jpg) here and reference via `\\includegraphics{figures/...}`.\n', 'utf8'));
   zip.addFile(`${ROOT_DIR}tables/README.md`, Buffer.from('# Tables Directory\nAPA 7 compliant booktabs table definitions.\n', 'utf8'));
+  zip.addFile(`${LEGACY_DIR}figures/README.md`, Buffer.from('# Figures Directory\nPlace figure image files here.\n', 'utf8'));
+  zip.addFile(`${LEGACY_DIR}tables/README.md`, Buffer.from('# Tables Directory\nAPA 7 table definitions.\n', 'utf8'));
 
   const zipBuffer = zip.toBuffer();
 
   return {
     zipBuffer,
     mainTex,
+    modularMainTex,
+    standaloneMainTex,
     bibContent,
+    sections: sectionsList,
+    languageConfig,
     report,
     warnings,
     stats: {
       zipSize: zipBuffer.length,
       sectionsCount: parsedSections.length,
       referencesCount: citations.length,
-      warningsCount: warnings.length
+      warningsCount: warnings.length,
+      primaryLanguage: primaryLang.code,
+      primaryScript: primaryLang.script
     }
   };
 }

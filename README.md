@@ -18,9 +18,14 @@ A full-stack academic writing and research-integrity starter project.
 - User Privacy Control Center, GDPR/CCPA Data Export & Cascading Account Deletion
 - Research Integrity Reporting Engine with multi-dimensional auditing & DOCX export
 - APA 7 Word-to-LaTeX Manuscript Converter (Student Paper `stu` & Professional Manuscript `man`)
+- Multilingual DOCX-to-LaTeX Conversion across 19+ languages (English, Bengali, Hindi, Tamil, Telugu, Malayalam, Kannada, Marathi, Gujarati, Punjabi, Urdu, Arabic, French, German, Spanish, Portuguese, Chinese, Japanese, Korean)
+- 3 Document Conversion Modes: Mode A (Single Language), Mode B (Mixed Language with font-switching macros), Mode C (Language-Preserving Conversion)
+- Deterministic Unicode script detection (Latin, Bengali, Devanagari, Tamil, Telugu, Malayalam, Kannada, Gujarati, Gurmukhi, Arabic, Han, Kana, Hangul)
+- Bidirectional (RTL) typesetting for Arabic and Urdu with `polyglossia` and `bidi`/`luabidi`
+- Zero-Width Joiner (ZWJ `\u200D`) and Non-Joiner (ZWNJ `\u200C`) preservation for Indic conjunct ligatures
 - Mathematical & statistical notation preservation ($p$-values, effect sizes, Greek symbols)
 - Official `apa7` document class integration with `booktabs` tables and `biblatex` (Biber)
-- Automated ZIP project generation (`main.tex`, `references.bib`, `README.md`, `latexmkrc`, `sections/`)
+- Automated ZIP project generation (`main.tex`, `references.bib`, `README.md`, `language-config.json`, `conversion-report.json`, `latexmkrc`, `sections/`)
 - Sandboxed LaTeX compiler worker with graceful cloud container degradation (Render/Vercel)
 - Projects, document versioning, and revision history
 - Privacy-first option not to persist submitted text (`PERSIST_DOCUMENT_TEXT`)
@@ -55,11 +60,12 @@ API health check: http://localhost:4000/api/health
 ```bash
 npm test --prefix server
 ```
-Executes **58 comprehensive tests** across:
+Executes **71 comprehensive tests** across:
 - Phase 1 Security, Google OAuth, and Usage Quotas (20 tests)
 - Phase 2 Academic Writing Studio, Citations, and DOCX (12 tests)
 - Phase 3 Platform Management, RBAC, Analytics, Privacy, and Integrity Reports (10 tests)
 - Phase 5 APA 7 Word-to-LaTeX Converter, Templates, BibTeX, and ZIP Pipeline (12 tests)
+- Phase 5 Addition Multilingual LaTeX, Unicode Scripts, RTL & Fonts (13 tests)
 
 ### 5. Production Build
 ```bash
@@ -72,6 +78,8 @@ npm run --prefix server seed:admin <email> <password> [displayName]
 ```
 
 ## Documentation
+- [Multilingual LaTeX & Unicode Guide](docs/MULTILINGUAL_LATEX.md)
+- [Unicode Fonts & LaTeX Engines](docs/UNICODE_FONTS_AND_ENGINES.md)
 - [Phase 5 Implementation Guide](docs/PHASE5_IMPLEMENTATION.md)
 - [APA 7 Templates Specification](docs/APA7_TEMPLATE.md)
 - [DOCX-to-LaTeX Conversion Pipeline](docs/APA7_CONVERSION.md)
@@ -92,14 +100,14 @@ npm run --prefix server seed:admin <email> <password> [displayName]
 - [System Architecture](ARCHITECTURE.md)
 
 
-## AI provider configuration
-Set `AI_PROVIDER` (`gemini` or `openai`), `AI_API_KEY`, `AI_BASE_URL`, and `AI_MODEL` in `server/.env`.
-If no API key is configured, the application functions cleanly for all non-AI tools (Writing Studio, Citation Assistant, DOCX import/export, Privacy Center, and Integrity Reports).
-
-## Important limitations
-- The writing assessment is a heuristic review aid, not a reliable determination of authorship.
-- Citation checks format and verify bibliographic metadata against Crossref; they do not prove that a source substantively supports a specific claim.
-- Research integrity reports evaluate internal manuscript characteristics; they do not verify external Turnitin or plagiarism databases.
-- Always verify sources, data, quotations, and institutional AI-use policies.
+## LaTeX Studio & Overleaf Workflow
+ResearchProof AI Phase 5 provides an interactive LaTeX Export Studio supporting two seamless Overleaf workflows:
+- **1-Click Standalone Paste (`main.tex`)**: A complete, self-contained LaTeX document embedding citations via `\begin{filecontents*}{\jobname.bib}`. Paste directly into a blank Overleaf project's `main.tex` and recompile immediately without creating separate files.
+- **Segmented / Modular Paste**: Inspect and copy individual segments:
+  - `main.tex`: Master document referencing `references.bib`
+  - `main_modular.tex`: Master document importing `\input{sections/...}`
+  - `references.bib`: BibLaTeX APA 7 citations formatted for Biber
+  - `sections/*.tex`: Partitioned section files (`sections/introduction.tex`, `sections/method.tex`, etc.)
+- **Overleaf Engine Recommendation**: In Overleaf, navigate to **Menu** (top left) → set **Compiler** to **XeLaTeX** (or LuaLaTeX) for full Unicode OpenType and multilingual font support.
 
 
