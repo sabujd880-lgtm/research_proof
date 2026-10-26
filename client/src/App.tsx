@@ -8,7 +8,7 @@ import {
   AlertTriangle, AlertCircle, ExternalLink, Printer, Eye, Edit3, GitCompare
 } from 'lucide-react';
 
-const API = import.meta.env.VITE_API_URL || (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1' ? '/api' : 'http://localhost:4000/api');
+const API = import.meta.env.VITE_API_URL || '/api';
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 const isGoogleConfigured = Boolean(
   GOOGLE_CLIENT_ID &&
