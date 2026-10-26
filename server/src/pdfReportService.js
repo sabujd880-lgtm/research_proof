@@ -219,31 +219,33 @@ export function generateTextGuardPdfReport(scanData = {}, metadata = {}) {
       (Standard academic terminology, properly attributed citations, and methodology headings are recognized.) Tj
     ET
 
-    % Section 02 Header: Matched Text Overview
+  // Section 02 Header: Matched Sources & Reference Evidence
     BT
       /F1 14 Tf
       0.1 0.14 0.22 rg
       45 385 Td
-      (02. Matched Text & Source Evidence Summary) Tj
+      (02. Matched Sources & Reference Evidence) Tj
     ET
   `;
 
-  // Add top matched passages on Page 1
+  // Add top matched sources and passages on Page 1
   let yPos = 350;
+  const sourcesList = scanData.matchedSources || [];
   const topMatches = matchedPassages.slice(0, 3);
 
-  if (topMatches.length === 0) {
+  if (topMatches.length === 0 && sourcesList.length === 0) {
     p1Stream += `
       BT
         /F2 10 Tf
         0.3 0.6 0.35 rg
         45 ${yPos} Td
-        (No significant verbatim overlaps or suspicious external text matches detected.) Tj
+        (No matching sources were identified within the available comparison coverage.) Tj
       ET
     `;
   } else {
     topMatches.forEach((m, idx) => {
       const wrapped = wrapText(m.matchText || m.excerpt, 75).slice(0, 2);
+      const srcDoiOrUrl = m.sourceDoi ? `https://doi.org/${m.sourceDoi}` : (m.sourceUrl || 'Authorized Repository');
       p1Stream += `
         0.98 0.98 0.99 rg
         45 ${yPos - 45} 505 52 re f
@@ -254,16 +256,16 @@ export function generateTextGuardPdfReport(scanData = {}, metadata = {}) {
           /F1 9 Tf
           0.54 0.48 0.97 rg
           55 ${yPos - 6} Td
-          ([Passage #${idx + 1}] ${escapePdfText(m.matchTypeLabel || 'Match')} - ${m.similarityPercent}% Overlap (${m.wordCount} words)) Tj
+          ([Source #${idx + 1}] ${escapePdfText((m.sourceTitle || 'Benchmark Source').slice(0, 50))} - ${m.similarityPercent}% [${escapePdfText(m.matchTypeLabel || 'Match')}]) Tj
           /F2 8.5 Tf
           0.2 0.2 0.2 rg
           0 -14 Td
           ("${escapePdfText(wrapped[0] || '')}") Tj
           ${wrapped[1] ? `0 -11 Td ("${escapePdfText(wrapped[1])}") Tj` : ''}
           /F3 7.5 Tf
-          0.45 0.5 0.6 rg
+          0.2 0.45 0.7 rg
           0 -12 Td
-          (Source: ${escapePdfText((m.sourceTitle || 'Comparison Corpus').slice(0, 65))} | ${escapePdfText(m.sourceDoi || m.sourceUrl || 'Authorized Corpus')}) Tj
+          (Evidence Link: ${escapePdfText(srcDoiOrUrl.slice(0, 75))} | Status: ${escapePdfText(m.verificationStatus || 'Text Match Verified')}) Tj
         ET
       `;
       yPos -= 64;

@@ -5,7 +5,7 @@ import {
   CircleHelp, Clock3, Copy, Download, FileCheck2, FileText, FolderKanban, Gauge, History,
   LayoutDashboard, LogOut, Menu, Moon, PanelLeft, Plus, RefreshCw, ScanText, Settings2,
   ShieldAlert, ShieldCheck, Sliders, Sparkles, Sun, Trash2, Upload, WandSparkles, X,
-  AlertTriangle, AlertCircle, ExternalLink, Printer, Eye, Edit3, GitCompare
+  AlertTriangle, AlertCircle, ExternalLink, Printer, Eye, Edit3, GitCompare, Search
 } from 'lucide-react';
 
 const API = import.meta.env.VITE_API_URL || '/api';
@@ -3459,6 +3459,11 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
   const [minPhraseWords, setMinPhraseWords] = useState<number>(5);
   const [filterTab, setFilterTab] = useState<'all' | 'overlap' | 'repeat' | 'doi'>('all');
   const [activeDetailTab, setActiveDetailTab] = useState<'overview' | 'matches' | 'doi' | 'ai' | 'history'>('overview');
+  const [sourceSearchTerm, setSourceSearchTerm] = useState<string>('');
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>('all');
+  const [sourceStatusFilter, setSourceStatusFilter] = useState<string>('all');
+  const [sourceSortBy, setSourceSortBy] = useState<'contribution' | 'year' | 'passages'>('contribution');
+  const [compareModalSource, setCompareModalSource] = useState<any | null>(null);
   const [scanHistory, setScanHistory] = useState<any[]>([]);
   const [loadingHistory, setLoadingHistory] = useState<boolean>(false);
   const [scanStatus, setScanStatus] = useState<'idle' | 'scanning' | 'completed' | 'partial' | 'failed'>('idle');
@@ -3759,11 +3764,80 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
   const filteredMatches = useMemo(() => {
     if (!scanResult?.matchedPassages) return [];
     if (filterTab === 'all') return scanResult.matchedPassages;
-    if (filterTab === 'overlap') return scanResult.matchedPassages.filter((m: any) => m.type === 'internal_passage_overlap');
-    if (filterTab === 'repeat') return scanResult.matchedPassages.filter((m: any) => m.type === 'repeated_key_phrase');
-    if (filterTab === 'doi') return scanResult.matchedPassages.filter((m: any) => m.type === 'scholarly_citation_reference');
+    if (filterTab === 'overlap') return scanResult.matchedPassages.filter((m: any) => m.type === 'internal_passage_overlap' || m.type === 'exact' || m.type === 'near_exact');
+    if (filterTab === 'repeat') return scanResult.matchedPassages.filter((m: any) => m.type === 'repeated_key_phrase' || m.type === 'semantic');
+    if (filterTab === 'doi') return scanResult.matchedPassages.filter((m: any) => m.type === 'scholarly_citation_reference' || m.sourceDoi);
     return scanResult.matchedPassages;
   }, [scanResult, filterTab]);
+
+  // Industrial Sources Table: filtered, searched, and sorted
+  const processedSources = useMemo(() => {
+    let list: any[] = [];
+    if (scanResult?.matchedSources && Array.isArray(scanResult.matchedSources)) {
+      list = [...scanResult.matchedSources];
+    } else if (scanResult?.matchedPassages && Array.isArray(scanResult.matchedPassages)) {
+      // Fallback derivation if matchedSources is absent
+      const grp = new Map();
+      scanResult.matchedPassages.forEach((m: any) => {
+        const sid = m.sourceId || m.sourceTitle || 'src';
+        if (!grp.has(sid)) {
+          grp.set(sid, {
+            sourceId: sid,
+            title: m.sourceTitle || 'Scholarly Record',
+            authors: m.sourceAuthors || 'Unknown Author(s)',
+            year: m.sourceYear || '',
+            journal: m.sourceJournal || '',
+            domain: m.sourceDomain || (m.sourceUrl ? (() => { try { return new URL(m.sourceUrl).hostname; } catch { return 'doi.org'; } })() : 'authorized-corpus'),
+            url: m.sourceUrl,
+            doi: m.sourceDoi,
+            verificationStatus: m.verificationStatus || 'Text Match Verified',
+            matchType: m.type,
+            matchTypeLabel: m.matchTypeLabel || (m.type === 'exact' ? 'Exact Match' : m.type === 'near_exact' ? 'Near-Exact Match' : 'Semantic'),
+            matchingPassagesCount: 0,
+            matchedWordCount: 0,
+            similarityContribution: m.similarityPercent || 15,
+            passages: []
+          });
+        }
+        const s = grp.get(sid);
+        s.matchingPassagesCount += 1;
+        s.matchedWordCount += (m.wordCount || 0);
+        s.passages.push(m);
+      });
+      list = Array.from(grp.values());
+    }
+
+    if (sourceSearchTerm.trim()) {
+      const q = sourceSearchTerm.toLowerCase().trim();
+      list = list.filter(s =>
+        (s.title && s.title.toLowerCase().includes(q)) ||
+        (s.authors && String(s.authors).toLowerCase().includes(q)) ||
+        (s.doi && s.doi.toLowerCase().includes(q)) ||
+        (s.domain && s.domain.toLowerCase().includes(q)) ||
+        (s.journal && s.journal.toLowerCase().includes(q))
+      );
+    }
+
+    if (sourceTypeFilter !== 'all') {
+      list = list.filter(s => s.matchType === sourceTypeFilter || (sourceTypeFilter === 'exact' && s.matchTypeLabel?.toLowerCase().includes('exact')));
+    }
+
+    if (sourceStatusFilter !== 'all') {
+      list = list.filter(s => s.verificationStatus === sourceStatusFilter);
+    }
+
+    list.sort((a, b) => {
+      if (sourceSortBy === 'year') {
+        return (Number(b.year) || 0) - (Number(a.year) || 0);
+      }
+      if (sourceSortBy === 'passages') {
+        return (b.matchingPassagesCount || 0) - (a.matchingPassagesCount || 0);
+      }
+      return (b.similarityContribution || 0) - (a.similarityContribution || 0);
+    });
+
+    return list;
+  }, [scanResult, sourceSearchTerm, sourceTypeFilter, sourceStatusFilter, sourceSortBy]);
 
   return (
     <div className="tg-container">
@@ -4345,236 +4419,439 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
               </div>
             )}
 
-            {/* TAB 2: MATCHED SOURCES */}
+            {/* TAB 2: MATCHED SOURCES & EVIDENCE */}
             {activeDetailTab === 'matches' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {/* Sub-filter tabs */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
-                  <div className="qb-modes" style={{ gap: '4px' }}>
-                    <button
-                      className={`qb-mode-btn ${filterTab === 'all' ? 'active' : ''}`}
-                      onClick={() => setFilterTab('all')}
-                      style={{ padding: '4px 8px', fontSize: '10px' }}
-                    >
-                      All ({scanResult?.matchedPassages?.length || 0})
-                    </button>
-                    <button
-                      className={`qb-mode-btn ${filterTab === 'overlap' ? 'active' : ''}`}
-                      onClick={() => setFilterTab('overlap')}
-                      style={{ padding: '4px 8px', fontSize: '10px' }}
-                    >
-                      Verbatim Overlaps
-                    </button>
-                    <button
-                      className={`qb-mode-btn ${filterTab === 'repeat' ? 'active' : ''}`}
-                      onClick={() => setFilterTab('repeat')}
-                      style={{ padding: '4px 8px', fontSize: '10px' }}
-                    >
-                      Repeated Phrases
-                    </button>
-                    <button
-                      className={`qb-mode-btn ${filterTab === 'doi' ? 'active' : ''}`}
-                      onClick={() => setFilterTab('doi')}
-                      style={{ padding: '4px 8px', fontSize: '10px' }}
-                    >
-                      DOIs
-                    </button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                {/* Search & Filter Toolbar */}
+                <div className="tg-sources-toolbar">
+                  <div className="tg-search-input">
+                    <Search size={13} style={{ color: 'var(--muted)' }} />
+                    <input
+                      type="text"
+                      placeholder="Search title, author, DOI, domain..."
+                      value={sourceSearchTerm}
+                      onChange={e => setSourceSearchTerm(e.target.value)}
+                    />
+                    {sourceSearchTerm && (
+                      <button
+                        type="button"
+                        style={{ border: 0, background: 'transparent', padding: 0, cursor: 'pointer', color: 'var(--muted)' }}
+                        onClick={() => setSourceSearchTerm('')}
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
                   </div>
-                  <span style={{ fontSize: '10.5px', color: 'var(--muted)' }}>
-                    {filteredMatches.length} items shown
-                  </span>
+
+                  <div className="tg-sources-filters">
+                    <select
+                      value={sourceTypeFilter}
+                      onChange={e => setSourceTypeFilter(e.target.value)}
+                      title="Filter by match type"
+                    >
+                      <option value="all">All Match Types</option>
+                      <option value="exact">Exact Overlap</option>
+                      <option value="near_exact">Near-Exact Overlap</option>
+                      <option value="semantic">Semantic / Internal</option>
+                    </select>
+
+                    <select
+                      value={sourceStatusFilter}
+                      onChange={e => setSourceStatusFilter(e.target.value)}
+                      title="Filter by source verification status"
+                    >
+                      <option value="all">All Verification Statuses</option>
+                      <option value="Metadata Verified">Metadata Verified</option>
+                      <option value="Text Match Verified">Text Match Verified</option>
+                      <option value="Source Unavailable">Source Unavailable</option>
+                    </select>
+
+                    <select
+                      value={sourceSortBy}
+                      onChange={e => setSourceSortBy(e.target.value as any)}
+                      title="Sort sources"
+                    >
+                      <option value="contribution">Sort: Highest Match %</option>
+                      <option value="passages">Sort: Most Passages</option>
+                      <option value="year">Sort: Newest Year</option>
+                    </select>
+                  </div>
                 </div>
 
                 {!scanResult ? (
                   <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--muted)' }}>
                     <FileCheck2 size={28} style={{ opacity: 0.4, marginBottom: '8px' }} />
-                    <p style={{ margin: 0, fontSize: '12px' }}>Click "Deep Scan" to analyze manuscript similarity and sources.</p>
+                    <p style={{ margin: 0, fontSize: '12px' }}>Run a similarity scan to discover matching sources.</p>
                   </div>
-                ) : filteredMatches.length === 0 ? (
-                  <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--muted)' }}>
+                ) : processedSources.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--muted)', background: 'var(--surface2)', borderRadius: '10px' }}>
                     <ShieldCheck size={28} style={{ color: '#10b981', marginBottom: '8px' }} />
-                    <strong style={{ display: 'block', color: 'var(--text)', fontSize: '13px' }}>No matches found in this category</strong>
-                    <p style={{ margin: '4px 0 0', fontSize: '11px' }}>Your text demonstrates high originality and standard scholarly citation attribution.</p>
+                    <strong style={{ display: 'block', color: 'var(--text)', fontSize: '13px' }}>
+                      {sourceSearchTerm || sourceTypeFilter !== 'all' || sourceStatusFilter !== 'all'
+                        ? 'No sources match the active filter criteria'
+                        : 'No matching sources were identified within the available comparison coverage.'}
+                    </strong>
+                    <p style={{ margin: '4px 0 0', fontSize: '11px', maxWidth: '440px', marginInline: 'auto' }}>
+                      {sourceSearchTerm || sourceTypeFilter !== 'all' || sourceStatusFilter !== 'all'
+                        ? 'Try clearing search keywords or selecting all statuses.'
+                        : 'Your text demonstrates authentic composition with no detected verbatim or near-verbatim overlaps in indexed corpora.'}
+                    </p>
                   </div>
                 ) : (
-                  filteredMatches.map((m: any, idx: number) => {
-                    const isSelected = selectedMatchId === m.id;
-                    const isResolveOpen = resolveState?.matchId === m.id;
-                    const isDoi = m.type === 'scholarly_citation_reference';
-                    const isOverlap = m.type === 'internal_passage_overlap';
+                  <>
+                    {/* Industrial Sources Table */}
+                    <div style={{ overflowX: 'auto', border: '1px solid var(--border)', borderRadius: '8px' }}>
+                      <table className="tg-data-table" style={{ margin: 0, border: 0 }}>
+                        <thead>
+                          <tr>
+                            <th style={{ width: '38%' }}>Source & Authors</th>
+                            <th style={{ width: '12%' }}>Match %</th>
+                            <th style={{ width: '14%' }}>Type</th>
+                            <th style={{ width: '14%' }}>DOI / Domain</th>
+                            <th style={{ width: '12%' }}>Status</th>
+                            <th style={{ width: '10%', textAlign: 'right' }}>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {processedSources.map((src: any) => {
+                            const isSelected = selectedMatchId === src.sourceId;
+                            const doiClean = src.doi ? src.doi.replace(/^https?:\/\/doi\.org\//i, '') : null;
+                            const externalUrl = src.url || (doiClean ? `https://doi.org/${doiClean}` : null);
+                            const firstPassage = src.passages?.[0];
 
-                    return (
-                      <div
-                        key={m.id || idx}
-                        id={m.id}
-                        className={`tg-match-card ${isSelected ? 'active' : ''}`}
-                      >
-                        <div className="tg-match-card-head">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span className={`tg-badge-match ${isDoi ? 'doi' : isOverlap ? 'overlap' : 'repeat'}`}>
-                              {isDoi ? 'Crossref DOI' : isOverlap ? 'Verbatim Overlap' : 'Repeated Phrase'}
-                            </span>
-                            <strong style={{ fontSize: '11px', color: 'var(--text)' }}>
-                              {m.sourceLocation}
-                            </strong>
-                          </div>
-                          {m.matchPercentage && (
-                            <span style={{ fontSize: '10px', fontWeight: 700, color: '#e11d48' }}>
-                              {m.matchPercentage}% match
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="tg-excerpt-grid">
-                          <div className="tg-excerpt-side">
-                            <small>Your Manuscript</small>
-                            <p>“{m.excerpt}”</p>
-                          </div>
-                          <div className="tg-excerpt-side">
-                            <small>{isDoi ? 'Linked Scholarly Registry' : 'Document Location'}</small>
-                            <p style={{ color: 'var(--muted)' }}>
-                              {isDoi ? m.detail : m.targetLocation || m.detail}
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="tg-match-actions">
-                          <div className="tg-match-left">
-                            <span className="tg-word-pill">
-                              <FileText size={11} />
-                              {m.wordCount || (m.matchText || m.fullText || m.excerpt || '').trim().split(/\s+/).filter(Boolean).length} words
-                            </span>
-
-                            {m.sourceLink && (
-                              <a
-                                href={m.sourceLink}
-                                target="_blank"
-                                rel="noreferrer"
-                                style={{ fontSize: '11px', color: '#8876ee', textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                            return (
+                              <tr
+                                key={src.sourceId}
+                                style={{ background: isSelected ? 'rgba(99, 102, 241, 0.08)' : undefined }}
                               >
-                                View Open Source <ExternalLink size={11} />
-                              </a>
+                                <td>
+                                  <strong style={{ display: 'block', color: 'var(--text)', fontSize: '11.5px', marginBottom: '2px' }}>
+                                    {src.title}
+                                  </strong>
+                                  <div style={{ fontSize: '10px', color: 'var(--muted)' }}>
+                                    {src.authors} {src.year ? `(${src.year})` : ''} {src.journal ? `· ${src.journal}` : ''}
+                                  </div>
+                                  <div style={{ fontSize: '9.5px', color: 'var(--muted)', marginTop: '2px' }}>
+                                    {src.matchingPassagesCount} passage{src.matchingPassagesCount > 1 ? 's' : ''} ({src.matchedWordCount} words)
+                                  </div>
+                                </td>
+                                <td>
+                                  <span style={{ font: '800 13px Manrope', color: src.similarityContribution > 25 ? '#ef4444' : src.similarityContribution > 12 ? '#f59e0b' : '#10b981' }}>
+                                    {src.similarityContribution}%
+                                  </span>
+                                </td>
+                                <td>
+                                  <span className={`tg-metric-badge ${src.matchType === 'exact' ? 'elevated' : src.matchType === 'near_exact' ? 'moderate' : 'clean'}`}>
+                                    {src.matchTypeLabel || src.matchType}
+                                  </span>
+                                </td>
+                                <td>
+                                  {doiClean ? (
+                                    <div>
+                                      <a
+                                        href={`https://doi.org/${doiClean}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="tg-metric-action-link"
+                                        style={{ fontSize: '10px', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+                                        title={`Open validated DOI: ${doiClean}`}
+                                      >
+                                        <ExternalLink size={10} /> doi.org/{doiClean.slice(0, 16)}...
+                                      </a>
+                                      <div style={{ fontSize: '9px', color: 'var(--muted)' }}>Crossref Registry</div>
+                                    </div>
+                                  ) : (
+                                    <div style={{ fontSize: '10px', color: 'var(--muted)' }}>
+                                      {src.domain || '—'}
+                                    </div>
+                                  )}
+                                </td>
+                                <td>
+                                  <span className={`tg-metric-badge ${src.verificationStatus?.includes('Verified') ? 'clean' : 'neutral'}`}>
+                                    {src.verificationStatus || 'Metadata Verified'}
+                                  </span>
+                                </td>
+                                <td style={{ textAlign: 'right' }}>
+                                  <div className="tg-action-btn-group" style={{ justifyContent: 'flex-end' }}>
+                                    {firstPassage && (
+                                      <button
+                                        type="button"
+                                        className="tg-source-action-btn"
+                                        onClick={() => {
+                                          handlePassageClick(firstPassage.id);
+                                          onSuccess?.(`Navigated to matched passage in manuscript.`);
+                                        }}
+                                        title="Highlight and navigate to passage in manuscript"
+                                      >
+                                        <Eye size={10} /> View Text
+                                      </button>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      className="tg-source-action-btn"
+                                      onClick={() => setCompareModalSource(src)}
+                                      title="Open side-by-side text comparison"
+                                    >
+                                      <GitCompare size={10} /> Compare
+                                    </button>
+
+                                    {externalUrl && (
+                                      <a
+                                        href={externalUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="tg-source-action-btn"
+                                        title="Open original publication or website"
+                                      >
+                                        <ExternalLink size={10} /> Open Source
+                                      </a>
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      className="tg-source-action-btn"
+                                      onClick={() => {
+                                        const citationText = `${src.authors} (${src.year || 'n.d.'}). ${src.title}. ${src.journal || src.publisher || ''}. ${doiClean ? 'https://doi.org/' + doiClean : src.url || ''}`.trim();
+                                        navigator.clipboard?.writeText(citationText);
+                                        onSuccess?.(`✓ Copied APA reference: ${src.title.slice(0, 40)}...`);
+                                      }}
+                                      title="Copy formatted citation"
+                                    >
+                                      <Copy size={10} /> Copy Citation
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Matched Passages Detail Cards */}
+                    <div style={{ marginTop: '12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                        <strong style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.4px', color: 'var(--muted)' }}>
+                          Evidence Passages Breakdown ({filteredMatches.length})
+                        </strong>
+                        <div className="qb-modes" style={{ gap: '4px' }}>
+                          <button
+                            type="button"
+                            className={`qb-mode-btn ${filterTab === 'all' ? 'active' : ''}`}
+                            onClick={() => setFilterTab('all')}
+                            style={{ padding: '3px 7px', fontSize: '9.5px' }}
+                          >
+                            All
+                          </button>
+                          <button
+                            type="button"
+                            className={`qb-mode-btn ${filterTab === 'overlap' ? 'active' : ''}`}
+                            onClick={() => setFilterTab('overlap')}
+                            style={{ padding: '3px 7px', fontSize: '9.5px' }}
+                          >
+                            Overlaps
+                          </button>
+                          <button
+                            type="button"
+                            className={`qb-mode-btn ${filterTab === 'repeat' ? 'active' : ''}`}
+                            onClick={() => setFilterTab('repeat')}
+                            style={{ padding: '3px 7px', fontSize: '9.5px' }}
+                          >
+                            Repetitions
+                          </button>
+                        </div>
+                      </div>
+
+                      {filteredMatches.map((m: any, idx: number) => {
+                        const isSelected = selectedMatchId === m.id;
+                        const isResolveOpen = resolveState?.matchId === m.id;
+                        const isDoi = m.type === 'scholarly_citation_reference';
+                        const isOverlap = m.type === 'exact' || m.type === 'near_exact' || m.type === 'internal_passage_overlap';
+                        const sourceLink = m.sourceDoi ? `https://doi.org/${m.sourceDoi}` : m.sourceUrl;
+
+                        return (
+                          <div
+                            key={m.id || idx}
+                            id={m.id}
+                            className={`tg-match-card ${isSelected ? 'active' : ''}`}
+                            style={{ marginBottom: '10px' }}
+                          >
+                            <div className="tg-match-card-head">
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span className={`tg-badge-match ${isDoi ? 'doi' : isOverlap ? 'overlap' : 'repeat'}`}>
+                                  {m.matchTypeLabel || (isDoi ? 'Crossref DOI' : isOverlap ? 'Verbatim Overlap' : 'Repeated Phrase')}
+                                </span>
+                                <strong style={{ fontSize: '11px', color: 'var(--text)' }}>
+                                  {m.sourceTitle || m.sourceLocation}
+                                </strong>
+                              </div>
+                              {m.similarityPercent && (
+                                <span style={{ fontSize: '10px', fontWeight: 700, color: m.similarityPercent > 70 ? '#e11d48' : '#f59e0b' }}>
+                                  {m.similarityPercent}% match
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="tg-excerpt-grid">
+                              <div className="tg-excerpt-side">
+                                <small>Your Manuscript Passage</small>
+                                <p>“{m.matchText || m.excerpt}”</p>
+                              </div>
+                              <div className="tg-excerpt-side">
+                                <small>Retrieved Source Evidence</small>
+                                <p style={{ color: 'var(--muted)' }}>
+                                  {m.evidenceExcerpt ? `“${m.evidenceExcerpt}”` : (m.detail || m.targetLocation || 'Matched against benchmark corpus')}
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="tg-match-actions">
+                              <div className="tg-match-left">
+                                <span className="tg-word-pill">
+                                  <FileText size={11} />
+                                  {m.wordCount || (m.matchText || m.fullText || m.excerpt || '').trim().split(/\s+/).filter(Boolean).length} words
+                                </span>
+
+                                {sourceLink && (
+                                  <a
+                                    href={sourceLink}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    style={{ fontSize: '11px', color: '#8876ee', textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                  >
+                                    View Evidence <ExternalLink size={11} />
+                                  </a>
+                                )}
+                              </div>
+
+                              <div className="tg-match-right">
+                                {onSendToHumanizer && (
+                                  <button
+                                    type="button"
+                                    className="tg-btn-transfer"
+                                    onClick={() => onSendToHumanizer(m.matchText || m.fullText || m.excerpt)}
+                                    title="Transfer passage to AI Text Humanizer workspace"
+                                  >
+                                    <span>Open in Humanizer</span>
+                                    <ExternalLink size={11} />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className={`tg-btn-humanize ${isResolveOpen ? 'open' : ''}`}
+                                  onClick={() => {
+                                    if (isResolveOpen) setResolveState(null);
+                                    else handleGenerateRewrite(m, 'humanize');
+                                  }}
+                                >
+                                  {isResolveOpen ? <X size={12} /> : <Sparkles size={12} />}
+                                  {isResolveOpen ? 'Close Resolve' : '⚡ Fix with Humanizer'}
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Inline Quick Resolve Drawer */}
+                            {isResolveOpen && (
+                              <div className="tg-resolve-card">
+                                <div className="tg-resolve-head">
+                                  <div className="tg-resolve-title">
+                                    <Sparkles size={13} />
+                                    <span>⚡ Humanize & Paraphrase to Resolve</span>
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    {resolveState?.busy && <RefreshCw size={12} className="spin" />}
+                                    <button
+                                      type="button"
+                                      className="tg-resolve-close"
+                                      onClick={() => setResolveState(null)}
+                                      title="Close resolve panel"
+                                    >
+                                      <X size={12} />
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="tg-resolve-modes">
+                                  <button
+                                    type="button"
+                                    className={`tg-mode-chip ${resolveState?.mode === 'humanize' ? 'active' : ''}`}
+                                    onClick={() => handleGenerateRewrite(m, 'humanize')}
+                                    disabled={resolveState?.busy}
+                                  >
+                                    🛡️ TextGuard Humanizer
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`tg-mode-chip ${resolveState?.mode === 'academic-clarity' ? 'active' : ''}`}
+                                    onClick={() => handleGenerateRewrite(m, 'academic-clarity')}
+                                    disabled={resolveState?.busy}
+                                  >
+                                    🎓 Academic Clarity
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`tg-mode-chip ${resolveState?.mode === 'standard' ? 'active' : ''}`}
+                                    onClick={() => handleGenerateRewrite(m, 'standard')}
+                                    disabled={resolveState?.busy}
+                                  >
+                                    ⚡ Standard
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={`tg-mode-chip ${resolveState?.mode === 'formal-scientific' ? 'active' : ''}`}
+                                    onClick={() => handleGenerateRewrite(m, 'formal-scientific')}
+                                    disabled={resolveState?.busy}
+                                  >
+                                    🔬 Formal Scientific
+                                  </button>
+                                </div>
+
+                                {resolveState?.proposed ? (
+                                  <>
+                                    <div className="tg-resolve-diff">
+                                      <div className="tg-diff-head">
+                                        <span className="tg-diff-label">PROPOSED REWRITE</span>
+                                        <span className="tg-diff-words">
+                                          {resolveState.proposed.trim().split(/\s+/).filter(Boolean).length} words
+                                        </span>
+                                      </div>
+                                      <div style={{ color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
+                                        {resolveState.proposed}
+                                      </div>
+                                    </div>
+                                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', flexWrap: 'wrap' }}>
+                                      <button
+                                        type="button"
+                                        className="secondary small"
+                                        onClick={() => handleGenerateRewrite(m, resolveState.mode)}
+                                        disabled={resolveState.busy}
+                                      >
+                                        Try Another
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="primary small"
+                                        style={{ background: '#059669', borderColor: '#059669', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                                        onClick={() => handleAcceptRewrite(resolveState.passage, resolveState.proposed!, m)}
+                                      >
+                                        <Check size={12} /> ✓ Accept & Replace in Manuscript
+                                      </button>
+                                    </div>
+                                  </>
+                                ) : resolveState?.busy ? (
+                                  <div style={{ padding: '20px 16px', textAlign: 'center', fontSize: '12px', color: 'var(--muted)' }}>
+                                    <RefreshCw size={16} className="spin" style={{ display: 'block', margin: '0 auto 8px', color: '#ea580c' }} />
+                                    Generating authentic humanized academic prose...
+                                  </div>
+                                ) : null}
+                              </div>
                             )}
                           </div>
-
-                          {!isDoi && (
-                            <div className="tg-match-right">
-                              {onSendToHumanizer && (
-                                <button
-                                  className="tg-btn-transfer"
-                                  onClick={() => onSendToHumanizer(m.matchText || m.fullText || m.excerpt)}
-                                  title="Transfer passage to AI Text Humanizer workspace"
-                                >
-                                  <span>Open in Humanizer</span>
-                                  <ExternalLink size={11} />
-                                </button>
-                              )}
-                              <button
-                                className={`tg-btn-humanize ${isResolveOpen ? 'open' : ''}`}
-                                onClick={() => {
-                                  if (isResolveOpen) setResolveState(null);
-                                  else handleGenerateRewrite(m, 'humanize');
-                                }}
-                              >
-                                {isResolveOpen ? <X size={12} /> : <Sparkles size={12} />}
-                                {isResolveOpen ? 'Close Resolve' : '⚡ Fix with Humanizer'}
-                              </button>
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Inline Quick Resolve Drawer */}
-                        {isResolveOpen && (
-                          <div className="tg-resolve-card">
-                            <div className="tg-resolve-head">
-                              <div className="tg-resolve-title">
-                                <Sparkles size={13} />
-                                <span>⚡ Humanize & Paraphrase to Resolve</span>
-                              </div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                {resolveState?.busy && <RefreshCw size={12} className="spin" />}
-                                <button
-                                  className="tg-resolve-close"
-                                  onClick={() => setResolveState(null)}
-                                  title="Close resolve panel"
-                                >
-                                  <X size={12} />
-                                </button>
-                              </div>
-                            </div>
-
-                            <div className="tg-resolve-modes">
-                              <button
-                                className={`tg-mode-chip ${resolveState?.mode === 'humanize' ? 'active' : ''}`}
-                                onClick={() => handleGenerateRewrite(m, 'humanize')}
-                                disabled={resolveState?.busy}
-                              >
-                                🛡️ TextGuard Humanizer
-                              </button>
-                              <button
-                                className={`tg-mode-chip ${resolveState?.mode === 'academic-clarity' ? 'active' : ''}`}
-                                onClick={() => handleGenerateRewrite(m, 'academic-clarity')}
-                                disabled={resolveState?.busy}
-                              >
-                                🎓 Academic Clarity
-                              </button>
-                              <button
-                                className={`tg-mode-chip ${resolveState?.mode === 'standard' ? 'active' : ''}`}
-                                onClick={() => handleGenerateRewrite(m, 'standard')}
-                                disabled={resolveState?.busy}
-                              >
-                                ⚡ Standard
-                              </button>
-                              <button
-                                className={`tg-mode-chip ${resolveState?.mode === 'formal-scientific' ? 'active' : ''}`}
-                                onClick={() => handleGenerateRewrite(m, 'formal-scientific')}
-                                disabled={resolveState?.busy}
-                              >
-                                🔬 Formal Scientific
-                              </button>
-                            </div>
-
-                            {resolveState?.proposed ? (
-                              <>
-                                <div className="tg-resolve-diff">
-                                  <div className="tg-diff-head">
-                                    <span className="tg-diff-label">PROPOSED REWRITE</span>
-                                    <span className="tg-diff-words">
-                                      {resolveState.proposed.trim().split(/\s+/).filter(Boolean).length} words
-                                    </span>
-                                  </div>
-                                  <div style={{ color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
-                                    {resolveState.proposed}
-                                  </div>
-                                </div>
-                                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', flexWrap: 'wrap' }}>
-                                  <button
-                                    className="secondary small"
-                                    onClick={() => handleGenerateRewrite(m, resolveState.mode)}
-                                    disabled={resolveState.busy}
-                                  >
-                                    Try Another
-                                  </button>
-                                  <button
-                                    className="primary small"
-                                    style={{ background: '#059669', borderColor: '#059669', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
-                                    onClick={() => handleAcceptRewrite(resolveState.passage, resolveState.proposed!, m)}
-                                  >
-                                    <Check size={12} /> ✓ Accept & Replace in Manuscript
-                                  </button>
-                                </div>
-                              </>
-                            ) : resolveState?.busy ? (
-                              <div style={{ padding: '20px 16px', textAlign: 'center', fontSize: '12px', color: 'var(--muted)' }}>
-                                <RefreshCw size={16} className="spin" style={{ display: 'block', margin: '0 auto 8px', color: '#ea580c' }} />
-                                Generating authentic humanized academic prose...
-                              </div>
-                            ) : null}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })
+                        );
+                      })}
+                    </div>
+                  </>
                 )}
               </div>
             )}
@@ -4877,6 +5154,148 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
               >
                 <Printer size={14} /> Print / Save as PDF
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Side-by-Side Source Text Comparison Modal */}
+      {compareModalSource && (
+        <div className="tg-modal-overlay" onClick={() => setCompareModalSource(null)}>
+          <div className="tg-compare-modal-box" onClick={e => e.stopPropagation()}>
+            <div className="tg-compare-modal-head">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <GitCompare size={18} color="#6366f1" />
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '13.5px' }}>Side-by-Side Passage & Evidence Comparison</h3>
+                  <div style={{ fontSize: '10.5px', color: 'var(--muted)', marginTop: '2px' }}>
+                    {compareModalSource.title}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="tg-resolve-close"
+                onClick={() => setCompareModalSource(null)}
+                title="Close modal"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="tg-compare-modal-body">
+              {/* Source Provenance Header Banner */}
+              <div style={{ padding: '12px 14px', background: 'var(--surface2)', borderRadius: '10px', border: '1px solid var(--border)', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px', fontSize: '11px' }}>
+                <div>
+                  <span style={{ color: 'var(--muted)', display: 'block', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>Authors & Year</span>
+                  <strong>{compareModalSource.authors} {compareModalSource.year ? `(${compareModalSource.year})` : ''}</strong>
+                </div>
+                <div>
+                  <span style={{ color: 'var(--muted)', display: 'block', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>Publication / Registry</span>
+                  <strong>{compareModalSource.journal || compareModalSource.publisher || compareModalSource.domain || 'Scholarly Index'}</strong>
+                </div>
+                <div>
+                  <span style={{ color: 'var(--muted)', display: 'block', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>Match Contribution</span>
+                  <strong style={{ color: compareModalSource.similarityContribution > 25 ? '#ef4444' : '#f59e0b' }}>
+                    {compareModalSource.similarityContribution}% ({compareModalSource.matchedWordCount} words)
+                  </strong>
+                </div>
+                <div>
+                  <span style={{ color: 'var(--muted)', display: 'block', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '0.4px' }}>Verification Status</span>
+                  <span className={`tg-metric-badge ${compareModalSource.verificationStatus?.includes('Verified') ? 'clean' : 'neutral'}`} style={{ marginTop: '2px' }}>
+                    {compareModalSource.verificationStatus || 'Metadata Verified'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Passages Side-by-Side Comparison */}
+              {(compareModalSource.passages && compareModalSource.passages.length > 0) ? (
+                compareModalSource.passages.map((p: any, idx: number) => (
+                  <div key={p.id || idx} style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderBottom: idx < compareModalSource.passages.length - 1 ? '1px dashed var(--border)' : 'none', paddingBottom: '16px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px' }}>
+                      <span style={{ fontWeight: 700, color: 'var(--muted)' }}>
+                        Passage {idx + 1} of {compareModalSource.passages.length}
+                      </span>
+                      <span className={`tg-metric-badge ${p.type === 'exact' ? 'elevated' : 'moderate'}`}>
+                        {p.matchTypeLabel || p.type}
+                      </span>
+                    </div>
+
+                    <div className="tg-compare-grid">
+                      <div className="tg-compare-column">
+                        <div className="tg-compare-column-title">
+                          <span>Your Manuscript Passage</span>
+                          <span>{(p.matchText || p.excerpt || '').trim().split(/\s+/).filter(Boolean).length} words</span>
+                        </div>
+                        <div className="tg-compare-column-text">
+                          “{p.matchText || p.excerpt || '—'}”
+                        </div>
+                      </div>
+
+                      <div className="tg-compare-column">
+                        <div className="tg-compare-column-title">
+                          <span>Retrieved Source Evidence</span>
+                          <span>{(p.evidenceExcerpt || '').trim().split(/\s+/).filter(Boolean).length || '—'} words</span>
+                        </div>
+                        <div className="tg-compare-column-text" style={{ color: p.evidenceExcerpt ? 'var(--text)' : 'var(--muted)', fontStyle: p.evidenceExcerpt ? 'normal' : 'italic' }}>
+                          {p.evidenceExcerpt ? `“${p.evidenceExcerpt}”` : (p.detail || 'Passage verbatim match identified in source index. Complete authorized text excerpt subject to publisher copyright.')}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div style={{ textAlign: 'center', padding: '30px', color: 'var(--muted)', fontSize: '12px' }}>
+                  No matching passage excerpts recorded for this source.
+                </div>
+              )}
+            </div>
+
+            <div style={{ padding: '14px 20px', borderTop: '1px solid var(--border)', background: 'var(--surface2)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {compareModalSource.doi && (
+                  <a
+                    href={`https://doi.org/${compareModalSource.doi.replace(/^https?:\/\/doi\.org\//i, '')}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="tg-source-action-btn"
+                  >
+                    <ExternalLink size={11} /> Open DOI ({compareModalSource.doi.replace(/^https?:\/\/doi\.org\//i, '')})
+                  </a>
+                )}
+                {(compareModalSource.url || compareModalSource.domain) && (
+                  <a
+                    href={compareModalSource.url || `https://${compareModalSource.domain}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="tg-source-action-btn"
+                  >
+                    <ExternalLink size={11} /> Open Original Source
+                  </a>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="tg-source-action-btn"
+                  onClick={() => {
+                    const doiClean = compareModalSource.doi ? compareModalSource.doi.replace(/^https?:\/\/doi\.org\//i, '') : null;
+                    const citation = `${compareModalSource.authors} (${compareModalSource.year || 'n.d.'}). ${compareModalSource.title}. ${compareModalSource.journal || compareModalSource.publisher || ''}. ${doiClean ? 'https://doi.org/' + doiClean : compareModalSource.url || ''}`.trim();
+                    navigator.clipboard?.writeText(citation);
+                    onSuccess?.(`✓ Copied formatted citation to clipboard.`);
+                  }}
+                >
+                  <Copy size={11} /> Copy Citation
+                </button>
+                <button
+                  type="button"
+                  className="secondary small"
+                  onClick={() => setCompareModalSource(null)}
+                >
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         </div>

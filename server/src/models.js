@@ -285,6 +285,7 @@ const textGuardScanSchema = new mongoose.Schema({
   },
   matches: { type: Array, default: [] },
   passages: { type: Array, default: [] },
+  matchedSources: { type: Array, default: [] },
   sha256: { type: String, default: '' },
   status: { type: String, enum: ['completed', 'failed', 'bot_blocked'], default: 'completed', index: true },
   statusMessage: { type: String, default: '' },

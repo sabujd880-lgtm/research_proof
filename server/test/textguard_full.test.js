@@ -121,6 +121,15 @@ test('ResearchProof AI — TextGuard, PDF Reporting, Meaning & Platform Completi
     assert.equal(scan.distinctSourceCount >= 1, true);
     assert.ok(scan.doiVerification.total >= 1);
     assert.ok(scan.sha256.length === 64);
+    assert.ok(Array.isArray(scan.matchedSources));
+    if (scan.matchedSources.length > 0) {
+      const firstSource = scan.matchedSources[0];
+      assert.ok(firstSource.sourceId);
+      assert.ok(firstSource.title);
+      assert.ok(typeof firstSource.similarityContribution === 'number');
+      assert.ok(typeof firstSource.matchedWordCount === 'number');
+      assert.ok(firstSource.verificationStatus);
+    }
   });
 
   await t.test('3. Meaning Preservation: Deterministic validation of empirical facts and p-values', async () => {
