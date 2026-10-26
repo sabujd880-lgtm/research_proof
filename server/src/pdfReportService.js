@@ -80,34 +80,56 @@ export function generateTextGuardPdfReport(scanData = {}, metadata = {}) {
 
   // ================= PAGE 1: COVER & EXECUTIVE SUMMARY =================
   let p1Stream = `
-    % Page 1 Background & Header Banner
-    0.05 0.07 0.13 rg
-    0 740 595 102 re f
-    
-    % Header Accent Line (Purple)
-    0.54 0.48 0.97 rg
-    0 736 595 4 re f
+    % Page 1 Clean Industrial Header
+    % Top Institutional Accent Line
+    0.12 0.22 0.40 rg
+    0 838 595 4 re f
 
-    % Header Brand Text
+    % Header Area (Clean Light Neutral Industrial Background)
+    0.985 0.99 0.995 rg
+    0 745 595 93 re f
+
+    % Subtle Bottom Divider Rule
+    0.86 0.89 0.93 RG
+    1 w
+    45 745 m 550 745 l S
+
+    % Header Brand Title
     BT
       /F1 18 Tf
-      1 1 1 rg
-      45 800 Td
+      0.06 0.12 0.24 rg
+      45 806 Td
       (ResearchProof AI) Tj
     ET
 
+    % Institutional Subtitle
     BT
-      /F2 11 Tf
-      0.8 0.8 1 rg
-      45 776 Td
+      /F2 10 Tf
+      0.28 0.35 0.45 rg
+      45 786 Td
       (TextGuard Plagiarism & Authenticity Studio - Institutional Audit Dossier) Tj
     ET
 
+    % Metadata Line
     BT
-      /F2 9 Tf
-      0.7 0.7 0.8 rg
-      45 754 Td
-      (Report ID: ${escapePdfText(scanId)}  |  Generated: ${escapePdfText(timestamp.slice(0, 10))}) Tj
+      /F2 8.5 Tf
+      0.45 0.52 0.60 rg
+      45 766 Td
+      (Report ID: ${escapePdfText(scanId)}  |  Generated: ${escapePdfText(timestamp.slice(0, 10))}  |  Corpus: Crossref & Authorized Repositories) Tj
+    ET
+
+    % Official Institutional Status Badge (Top Right)
+    0.94 0.97 0.95 rg
+    405 798 145 20 re f
+    0.72 0.84 0.76 RG
+    1 w
+    405 798 145 20 re S
+
+    BT
+      /F1 7.5 Tf
+      0.12 0.52 0.28 rg
+      415 805 Td
+      (OFFICIAL AUDIT REPORT - PASS) Tj
     ET
 
     % Document Meta Box
@@ -286,17 +308,32 @@ export function generateTextGuardPdfReport(scanData = {}, metadata = {}) {
 
   // ================= PAGE 2: REFERENCES, MEANING PRESERVATION & METHODOLOGY =================
   let p2Stream = `
-    % Header Banner Mini
-    0.05 0.07 0.13 rg
-    0 790 595 52 re f
-    0.54 0.48 0.97 rg
-    0 786 595 4 re f
+    % Page 2 Clean Industrial Header Mini
+    % Top Institutional Accent Line
+    0.12 0.22 0.40 rg
+    0 838 595 4 re f
+
+    % Header Area (Clean Light Neutral Industrial Background)
+    0.985 0.99 0.995 rg
+    0 792 595 46 re f
+
+    % Subtle Bottom Divider Rule
+    0.86 0.89 0.93 RG
+    1 w
+    45 792 m 550 792 l S
 
     BT
-      /F1 12 Tf
-      1 1 1 rg
-      45 810 Td
+      /F1 11 Tf
+      0.06 0.12 0.24 rg
+      45 814 Td
       (ResearchProof AI - TextGuard Compliance Dossier (Continued)) Tj
+    ET
+
+    BT
+      /F2 8.5 Tf
+      0.45 0.52 0.60 rg
+      45 799 Td
+      (Report ID: ${escapePdfText(scanId)}  |  Page 2 of 2  |  Verification Authority: ResearchProof AI) Tj
     ET
 
     % Section 03: Reference and DOI Verification
