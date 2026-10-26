@@ -158,11 +158,85 @@
 .tg-hl-quote{background:rgba(34,197,94,0.14);border-bottom:2px dashed #22c55e;border-radius:3px;padding:1px 3px}
 
 /* TextGuard Radial Gauge Meter */
-.tg-gauge-section{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding:18px 20px;border-bottom:1px solid var(--border);background:var(--surface2)}
-.tg-gauge-card{display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 8px;text-align:center}
-.tg-gauge-svg{width:86px;height:86px}
-.tg-gauge-val{font:800 20px Manrope,sans-serif;fill:var(--text);text-anchor:middle;dominant-baseline:central}
-.tg-gauge-lbl{font-size:10px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-top:6px;letter-spacing:0.5px}
+.tg-gauge-section {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+@media (max-width: 960px) {
+  .tg-gauge-section {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+.tg-gauge-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 8px 12px;
+  text-align: center;
+  position: relative;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02), 0 3px 8px rgba(0, 0, 0, 0.02);
+}
+.tg-gauge-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(99, 102, 241, 0.35);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.06);
+}
+.tg-gauge-svg {
+  width: 82px;
+  height: 82px;
+  display: block;
+}
+.tg-gauge-bg-circle {
+  stroke: var(--border);
+  opacity: 0.6;
+}
+.dark .tg-gauge-bg-circle {
+  stroke: rgba(255, 255, 255, 0.12);
+  opacity: 1;
+}
+.tg-gauge-val {
+  font: 800 17px / 1 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
+  fill: var(--text);
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+.tg-gauge-subval {
+  font: 700 8.5px / 1 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
+  fill: var(--muted);
+  text-anchor: middle;
+  letter-spacing: 0.25px;
+}
+.tg-gauge-meta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 8px;
+}
+.tg-gauge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.tg-gauge-lbl {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+}
+
 
 /* TextGuard Exclusion Toggles Bar */
 .tg-exclusions-box{padding:14px 20px;border-bottom:1px solid var(--border);background:var(--surface);font-size:11px}

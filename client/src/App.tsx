@@ -3317,31 +3317,74 @@ function ParaphrasingSuite({ text, setText, initialMode = 'standard', token, act
   );
 }
 
-function RadialGauge({ value = 0, max = 100, label, color, suffix = '%' }: { value?: number; max?: number; label: string; color: string; suffix?: string }) {
+function RadialGauge({
+  value = 0,
+  max = 100,
+  label,
+  color,
+  suffix = '%',
+  displayValue,
+  subtitle,
+}: {
+  value?: number;
+  max?: number;
+  label: string;
+  color: string;
+  suffix?: string;
+  displayValue?: string;
+  subtitle?: string;
+}) {
   const radius = 28;
   const circ = 2 * Math.PI * radius;
   const strokeVal = Math.min(max, Math.max(0, value || 0));
-  const strokePct = circ - (strokeVal / max) * circ;
+  const strokePct = circ - (strokeVal / (max || 1)) * circ;
+  const textToShow = displayValue !== undefined ? displayValue : `${value}${suffix}`;
+
   return (
     <div className="tg-gauge-card">
       <svg className="tg-gauge-svg" viewBox="0 0 72 72">
-        <circle cx="36" cy="36" r={radius} fill="transparent" stroke="var(--border)" strokeWidth="5.5" />
+        <circle
+          cx="36"
+          cy="36"
+          r={radius}
+          fill="transparent"
+          className="tg-gauge-bg-circle"
+          strokeWidth="5"
+        />
         <circle
           cx="36"
           cy="36"
           r={radius}
           fill="transparent"
           stroke={color}
-          strokeWidth="5.5"
+          strokeWidth="5"
           strokeDasharray={circ}
           strokeDashoffset={strokePct}
           strokeLinecap="round"
           transform="rotate(-90 36 36)"
-          style={{ transition: 'stroke-dashoffset 0.6s ease' }}
+          style={{
+            transition: 'stroke-dashoffset 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+            filter: `drop-shadow(0 2px 4px ${color}35)`
+          }}
         />
-        <text x="36" y="39" className="tg-gauge-val">{value}{suffix}</text>
+        <text
+          x="36"
+          y={subtitle ? 33 : 38}
+          className="tg-gauge-val"
+          style={{ fontSize: textToShow.length > 4 ? '13.5px' : '17px' }}
+        >
+          {textToShow}
+        </text>
+        {subtitle && (
+          <text x="36" y="46" className="tg-gauge-subval">
+            {subtitle}
+          </text>
+        )}
       </svg>
-      <div className="tg-gauge-lbl">{label}</div>
+      <div className="tg-gauge-meta">
+        <span className="tg-gauge-dot" style={{ background: color }} />
+        <span className="tg-gauge-lbl">{label}</span>
+      </div>
     </div>
   );
 }
@@ -3789,7 +3832,10 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
         {/* Right Pane: TextGuard Authenticity Hub & Source Match Inspector */}
         <div className="tg-pane">
           <div className="tg-pane-head">
-            <span>AUTHENTICITY & SOURCES HUB</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <ShieldCheck size={16} color="#e11d48" />
+              <span style={{ letterSpacing: '0.5px' }}>AUTHENTICITY & SOURCES HUB</span>
+            </div>
             {scanResult && (
               <span className={`originality-score-pill ${scanResult.similarityScore > 25 ? 'low' : scanResult.similarityScore > 12 ? 'moderate' : 'high'}`}>
                 {scanResult.similarityScore < 12 ? 'Clean & Authentic' : scanResult.similarityScore <= 25 ? 'Moderate Overlap' : 'Elevated Similarity'}
@@ -3801,24 +3847,33 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
           <div className="tg-gauge-section">
             <RadialGauge
               value={scanResult ? (100 - scanResult.similarityScore) : 100}
+              subtitle={scanResult ? (scanResult.similarityScore <= 12 ? 'Optimal' : 'Review') : 'Optimal'}
               label="Originality"
               color="#10b981"
             />
             <RadialGauge
               value={scanResult?.similarityScore ?? 0}
+              subtitle={scanResult?.similarityScore > 25 ? 'Elevated' : scanResult?.similarityScore > 12 ? 'Moderate' : 'Low Overlap'}
               label="Similarity"
               color={scanResult?.similarityScore > 25 ? '#ef4444' : scanResult?.similarityScore > 12 ? '#f59e0b' : '#3b82f6'}
             />
-            <div className="tg-gauge-card" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minWidth: '85px' }}>
-              <div style={{ fontSize: '20px', fontWeight: 800, color: '#38bdf8' }}>
-                {scanResult?.doiVerification?.total !== undefined
-                  ? `${scanResult.doiVerification.verified}/${scanResult.doiVerification.total}`
-                  : '4/5'}
-              </div>
-              <div className="tg-gauge-lbl">DOI Verified</div>
-            </div>
+            {(() => {
+              const doiTotal = scanResult?.doiVerification?.total ?? 0;
+              const doiVerified = scanResult?.doiVerification?.verified ?? 0;
+              const doiPct = doiTotal > 0 ? Math.round((doiVerified / doiTotal) * 100) : (doiTotal === 0 ? 0 : 100);
+              return (
+                <RadialGauge
+                  value={doiPct}
+                  displayValue={`${doiVerified}/${doiTotal}`}
+                  subtitle={doiTotal > 0 ? `${doiPct}% Valid` : '0 Linked'}
+                  label="DOI Verified"
+                  color="#0284c7"
+                />
+              );
+            })()}
             <RadialGauge
               value={scanResult?.aiLikelihood ?? 12}
+              subtitle={scanResult?.aiLikelihood > 35 ? 'AI Risk' : 'Human Trace'}
               label="AI Footprint"
               color="#8876ee"
             />
