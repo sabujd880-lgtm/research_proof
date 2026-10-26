@@ -107,10 +107,12 @@ function clearSessionCookie(res) {
 }
 
 // Google OAuth Verification (Section 2)
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const DEFAULT_GOOGLE_CLIENT_ID = '387878022617-624p2r5hfa278npj531373cc8lf64t1e.apps.googleusercontent.com';
+const getGoogleClientId = () => process.env.GOOGLE_CLIENT_ID || DEFAULT_GOOGLE_CLIENT_ID;
+const googleClient = new OAuth2Client(getGoogleClientId());
 
 async function verifyGoogleToken(idToken) {
-  const expectedClientId = process.env.GOOGLE_CLIENT_ID;
+  const expectedClientId = getGoogleClientId();
   let payload = null;
 
   // 1. Primary: Verify cryptographically with official google-auth-library
@@ -564,7 +566,7 @@ apiRouter.post('/auth/login', async (req, res, next) => {
 
 // Public Auth Configuration (exposes Client ID for dynamic frontend initialization)
 apiRouter.get('/auth/config', (_req, res) => {
-  const rawClientId = process.env.GOOGLE_CLIENT_ID || '';
+  const rawClientId = getGoogleClientId();
   const isConfigured = Boolean(
     rawClientId &&
     rawClientId !== 'your-google-oauth-client-id.apps.googleusercontent.com' &&

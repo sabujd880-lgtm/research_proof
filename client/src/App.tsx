@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const DEFAULT_GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+const DEFAULT_GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '387878022617-624p2r5hfa278npj531373cc8lf64t1e.apps.googleusercontent.com';
 
 // Google Identity Services (GSI) origin support detection
 const isLocalhostOrigin = typeof window !== 'undefined' && (
