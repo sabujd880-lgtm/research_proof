@@ -47,7 +47,10 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 
 .turnstile-wrapper{margin:12px 0 6px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;width:100%}
 .turnstile-label{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
-.turnstile-box{min-height:65px;display:flex;justify-content:center;align-items:center;width:100%}
+.turnstile-box{width:300px;max-width:100%;height:65px;max-height:65px;overflow:hidden;display:flex;justify-content:center;align-items:flex-start;margin:0 auto;border-radius:4px}
+.turnstile-box iframe,
+.turnstile-box > div,
+.turnstile-box > div > iframe{height:65px !important;max-height:65px !important;overflow:hidden !important}
 .turnstile-error-box{display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:#ef4444}
 
 /* Phase 2: Academic Writing Studio & Tooling */
