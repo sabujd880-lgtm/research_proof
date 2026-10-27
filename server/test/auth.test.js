@@ -271,6 +271,55 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     assert.ok(redirectUrl.searchParams.get('auth_error'), 'Must return auth_error parameter instead of 404 or index.html');
   });
 
+  // --- Test 2f: Session Claim Ticket Endpoint (/api/auth/session/claim) ---
+  await t.test('2f. Session Claim Ticket: exchanges short-lived ticket for session token and prevents replay', async () => {
+    // 1. Missing ticket -> 400
+    const missingRes = await api('/api/auth/session/claim', {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+    assert.equal(missingRes.status, 400, 'Should reject missing ticket with 400');
+
+    // 2. Invalid or non-existent ticket -> 401
+    const invalidRes = await api('/api/auth/session/claim', {
+      method: 'POST',
+      body: JSON.stringify({ ticket: 'NON_EXISTENT_TICKET_XYZ' })
+    });
+    assert.equal(invalidRes.status, 401, 'Should reject invalid ticket with 401');
+
+    // 3. Valid ticket exchange
+    const validTicket = `ticket-${Date.now()}`;
+    const testUser = {
+      id: 'test-user-claim-id',
+      email: 'claim-user@university.edu',
+      displayName: 'Claim User',
+      avatarUrl: '',
+      role: 'researcher',
+      status: 'active'
+    };
+    app.locals.authTickets = app.locals.authTickets || new Map();
+    app.locals.authTickets.set(validTicket, {
+      token: 'SAMPLE_CLAIM_JWT_TOKEN',
+      user: testUser,
+      expiresAt: Date.now() + 60000
+    });
+
+    const claimRes = await api('/api/auth/session/claim', {
+      method: 'POST',
+      body: JSON.stringify({ ticket: validTicket })
+    });
+    assert.equal(claimRes.status, 200, 'Valid ticket exchange should succeed with 200');
+    assert.equal(claimRes.body.token, 'SAMPLE_CLAIM_JWT_TOKEN');
+    assert.equal(claimRes.body.user.email, 'claim-user@university.edu');
+
+    // 4. Ticket Replay Prevention: Second claim with SAME ticket MUST fail
+    const replayRes = await api('/api/auth/session/claim', {
+      method: 'POST',
+      body: JSON.stringify({ ticket: validTicket })
+    });
+    assert.equal(replayRes.status, 401, 'Reused ticket must be rejected with 401 (single-use replay prevention)');
+  });
+
   // --- Test 3: Returning Google User Login ---
   await t.test('3. Returning Google user login', async () => {
     setGoogleTokenVerifier(async (token) => {

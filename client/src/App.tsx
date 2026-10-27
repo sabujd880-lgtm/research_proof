@@ -15,7 +15,7 @@ function resolveApiUrl() {
   return `${envUrl}/api`;
 }
 const API = resolveApiUrl();
-const DEFAULT_GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '387878022617-624p2r5hfa278npj531373cc8lf64t1e.apps.googleusercontent.com';
+const DEFAULT_GOOGLE_CLIENT_ID = (import.meta.env.VITE_GOOGLE_CLIENT_ID || '').trim();
 
 // Google Identity Services (GSI) origin support detection
 const isLocalhostOrigin = typeof window !== 'undefined' && (
@@ -383,7 +383,8 @@ export function getGroupIdForSection(sectionName: string): string {
 export default function App() {
   const [token, setToken] = useState(localStorage.getItem('rp_token') || '');
   const [user, setUser] = useState<User | null>(null);
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('register');
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
@@ -545,56 +546,108 @@ export default function App() {
   // Debounced Autosave ref
   const autosaveTimeout = useRef<any>(null);
 
-  // Handle OAuth 2.0 redirect parameters on app mount
+  // Unified, authoritative Authentication State Machine (Loading, Authenticated, Unauthenticated)
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const params = new URLSearchParams(window.location.search);
-    const authStatus = params.get('auth_status');
-    const authErr = params.get('auth_error');
-    const emailParam = params.get('email');
+    let isMounted = true;
 
-    if (authErr) {
-      if (authErr === 'account_linking_required') {
-        setAuthMode('login');
-        if (emailParam) setEmail(emailParam);
-        setAuthError('An account with this email already exists using password authentication. Please sign in with your password to link your Google account.');
-      } else {
-        setAuthError(decodeURIComponent(authErr));
-      }
-      window.history.replaceState({}, document.title, window.location.pathname);
-    } else if (authStatus === 'google_success') {
-      window.history.replaceState({}, document.title, window.location.pathname);
-      request('/auth/me', '', undefined, 'GET')
-        .then((d) => {
-          if (d?.user) setUser(d.user);
-          if (d?.token) {
-            setToken(d.token);
-            localStorage.setItem('rp_token', d.token);
+    async function initAuth() {
+      try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const authStatus = urlParams.get('auth_status');
+        const authErr = urlParams.get('auth_error');
+        const ticket = urlParams.get('ticket');
+        const emailParam = urlParams.get('email');
+
+        // 1. Handle OAuth Error Redirect
+        if (authErr) {
+          if (authErr === 'account_linking_required') {
+            setAuthMode('login');
+            if (emailParam) setEmail(emailParam);
+            setAuthError('An account with this email already exists using password authentication. Please sign in with your password to link your Google account.');
+          } else {
+            setAuthError(decodeURIComponent(authErr));
           }
-        })
-        .catch((err) => {
-          setAuthError('Authentication session error: ' + (err.message || 'Please sign in.'));
-        });
-    }
-  }, []);
+          window.history.replaceState({}, document.title, window.location.pathname);
+          if (isMounted) setAuthState('unauthenticated');
+          return;
+        }
 
-  useEffect(() => {
-    request('/auth/me', token, undefined, 'GET')
-      .then((d) => {
-        setUser(d.user);
-        if (d?.token && !token) {
-          setToken(d.token);
-          localStorage.setItem('rp_token', d.token);
+        // 2. Handle Google OAuth Return via short-lived Session Claim Ticket
+        if (ticket) {
+          window.history.replaceState({}, document.title, window.location.pathname);
+          try {
+            const claimRes = await fetch(`${API}/auth/session/claim`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'include',
+              body: JSON.stringify({ ticket })
+            });
+            if (claimRes.ok) {
+              const data = await claimRes.json();
+              if (data?.user && isMounted) {
+                setUser(data.user);
+                if (data.token) {
+                  setToken(data.token);
+                  localStorage.setItem('rp_token', data.token);
+                }
+                setAuthState('authenticated');
+                return;
+              }
+            }
+          } catch (e) {
+            console.warn('Session claim notice, falling back to /auth/me:', e);
+          }
         }
-      })
-      .catch(() => {
-        if (token) {
-          localStorage.removeItem('rp_token');
+
+        // 3. Clean up URL if auth_status is present without ticket
+        if (authStatus) {
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
+
+        // 4. Validate session via GET /api/auth/me (using cookies and any existing Bearer token)
+        const storedToken = localStorage.getItem('rp_token') || '';
+        const meRes = await fetch(`${API}/auth/me`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(storedToken ? { Authorization: `Bearer ${storedToken}` } : {})
+          },
+          credentials: 'include'
+        });
+
+        if (meRes.ok) {
+          const data = await meRes.json();
+          if (data?.user && isMounted) {
+            setUser(data.user);
+            if (data.token) {
+              setToken(data.token);
+              localStorage.setItem('rp_token', data.token);
+            }
+            setAuthState('authenticated');
+            return;
+          }
+        }
+
+        // 5. Unauthenticated session
+        if (isMounted) {
+          setUser(null);
           setToken('');
+          localStorage.removeItem('rp_token');
+          setAuthState('unauthenticated');
         }
-        setUser(null);
-      });
-  }, [token]);
+      } catch (err) {
+        if (isMounted) {
+          setUser(null);
+          setToken('');
+          localStorage.removeItem('rp_token');
+          setAuthState('unauthenticated');
+        }
+      }
+    }
+
+    initAuth();
+    return () => { isMounted = false; };
+  }, []);
 
   async function refreshData() {
     if (!token && !user) return;
@@ -945,6 +998,7 @@ export default function App() {
       localStorage.setItem('rp_token', result.token);
       setToken(result.token);
       setUser(result.user);
+      setAuthState('authenticated');
       setRequiresTurnstile(false);
       setTurnstileToken('');
     } catch (e: any) {
@@ -974,6 +1028,7 @@ export default function App() {
       localStorage.setItem('rp_token', result.token);
       setToken(result.token);
       setUser(result.user);
+      setAuthState('authenticated');
     } catch (err: any) {
       setAuthError(err.message);
     }
@@ -1000,6 +1055,7 @@ export default function App() {
     localStorage.removeItem('rp_token');
     setToken('');
     setUser(null);
+    setAuthState('unauthenticated');
   }
 
   async function runAction(action: string) {
@@ -1047,8 +1103,32 @@ export default function App() {
     return computeWordDiff(text, proposedText);
   }, [text, proposedText]);
 
+  // Loading Screen (prevents flash of login screen during session validation or OAuth return)
+  if (authState === 'loading') {
+    return (
+      <div className={`auth-page ${dark ? 'dark' : ''}`}>
+        <div className="auth-card" style={{ textAlign: 'center', padding: '40px 30px' }}>
+          <div className="brand-mark" style={{ margin: '0 auto 18px' }}><ShieldCheck size={26} /></div>
+          <h1 style={{ fontSize: '22px', marginBottom: '8px' }}>ResearchProof <span>AI</span></h1>
+          <p className="muted" style={{ fontSize: '11.5px', marginBottom: '24px' }}>Verifying your secure session...</p>
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', margin: '20px auto' }}>
+            <div style={{
+              width: '32px',
+              height: '32px',
+              border: '3px solid var(--border, #e4e9f1)',
+              borderTopColor: '#7867e9',
+              borderRadius: '50%',
+              animation: 'spin 0.8s linear infinite'
+            }} />
+          </div>
+          <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+        </div>
+      </div>
+    );
+  }
+
   // Auth Screen
-  if (!user) {
+  if (!user || authState === 'unauthenticated') {
     const authContent = (
       <div className="auth-card">
         <div className="brand-mark"><ShieldCheck size={25} /></div>
@@ -1057,7 +1137,7 @@ export default function App() {
         <p className="muted">Rigorous scientific writing assistance and research integrity platform.</p>
 
         {/* Google Authentication Section */}
-        {isGoogleConfigured && isOriginSupportedByGoogle ? (
+        {isGoogleConfigured ? (
           <>
             <div className="google-btn-wrap">
               <button
@@ -1078,32 +1158,6 @@ export default function App() {
               </button>
             </div>
             <div className="auth-divider">or continue with email</div>
-          </>
-        ) : isLanHttpOrigin ? (
-          <>
-            <div className="google-diagnostic-box lan">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, fontSize: '11px', color: '#f59e0b', marginBottom: '2px' }}>
-                <AlertTriangle size={14} />
-                <span>Google Sign-In: HTTPS / Localhost Required</span>
-              </div>
-              <p style={{ margin: 0, fontSize: '10.5px', color: 'var(--muted)', lineHeight: '1.4' }}>
-                Google Identity Services disables OAuth on plain HTTP local network IPs ({typeof window !== 'undefined' ? window.location.hostname : 'LAN'}). Sign in with your password below, or access via <a href={`http://localhost:${typeof window !== 'undefined' ? window.location.port || '5173' : '5173'}`} style={{ color: '#8876ee', textDecoration: 'underline' }}>localhost</a>.
-              </p>
-            </div>
-            <div className="auth-divider">sign in with email & password</div>
-          </>
-        ) : !isGoogleConfigured ? (
-          <>
-            <div className="google-diagnostic-box unconfigured">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, fontSize: '11px', color: 'var(--muted)', marginBottom: '2px' }}>
-                <CircleHelp size={14} />
-                <span>Google Sign-In (Unconfigured)</span>
-              </div>
-              <p style={{ margin: 0, fontSize: '10.5px', color: 'var(--muted)', lineHeight: '1.4' }}>
-                Google OAuth Web Client is not configured on this deployment. Sign in with email and password below.
-              </p>
-            </div>
-            <div className="auth-divider">sign in with email & password</div>
           </>
         ) : null}
 

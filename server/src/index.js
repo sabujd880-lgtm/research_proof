@@ -100,27 +100,31 @@ app.use(express.json({ limit: '1mb' }));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 250, standardHeaders: true, legacyHeaders: false }));
 
 // Session Cookie Management (Section 4 & 5)
-function setSessionCookie(res, token) {
-  const isProduction = process.env.NODE_ENV === 'production';
-  const cookieOpts = {
+function getCookieOptions(req) {
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true' || Boolean(process.env.RENDER_EXTERNAL_URL);
+  const origin = req?.headers?.origin || req?.headers?.referer || '';
+  const isCrossOrigin = Boolean(origin && !origin.includes('.onrender.com') && !origin.includes('localhost') && !origin.includes('127.0.0.1'));
+  
+  return {
     httpOnly: true,
     secure: isProduction,
-    sameSite: isProduction ? 'none' : 'lax',
+    sameSite: isCrossOrigin ? 'none' : 'lax',
+    path: '/',
     maxAge: SESSION_TTL_HOURS * 60 * 60 * 1000
   };
+}
+
+function setSessionCookie(res, token, req) {
+  const cookieOpts = getCookieOptions(req);
   res.cookie('rp_session', token, cookieOpts);
   if (SESSION_COOKIE_NAME !== 'rp_session') {
     res.cookie(SESSION_COOKIE_NAME, token, cookieOpts);
   }
 }
 
-function clearSessionCookie(res) {
-  const isProduction = process.env.NODE_ENV === 'production';
-  const cookieOpts = {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: isProduction ? 'none' : 'lax'
-  };
+function clearSessionCookie(res, req) {
+  const cookieOpts = getCookieOptions(req);
+  delete cookieOpts.maxAge;
   res.clearCookie('rp_session', cookieOpts);
   if (SESSION_COOKIE_NAME !== 'rp_session') {
     res.clearCookie(SESSION_COOKIE_NAME, cookieOpts);
@@ -128,9 +132,7 @@ function clearSessionCookie(res) {
 }
 
 // Google OAuth Verification (Section 2)
-const DEFAULT_GOOGLE_CLIENT_ID = '387878022617-624p2r5hfa278npj531373cc8lf64t1e.apps.googleusercontent.com';
-const getGoogleClientId = () => process.env.GOOGLE_CLIENT_ID || DEFAULT_GOOGLE_CLIENT_ID;
-const googleClient = new OAuth2Client(getGoogleClientId());
+const getGoogleClientId = () => (process.env.GOOGLE_CLIENT_ID || '').trim();
 
 async function verifyGoogleToken(idToken) {
   const expectedClientId = getGoogleClientId();
@@ -139,6 +141,7 @@ async function verifyGoogleToken(idToken) {
   // 1. Primary: Verify cryptographically with official google-auth-library
   if (expectedClientId && expectedClientId !== 'your-google-oauth-client-id.apps.googleusercontent.com') {
     try {
+      const googleClient = new OAuth2Client(expectedClientId);
       const ticket = await googleClient.verifyIdToken({
         idToken,
         audience: expectedClientId
@@ -258,6 +261,9 @@ memUsers.set(ADMIN_EMAIL, {
 });
 
 async function seedDemoUserToDb() {
+  if (process.env.NODE_ENV === 'production' && process.env.SEED_DEMO_USER !== 'true') {
+    return; // Never seed demo user with static password into production MongoDB unless explicitly requested
+  }
   try {
     const existing = await User.findOne({ email: DEMO_EMAIL });
     if (!existing) {
@@ -694,7 +700,7 @@ function getBackendOrigin(req) {
     }
   }
 
-  return 'https://research-proof-1.onrender.com';
+  return (process.env.CLIENT_ORIGIN || process.env.RENDER_EXTERNAL_URL || 'http://localhost:4000').replace(/\/+$/, '');
 }
 
 // Configurable, canonical Google OAuth 2.0 Redirect URI resolution
@@ -974,22 +980,76 @@ async function handleGoogleOAuthCallback(req, res, next) {
     }
 
     const token = jwt.sign(
-      { id: user._id || user.id, email: user.email, tokenVersion: user.tokenVersion || 1 },
+      { id: user._id?.toString() || user.id, email: user.email, tokenVersion: user.tokenVersion || 1, role: user.role || 'researcher' },
       jwtSecret,
       { expiresIn: `${SESSION_TTL_HOURS}h` }
     );
-    setSessionCookie(res, token);
+    setSessionCookie(res, token, req);
     clearOAuthCookies();
     if (incomingState) app.locals.oauthSessions?.delete(incomingState);
 
+    // Single-use, short-lived (60s) session exchange ticket
+    // Allows the frontend to claim the session reliably without exposing JWT in URL query parameters
+    const claimTicket = crypto.randomBytes(24).toString('hex');
+    if (!app.locals.authTickets) app.locals.authTickets = new Map();
+    app.locals.authTickets.set(claimTicket, {
+      token,
+      user: {
+        id: user._id?.toString() || user.id,
+        email: user.email,
+        displayName: user.displayName || user.email.split('@')[0],
+        avatarUrl: user.avatarUrl || '',
+        role: user.role || 'researcher',
+        status: user.status || 'active'
+      },
+      expiresAt: Date.now() + 60 * 1000
+    });
+
+    // Prune expired tickets
+    const nowTs = Date.now();
+    for (const [k, v] of app.locals.authTickets.entries()) {
+      if (nowTs > v.expiresAt) app.locals.authTickets.delete(k);
+    }
+
     const successUrl = new URL(targetReturn, getBackendOrigin(req));
     successUrl.searchParams.set('auth_status', 'google_success');
+    successUrl.searchParams.set('ticket', claimTicket);
     return res.redirect(successUrl.toString());
   } catch (err) {
     console.error('Google OAuth callback error:', err);
     return sendAuthError(err.message || 'Authentication failed. Please try again.');
   }
 }
+
+// Session Claim Endpoint (Section 5 & 6)
+// Validates single-use ticket, issues fresh session cookies, and returns authenticated payload
+apiRouter.post('/auth/session/claim', async (req, res) => {
+  try {
+    const { ticket } = req.body || {};
+    if (!ticket || typeof ticket !== 'string') {
+      return res.status(400).json({ error: 'Missing session claim ticket.' });
+    }
+
+    const session = app.locals.authTickets?.get(ticket);
+    if (!session || Date.now() > session.expiresAt) {
+      if (session) app.locals.authTickets?.delete(ticket);
+      return res.status(401).json({ error: 'Session claim ticket is expired or invalid. Please sign in again.' });
+    }
+
+    // Atomically invalidate ticket to prevent replay
+    app.locals.authTickets?.delete(ticket);
+
+    // Re-set session cookie with correct path & attributes
+    setSessionCookie(res, session.token, req);
+
+    return res.json({
+      token: session.token,
+      user: session.user
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to claim session.' });
+  }
+});
 
 // Mount callback handler on /api/auth/google/callback
 apiRouter.get('/auth/google/callback', handleGoogleOAuthCallback);
@@ -4206,12 +4266,25 @@ app.use((err, _req, res, _next) => {
   res.status(err.status || 500).json({ error: err.status ? err.message : 'Unexpected server error.' });
 });
 
+function validateStartupConfiguration() {
+  const gClientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
+  const gClientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+  console.log(`[Config Check] Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`[Config Check] Google Client ID: ${gClientId ? 'Configured (' + gClientId.slice(0, 12) + '...)' : 'Not set (Google OAuth disabled)'}`);
+  console.log(`[Config Check] Google Client Secret: ${gClientSecret ? 'Configured [REDACTED]' : 'Not set'}`);
+  console.log(`[Config Check] Google Redirect URI: ${process.env.GOOGLE_REDIRECT_URI || 'Auto-detecting via getGoogleRedirectUri()'}`);
+  console.log(`[Config Check] Client Origin: ${process.env.CLIENT_ORIGIN || 'Same-origin default'}`);
+  console.log(`[Config Check] MongoDB URI: ${process.env.MONGODB_URI ? 'Configured [REDACTED]' : 'Not set (using in-memory fallback)'}`);
+  console.log(`[Config Check] JWT Secret: ${process.env.JWT_SECRET ? 'Configured [REDACTED]' : 'Using default fallback'}`);
+}
+
 // Start Express server
 const isTestEnv = process.env.NODE_ENV === 'test' || process.argv.some(a => a.includes('test'));
 if (!isTestEnv) {
   app.listen(port, () => {
     console.log(`ResearchProof API listening on http://localhost:${port}`);
     console.log(`Endpoints available at /api and /api/v1`);
+    validateStartupConfiguration();
   });
 }
 
