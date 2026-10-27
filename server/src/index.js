@@ -20,6 +20,7 @@ import mongoose from 'mongoose';
 import { z } from 'zod';
 import cookieParser from 'cookie-parser';
 import multer from 'multer';
+import crypto from 'node:crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { User, Project, Document, Revision, IntegrityReport, AuditEvent, UsageRecord, Citation, DoiCache, UsageEvent, DailyUsageAggregate, DataDeletionJob, LatexJob, TextGuardScan } from './models.js';
 import { requireAuth, requireAdmin } from './middleware.js';
@@ -36,6 +37,16 @@ import { STANDARD_THESIS_CHAPTERS, scanCrossChapterConsistency, synchronizeProje
 import { generateComprehensiveDossier, PUBLISHER_PROFILES, checkStatisticalRigor, generateSubmissionChecklist, findRegisteredDossier } from './dossierService.js';
 import { performTextGuardScan, isBotProtectionChallenge } from './textGuardService.js';
 import { generateTextGuardPdfReport } from './pdfReportService.js';
+import {
+  getTurnstileSiteKey,
+  executeTurnstileVerification,
+  recordFailedLogin,
+  resetFailedLogins,
+  isLoginVerificationRequired,
+  getFailedAttemptsCount,
+  setTurnstileVerifier
+} from './turnstileService.js';
+export { setTurnstileVerifier };
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
@@ -72,7 +83,14 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 24) {
   console.warn('WARNING: Set JWT_SECRET to a random secret of at least 24 characters in server/.env.');
 }
 
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+    crossOriginResourcePolicy: { policy: 'cross-origin' }
+  })
+);
 app.use(cors({ origin: true, credentials: true }));
 app.use(cookieParser());
 app.use(express.json({ limit: '1mb' }));
@@ -300,7 +318,7 @@ async function recordAudit(actorId, action, resourceType, resourceId = '', metad
 
 
 const textSchema = z.object({ text: z.string().min(1).max(150000) });
-const authSchema = z.object({ email: z.string().email().max(254), password: z.string().min(10).max(128) });
+const authSchema = z.object({ email: z.string().email().max(254), password: z.string().min(10).max(128), turnstileToken: z.string().optional() });
 
 // Router supporting both /api and /api/v1
 const apiRouter = express.Router();
@@ -425,6 +443,19 @@ apiRouter.post('/auth/register', async (req, res, next) => {
     if (!parsed.success) return res.status(400).json({ error: 'Enter a valid email and a password of at least 10 characters.' });
     const email = parsed.data.email.toLowerCase();
 
+    // Mandatory Bot Protection for Account Creation
+    const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress;
+    const turnstileToken = req.body?.turnstileToken;
+    const turnstileCheck = await executeTurnstileVerification(turnstileToken, clientIp);
+    if (!turnstileCheck.success) {
+      return res.status(400).json({
+        error: turnstileCheck.error || 'Bot verification required. Please complete the security challenge.',
+        code: turnstileCheck.code || 'TURNSTILE_REQUIRED',
+        requiresTurnstile: true,
+        siteKey: getTurnstileSiteKey()
+      });
+    }
+
     if (isDbConnected()) {
       if (await User.findOne({ email })) return res.status(409).json({ error: 'An account with this email already exists.' });
       const passwordHash = await bcrypt.hash(parsed.data.password, 12);
@@ -502,15 +533,43 @@ apiRouter.post('/auth/login', async (req, res, next) => {
     const parsed = authSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: 'Enter a valid email and password.' });
     const email = parsed.data.email.toLowerCase();
+    const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress;
+
+    // Risk-Based Bot Protection: enforce Turnstile only if account/IP triggered risk threshold
+    const isRisk = isLoginVerificationRequired(email, clientIp);
+    if (isRisk) {
+      const turnstileToken = req.body?.turnstileToken;
+      const turnstileCheck = await executeTurnstileVerification(turnstileToken, clientIp);
+      if (!turnstileCheck.success) {
+        return res.status(403).json({
+          error: turnstileCheck.error || 'Security verification required due to multiple failed login attempts.',
+          code: turnstileCheck.code || 'TURNSTILE_REQUIRED',
+          requiresTurnstile: true,
+          siteKey: getTurnstileSiteKey()
+        });
+      }
+    }
 
     if (isDbConnected()) {
       const user = await User.findOne({ email });
       if (!user || !user.passwordHash || !(await bcrypt.compare(parsed.data.password, user.passwordHash))) {
-        return res.status(401).json({ error: 'Invalid email or password.' });
+        recordFailedLogin(email);
+        recordFailedLogin(clientIp);
+        const requiresNow = isLoginVerificationRequired(email, clientIp);
+        return res.status(401).json({
+          error: 'Invalid email or password.',
+          requiresTurnstile: requiresNow,
+          siteKey: requiresNow ? getTurnstileSiteKey() : undefined
+        });
       }
       if (user.status === 'suspended') {
         return res.status(403).json({ error: 'Account is suspended. Please contact your administrator.' });
       }
+
+      // Successful password authentication: reset risk counters
+      resetFailedLogins(email);
+      resetFailedLogins(clientIp);
+
       user.lastLoginAt = new Date();
       await user.save();
       const token = jwt.sign(
@@ -537,11 +596,23 @@ apiRouter.post('/auth/login', async (req, res, next) => {
     // In-memory fallback
     const user = memUsers.get(email);
     if (!user || !user.passwordHash || !(await bcrypt.compare(parsed.data.password, user.passwordHash))) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
+      recordFailedLogin(email);
+      recordFailedLogin(clientIp);
+      const requiresNow = isLoginVerificationRequired(email, clientIp);
+      return res.status(401).json({
+        error: 'Invalid email or password.',
+        requiresTurnstile: requiresNow,
+        siteKey: requiresNow ? getTurnstileSiteKey() : undefined
+      });
     }
     if (user.status === 'suspended') {
       return res.status(403).json({ error: 'Account is suspended. Please contact your administrator.' });
     }
+
+    // Successful login: reset risk counters
+    resetFailedLogins(email);
+    resetFailedLogins(clientIp);
+
     user.lastLoginAt = new Date();
     const token = jwt.sign(
       { id: user.id || user._id, email: user.email, tokenVersion: user.tokenVersion || 1 },
@@ -564,7 +635,7 @@ apiRouter.post('/auth/login', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Public Auth Configuration (exposes Client ID for dynamic frontend initialization)
+// Public Auth Configuration (exposes Client ID and Turnstile Site Key for frontend initialization)
 apiRouter.get('/auth/config', (_req, res) => {
   const rawClientId = getGoogleClientId();
   const isConfigured = Boolean(
@@ -575,11 +646,304 @@ apiRouter.get('/auth/config', (_req, res) => {
   res.json({
     googleClientId: isConfigured ? rawClientId : '',
     googleConfigured: isConfigured,
+    turnstileSiteKey: getTurnstileSiteKey(),
     environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// Google Authentication (Section 2 & 4)
+// Risk status check for login flow
+apiRouter.get('/auth/risk-status', (req, res) => {
+  const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress;
+  const email = (req.query.email || '').toLowerCase().trim();
+  const requiresTurnstile = isLoginVerificationRequired(email, clientIp);
+  res.json({
+    requiresTurnstile,
+    siteKey: getTurnstileSiteKey()
+  });
+});
+
+// Helper to determine backend base URL for OAuth callbacks
+function getBackendOrigin(req) {
+  if (process.env.BACKEND_URL) {
+    return process.env.BACKEND_URL.replace(/\/+$/, '');
+  }
+  const forwardedProto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || (req.secure ? 'https' : 'http');
+  const forwardedHost = (req.headers['x-forwarded-host'] || '').split(',')[0].trim() || req.headers.host;
+  return `${forwardedProto}://${forwardedHost}`;
+}
+
+// Open redirect defense: sanitize frontend return destination
+function getSafeReturnUrl(targetUrl, req) {
+  const backendOrigin = getBackendOrigin(req);
+  const defaultUrl = process.env.CLIENT_ORIGIN || '/';
+  if (!targetUrl) return defaultUrl;
+
+  try {
+    if (targetUrl.startsWith('/') && !targetUrl.startsWith('//')) {
+      return targetUrl;
+    }
+    const parsed = new URL(targetUrl, backendOrigin);
+    const host = parsed.hostname;
+    const isLocal = host === 'localhost' || host === '127.0.0.1';
+    const isRender = host.endsWith('.onrender.com');
+    const isVercel = host.endsWith('.vercel.app');
+    const isClientOrigin = process.env.CLIENT_ORIGIN && parsed.origin === new URL(process.env.CLIENT_ORIGIN).origin;
+    const isSameOrigin = parsed.origin === backendOrigin;
+
+    if (isLocal || isRender || isVercel || isClientOrigin || isSameOrigin) {
+      return parsed.toString();
+    }
+  } catch (_) {}
+
+  return defaultUrl;
+}
+
+if (!app.locals.oauthSessions) {
+  app.locals.oauthSessions = new Map();
+}
+
+// Google OAuth 2.0 Authorization Code Start (Full-Page Redirect)
+apiRouter.get('/auth/google/start', (req, res) => {
+  const rawClientId = getGoogleClientId();
+  if (!rawClientId || rawClientId === 'your-google-oauth-client-id.apps.googleusercontent.com') {
+    return res.status(500).json({ error: 'Google OAuth Client ID is not configured on this server.' });
+  }
+
+  // 1. Generate cryptographic state and PKCE verifier + challenge
+  const state = crypto.randomBytes(32).toString('hex');
+  const codeVerifier = crypto.randomBytes(32).toString('base64url');
+  const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+
+  const safeReturn = getSafeReturnUrl(req.query.return_to, req);
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  const cookieOpts = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax',
+    maxAge: 15 * 60 * 1000 // 15 minutes
+  };
+
+  res.cookie('rp_oauth_state', state, cookieOpts);
+  res.cookie('rp_oauth_verifier', codeVerifier, cookieOpts);
+  res.cookie('rp_oauth_return', safeReturn, cookieOpts);
+
+  app.locals.oauthSessions.set(state, {
+    codeVerifier,
+    returnTo: safeReturn,
+    createdAt: Date.now()
+  });
+
+  // Prune expired sessions
+  const now = Date.now();
+  for (const [k, v] of app.locals.oauthSessions.entries()) {
+    if (now - v.createdAt > 30 * 60 * 1000) app.locals.oauthSessions.delete(k);
+  }
+
+  const redirectUri = `${getBackendOrigin(req)}/api/auth/google/callback`;
+  const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  authUrl.searchParams.set('client_id', rawClientId);
+  authUrl.searchParams.set('redirect_uri', redirectUri);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('scope', 'openid email profile');
+  authUrl.searchParams.set('state', state);
+  authUrl.searchParams.set('code_challenge', codeChallenge);
+  authUrl.searchParams.set('code_challenge_method', 'S256');
+  authUrl.searchParams.set('access_type', 'online');
+  authUrl.searchParams.set('prompt', 'select_account');
+
+  res.redirect(authUrl.toString());
+});
+
+// Google OAuth 2.0 Authorization Code Callback
+apiRouter.get('/auth/google/callback', async (req, res, next) => {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const cookieOpts = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax'
+  };
+
+  const clearOAuthCookies = () => {
+    res.clearCookie('rp_oauth_state', cookieOpts);
+    res.clearCookie('rp_oauth_verifier', cookieOpts);
+    res.clearCookie('rp_oauth_return', cookieOpts);
+  };
+
+  const incomingState = req.query.state;
+  const cookieState = req.cookies?.rp_oauth_state;
+  const memSession = incomingState ? app.locals.oauthSessions?.get(incomingState) : null;
+  const targetReturn = req.cookies?.rp_oauth_return || memSession?.returnTo || process.env.CLIENT_ORIGIN || '/';
+
+  const sendAuthError = (errMsg, extraQuery = {}) => {
+    clearOAuthCookies();
+    if (incomingState) app.locals.oauthSessions?.delete(incomingState);
+    const redirectUrl = new URL(targetReturn, getBackendOrigin(req));
+    redirectUrl.searchParams.set('auth_error', errMsg);
+    for (const [k, v] of Object.entries(extraQuery)) {
+      redirectUrl.searchParams.set(k, v);
+    }
+    return res.redirect(redirectUrl.toString());
+  };
+
+  if (req.query.error) {
+    const desc = req.query.error_description || req.query.error;
+    return sendAuthError(`Google authentication cancelled: ${desc}`);
+  }
+
+  if (!incomingState || (!cookieState && !memSession) || (cookieState && incomingState !== cookieState)) {
+    return sendAuthError('Invalid or expired OAuth state parameter. Please try again.');
+  }
+
+  const codeVerifier = req.cookies?.rp_oauth_verifier || memSession?.codeVerifier;
+  if (!codeVerifier) {
+    return sendAuthError('Missing PKCE code verifier. Please try again.');
+  }
+
+  const code = req.query.code;
+  if (!code) {
+    return sendAuthError('No authorization code returned from Google.');
+  }
+
+  try {
+    const rawClientId = getGoogleClientId();
+    const redirectUri = `${getBackendOrigin(req)}/api/auth/google/callback`;
+
+    const tokenParams = new URLSearchParams({
+      code,
+      client_id: rawClientId,
+      redirect_uri: redirectUri,
+      grant_type: 'authorization_code',
+      code_verifier: codeVerifier
+    });
+    if (process.env.GOOGLE_CLIENT_SECRET) {
+      tokenParams.set('client_secret', process.env.GOOGLE_CLIENT_SECRET);
+    }
+
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: tokenParams.toString()
+    });
+
+    if (!tokenRes.ok) {
+      const errText = await tokenRes.text().catch(() => '');
+      console.error('Google token exchange error:', tokenRes.status, errText);
+      return sendAuthError('Google token exchange failed. Please verify Client Secret and Redirect URI in Google Cloud Console.');
+    }
+
+    const tokenData = await tokenRes.json();
+    if (!tokenData.id_token) {
+      return sendAuthError('Google token response did not contain an ID token.');
+    }
+
+    const googleProfile = await googleTokenVerifier(tokenData.id_token);
+    const { googleId, email, displayName, avatarUrl } = googleProfile;
+
+    let user;
+    if (isDbConnected()) {
+      user = await User.findOne({ googleId });
+      if (!user) {
+        const existingByEmail = await User.findOne({ email });
+        if (existingByEmail) {
+          if (existingByEmail.passwordHash && !existingByEmail.googleId) {
+            return sendAuthError('account_linking_required', { email });
+          }
+          user = existingByEmail;
+          user.googleId = googleId;
+          if (!user.authProviders?.includes('google')) {
+            user.authProviders = [...(user.authProviders || []), 'google'];
+          }
+          if (!user.avatarUrl && avatarUrl) user.avatarUrl = avatarUrl;
+          if (!user.displayName && displayName) user.displayName = displayName;
+          user.lastLoginAt = new Date();
+          await user.save();
+          await recordAudit(user._id, 'USER_ACCOUNT_LINKED_GOOGLE', 'User', user._id);
+        } else {
+          user = await User.create({
+            googleId,
+            email,
+            displayName,
+            avatarUrl,
+            authProviders: ['google'],
+            emailVerified: true,
+            role: 'researcher',
+            status: 'active',
+            lastLoginAt: new Date(),
+            usage: { dailyRequests: 0, dailyLimit: FREE_REWRITE_DAILY_LIMIT, lastResetDate: new Date() }
+          });
+          await recordAudit(user._id, 'USER_REGISTERED_GOOGLE', 'User', user._id);
+        }
+      } else {
+        if (avatarUrl && !user.avatarUrl) user.avatarUrl = avatarUrl;
+        user.lastLoginAt = new Date();
+        await user.save();
+      }
+
+      if (user.status === 'suspended') {
+        return sendAuthError('Your account is suspended. Please contact your administrator.');
+      }
+    } else {
+      user = [...memUsers.values()].find(u => u.googleId === googleId);
+      if (!user) {
+        const existing = memUsers.get(email);
+        if (existing) {
+          if (existing.passwordHash && !existing.googleId) {
+            return sendAuthError('account_linking_required', { email });
+          }
+          user = existing;
+          user.googleId = googleId;
+          user.avatarUrl = avatarUrl || user.avatarUrl;
+          if (!user.authProviders?.includes('google')) {
+            user.authProviders = [...(user.authProviders || ['email']), 'google'];
+          }
+          user.lastLoginAt = new Date();
+        } else {
+          const userId = new mongoose.Types.ObjectId().toString();
+          user = {
+            _id: userId,
+            id: userId,
+            googleId,
+            email,
+            displayName,
+            avatarUrl,
+            authProviders: ['google'],
+            emailVerified: true,
+            role: 'researcher',
+            status: 'active',
+            tokenVersion: 1,
+            usage: { dailyRequests: 0, dailyLimit: FREE_REWRITE_DAILY_LIMIT },
+            createdAt: new Date(),
+            lastLoginAt: new Date()
+          };
+          memUsers.set(email, user);
+        }
+      }
+
+      if (user.status === 'suspended') {
+        return sendAuthError('Your account is suspended. Please contact your administrator.');
+      }
+    }
+
+    const token = jwt.sign(
+      { id: user._id || user.id, email: user.email, tokenVersion: user.tokenVersion || 1 },
+      jwtSecret,
+      { expiresIn: `${SESSION_TTL_HOURS}h` }
+    );
+    setSessionCookie(res, token);
+    clearOAuthCookies();
+    if (incomingState) app.locals.oauthSessions?.delete(incomingState);
+
+    const successUrl = new URL(targetReturn, getBackendOrigin(req));
+    successUrl.searchParams.set('auth_status', 'google_success');
+    return res.redirect(successUrl.toString());
+  } catch (err) {
+    console.error('Google OAuth callback error:', err);
+    return sendAuthError(err.message || 'Authentication failed. Please try again.');
+  }
+});
+
+// Google Authentication (Section 2 & 4) - Direct ID Token fallback
 apiRouter.post('/auth/google', async (req, res, next) => {
   try {
     const googleSchema = z.object({ credential: z.string().min(1, 'Google credential token is required.') });
@@ -910,10 +1274,13 @@ apiRouter.get('/usage/me', requireAuth, async (req, res, next) => {
 // Profile endpoints
 apiRouter.get(['/auth/me', '/me'], requireAuth, async (req, res) => {
   try {
+    const sessionToken = req.cookies?.[SESSION_COOKIE_NAME] || req.cookies?.rp_session || req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
     if (isDbConnected()) {
       const user = await User.findById(req.user.id).select('-passwordHash').lean();
       if (!user) return res.status(404).json({ error: 'User not found.' });
+      const token = sessionToken || jwt.sign({ id: user._id.toString(), email: user.email, tokenVersion: user.tokenVersion || 1, role: user.role }, jwtSecret, { expiresIn: `${SESSION_TTL_HOURS}h` });
       return res.json({
+        token,
         user: {
           id: user._id,
           email: user.email,
@@ -928,7 +1295,9 @@ apiRouter.get(['/auth/me', '/me'], requireAuth, async (req, res) => {
 
     const user = [...memUsers.values()].find(u => (u._id === req.user.id || u.id === req.user.id));
     if (!user) return res.status(404).json({ error: 'User not found.' });
+    const token = sessionToken || jwt.sign({ id: user._id || user.id, email: user.email, tokenVersion: user.tokenVersion || 1, role: user.role }, jwtSecret, { expiresIn: `${SESSION_TTL_HOURS}h` });
     res.json({
+      token,
       user: {
         id: user._id || user.id,
         email: user.email,

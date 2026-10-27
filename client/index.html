@@ -3,12 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#101827" />
+    <meta name="theme-color" content="#f5f7fb" />
     <meta name="description" content="Academic writing and research integrity workspace" />
     <title>ResearchProof AI</title>
+    <script>
+      (function() {
+        try {
+          var saved = localStorage.getItem('rp_theme');
+          // Default: Light Theme for all first-time visitors / new users.
+          // Explicitly do not force device dark mode preference.
+          if (saved === 'dark') {
+            document.documentElement.classList.add('dark');
+            document.documentElement.setAttribute('data-theme', 'dark');
+            var meta = document.querySelector('meta[name="theme-color"]');
+            if (meta) meta.setAttribute('content', '#0c1220');
+          } else {
+            document.documentElement.classList.remove('dark');
+            document.documentElement.setAttribute('data-theme', 'light');
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
+

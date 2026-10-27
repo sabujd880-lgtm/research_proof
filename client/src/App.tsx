@@ -28,6 +28,125 @@ const isHttpsOrigin = typeof window !== 'undefined' && window.location.protocol 
 const isOriginSupportedByGoogle = isLocalhostOrigin || isHttpsOrigin;
 const isLanHttpOrigin = typeof window !== 'undefined' && !isLocalhostOrigin && !isHttpsOrigin;
 
+declare global {
+  interface Window {
+    turnstile?: {
+      render: (container: HTMLElement | string, options: any) => string;
+      reset: (widgetId: string) => void;
+      remove: (widgetId: string) => void;
+    };
+  }
+}
+
+const DEFAULT_TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || '1x00000000000000000000AA';
+
+function TurnstileWidget({
+  siteKey,
+  dark,
+  onVerify,
+  onExpire,
+  onError
+}: {
+  siteKey: string;
+  dark: boolean;
+  onVerify: (token: string) => void;
+  onExpire?: () => void;
+  onError?: (msg: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const widgetIdRef = useRef<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    function renderWidget() {
+      if (!containerRef.current || !window.turnstile) return;
+      try {
+        if (widgetIdRef.current) {
+          try { window.turnstile.remove(widgetIdRef.current); } catch (_) {}
+          widgetIdRef.current = null;
+        }
+        widgetIdRef.current = window.turnstile.render(containerRef.current, {
+          sitekey: siteKey || DEFAULT_TURNSTILE_SITE_KEY,
+          theme: dark ? 'dark' : 'light',
+          size: 'normal',
+          callback: (token: string) => {
+            if (isMounted) onVerify(token);
+          },
+          'expired-callback': () => {
+            if (isMounted) onExpire?.();
+          },
+          'error-callback': () => {
+            if (isMounted) onError?.('Bot verification challenge failed or was blocked by browser. Please retry.');
+          }
+        });
+      } catch (err: any) {
+        console.warn('Turnstile render notice:', err);
+      }
+    }
+
+    if (window.turnstile) {
+      renderWidget();
+    } else {
+      const existingScript = document.querySelector('script[src*="turnstile/v0/api.js"]');
+      if (!existingScript) {
+        const script = document.createElement('script');
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        script.async = true;
+        script.defer = true;
+        script.onload = () => {
+          if (isMounted) renderWidget();
+        };
+        script.onerror = () => {
+          if (isMounted) {
+            setLoadError(true);
+            onError?.('Could not load Cloudflare Turnstile script. Please check your connection.');
+          }
+        };
+        document.head.appendChild(script);
+      } else {
+        const interval = setInterval(() => {
+          if (window.turnstile) {
+            clearInterval(interval);
+            if (isMounted) renderWidget();
+          }
+        }, 100);
+        setTimeout(() => clearInterval(interval), 10000);
+      }
+    }
+
+    return () => {
+      isMounted = false;
+      if (widgetIdRef.current && window.turnstile) {
+        try { window.turnstile.remove(widgetIdRef.current); } catch (_) {}
+        widgetIdRef.current = null;
+      }
+    };
+  }, [siteKey, dark]);
+
+  if (loadError) {
+    return (
+      <div className="turnstile-error-box">
+        <AlertTriangle size={14} />
+        <span>Verification failed to load.</span>
+        <button
+          type="button"
+          className="text-button"
+          onClick={() => {
+            setLoadError(false);
+            window.location.reload();
+          }}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  return <div ref={containerRef} className="turnstile-box" />;
+}
+
 type User = {
   id: string;
   email: string;
@@ -269,17 +388,58 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
   const [section, setSection] = useState('Writing Studio');
-  const [dark, setDark] = useState(true);
+  // Requirement: Light Theme is the default for all new users & first-time visitors.
+  // Explicitly do not force device dark-mode preference for first-time visitors.
+  const [dark, setDark] = useState<boolean>(() => {
+    try {
+      const savedTheme = localStorage.getItem('rp_theme');
+      return savedTheme === 'dark';
+    } catch {
+      return false;
+    }
+  });
+
+  // Synchronize theme changes to localStorage, document classes, and meta theme-color
+  useEffect(() => {
+    try {
+      const themeVal = dark ? 'dark' : 'light';
+      localStorage.setItem('rp_theme', themeVal);
+
+      if (dark) {
+        document.documentElement.classList.add('dark');
+        document.documentElement.setAttribute('data-theme', 'dark');
+        document.body.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+        document.documentElement.setAttribute('data-theme', 'light');
+        document.body.classList.remove('dark');
+      }
+
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) {
+        meta.setAttribute('content', dark ? '#0c1220' : '#f5f7fb');
+      }
+    } catch (e) {
+      console.warn('Theme synchronization error:', e);
+    }
+  }, [dark]);
+
   const [persist, setPersist] = useState(true);
   const [googleClientId, setGoogleClientId] = useState<string>(DEFAULT_GOOGLE_CLIENT_ID);
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string>(DEFAULT_TURNSTILE_SITE_KEY);
+  const [turnstileToken, setTurnstileToken] = useState<string>('');
+  const [requiresTurnstile, setRequiresTurnstile] = useState<boolean>(true);
 
-  // Dynamic Google OAuth configuration resolution (from backend /api/auth/config)
+  // Dynamic Google OAuth & Turnstile configuration resolution (from backend /api/auth/config)
   useEffect(() => {
     fetch(`${API}/auth/config`)
       .then(r => (r.ok ? r.json() : null))
       .then(cfg => {
         if (cfg?.googleClientId && cfg.googleClientId.trim().length > 10) {
           setGoogleClientId(cfg.googleClientId.trim());
+        }
+        if (cfg?.turnstileSiteKey) {
+          setTurnstileSiteKey(cfg.turnstileSiteKey.trim());
         }
       })
       .catch((err) => {
@@ -385,9 +545,48 @@ export default function App() {
   // Debounced Autosave ref
   const autosaveTimeout = useRef<any>(null);
 
+  // Handle OAuth 2.0 redirect parameters on app mount
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const authStatus = params.get('auth_status');
+    const authErr = params.get('auth_error');
+    const emailParam = params.get('email');
+
+    if (authErr) {
+      if (authErr === 'account_linking_required') {
+        setAuthMode('login');
+        if (emailParam) setEmail(emailParam);
+        setAuthError('An account with this email already exists using password authentication. Please sign in with your password to link your Google account.');
+      } else {
+        setAuthError(decodeURIComponent(authErr));
+      }
+      window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (authStatus === 'google_success') {
+      window.history.replaceState({}, document.title, window.location.pathname);
+      request('/auth/me', '', undefined, 'GET')
+        .then((d) => {
+          if (d?.user) setUser(d.user);
+          if (d?.token) {
+            setToken(d.token);
+            localStorage.setItem('rp_token', d.token);
+          }
+        })
+        .catch((err) => {
+          setAuthError('Authentication session error: ' + (err.message || 'Please sign in.'));
+        });
+    }
+  }, []);
+
   useEffect(() => {
     request('/auth/me', token, undefined, 'GET')
-      .then((d) => setUser(d.user))
+      .then((d) => {
+        setUser(d.user);
+        if (d?.token && !token) {
+          setToken(d.token);
+          localStorage.setItem('rp_token', d.token);
+        }
+      })
       .catch(() => {
         if (token) {
           localStorage.removeItem('rp_token');
@@ -724,18 +923,30 @@ export default function App() {
   async function authenticate(e: React.FormEvent) {
     e.preventDefault();
     setAuthError('');
+    if ((authMode === 'register' || requiresTurnstile) && !turnstileToken) {
+      setAuthError('Please complete the security verification challenge before continuing.');
+      return;
+    }
     try {
       const d = await fetch(`${API}/auth/${authMode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify({ email, password, turnstileToken })
       });
       const result = await d.json();
-      if (!d.ok) throw new Error(result.error || 'Authentication failed.');
+      if (!d.ok) {
+        if (result.requiresTurnstile) {
+          setRequiresTurnstile(true);
+        }
+        setTurnstileToken('');
+        throw new Error(result.error || 'Authentication failed.');
+      }
       localStorage.setItem('rp_token', result.token);
       setToken(result.token);
       setUser(result.user);
+      setRequiresTurnstile(false);
+      setTurnstileToken('');
     } catch (e: any) {
       setAuthError(e.message);
     }
@@ -849,21 +1060,22 @@ export default function App() {
         {isGoogleConfigured && isOriginSupportedByGoogle ? (
           <>
             <div className="google-btn-wrap">
-              <GoogleLogin
-                onSuccess={handleGoogleSuccess}
-                onError={() => {
-                  setAuthError(
-                    'Google Sign-In failed. Please ensure ' +
-                    (typeof window !== 'undefined' ? window.location.origin : 'your domain') +
-                    ' is added under "Authorized JavaScript origins" in Google Cloud Console, or sign in with email/password below.'
-                  );
+              <button
+                type="button"
+                className="google-oauth-redirect-btn"
+                onClick={() => {
+                  const returnTo = encodeURIComponent(window.location.origin);
+                  window.location.href = `${API}/auth/google/start?return_to=${returnTo}`;
                 }}
-                theme={dark ? 'filled_black' : 'outline'}
-                shape="rectangular"
-                size="large"
-                width="340"
-                text="continue_with"
-              />
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                </svg>
+                <span>Continue with Google</span>
+              </button>
             </div>
             <div className="auth-divider">or continue with email</div>
           </>
@@ -898,11 +1110,43 @@ export default function App() {
         <form onSubmit={authenticate} className="auth-form">
           <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@university.edu" /></label>
           <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={10} placeholder="At least 10 characters" /></label>
+
+          {(authMode === 'register' || requiresTurnstile) && (
+            <div className="turnstile-wrapper">
+              <div className="turnstile-label">
+                <ShieldCheck size={13} />
+                <span>Security Verification</span>
+              </div>
+              <TurnstileWidget
+                siteKey={turnstileSiteKey}
+                dark={dark}
+                onVerify={(tok) => {
+                  setTurnstileToken(tok);
+                  if (tok) setAuthError('');
+                }}
+                onExpire={() => {
+                  setTurnstileToken('');
+                  setAuthError('Security verification challenge expired. Please verify again.');
+                }}
+                onError={(err) => {
+                  setTurnstileToken('');
+                  setAuthError(err);
+                }}
+              />
+            </div>
+          )}
+
           {authError && <div className="alert error">{authError}</div>}
           <button className="primary full" type="submit">{authMode === 'register' ? 'Create secure account' : 'Sign in'} <span>→</span></button>
         </form>
         <p className="switch-auth">
-          {authMode === 'register' ? 'Already registered?' : 'New to ResearchProof?'} <button className="text-button" onClick={() => setAuthMode(authMode === 'register' ? 'login' : 'register')}>{authMode === 'register' ? 'Sign in' : 'Create account'}</button>
+          {authMode === 'register' ? 'Already registered?' : 'New to ResearchProof?'} <button className="text-button" type="button" onClick={() => {
+            const nextMode = authMode === 'register' ? 'login' : 'register';
+            setAuthMode(nextMode);
+            setAuthError('');
+            setTurnstileToken('');
+            setRequiresTurnstile(nextMode === 'register');
+          }}>{authMode === 'register' ? 'Sign in' : 'Create account'}</button>
         </p>
         <div className="privacy-note"><ShieldCheck size={16} /> Your research manuscripts are never persisted without your consent.</div>
       </div>
@@ -911,6 +1155,16 @@ export default function App() {
     const canInitializeGoogle = Boolean(isGoogleConfigured && isOriginSupportedByGoogle && googleClientId);
     return (
       <div className={`auth-page ${dark ? 'dark' : ''}`}>
+        <button
+          type="button"
+          className="auth-theme-toggle"
+          onClick={() => setDark(!dark)}
+          title={`Switch to ${dark ? 'Light' : 'Dark'} theme`}
+          aria-label="Toggle theme"
+        >
+          {dark ? <Sun size={15} /> : <Moon size={15} />}
+          <span>{dark ? 'Light theme' : 'Dark theme'}</span>
+        </button>
         {canInitializeGoogle ? (
           <GoogleOAuthProvider clientId={googleClientId}>
             {authContent}
@@ -5476,7 +5730,7 @@ function SettingsPage({ user, usage, dark, setDark, persist, setPersist, isCompa
       const payload = {
         displayName: updated.displayName !== undefined ? updated.displayName : displayName,
         preferences: {
-          theme: dark ? 'dark' : 'light',
+          theme: updated.theme !== undefined ? updated.theme : (dark ? 'dark' : 'light'),
           compactSidebar: isCompact,
           defaultCitationStyle: updated.citationStyle || citationStyle,
           defaultRewriteMode: updated.rewriteMode || rewriteMode,
@@ -5550,14 +5804,22 @@ function SettingsPage({ user, usage, dark, setDark, persist, setPersist, isCompa
                   Link your Google identity for instant one-click sign-in and verified researcher profile status.
                 </p>
                 <div className="google-btn-wrap" style={{ display: 'inline-block' }}>
-                  <GoogleLogin
-                    onSuccess={onLinkGoogle}
-                    onError={() => setError?.('Google account linking failed. Please verify that this domain is added under "Authorized JavaScript origins" in Google Cloud Console, or check that popups are not blocked.')}
-                    theme={dark ? 'filled_black' : 'outline'}
-                    shape="rectangular"
-                    size="medium"
-                    text="continue_with"
-                  />
+                  <button
+                    type="button"
+                    className="google-oauth-redirect-btn link-btn"
+                    onClick={() => {
+                      const returnTo = encodeURIComponent(window.location.origin);
+                      window.location.href = `${API}/auth/google/start?return_to=${returnTo}&action=link`;
+                    }}
+                  >
+                    <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
+                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                    </svg>
+                    <span>Connect Google Account</span>
+                  </button>
                 </div>
               </div>
             ) : isLanHttpOrigin ? (
@@ -5672,7 +5934,7 @@ function SettingsPage({ user, usage, dark, setDark, persist, setPersist, isCompa
             <button className="secondary small" onClick={() => {
               const next = !dark;
               setDark(next);
-              handleSavePreferences();
+              handleSavePreferences({ theme: next ? 'dark' : 'light' });
             }}>
               {dark ? 'Dark mode' : 'Light mode'} · Toggle
             </button>

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { app, setGoogleTokenVerifier } from '../src/index.js';
+import { app, setGoogleTokenVerifier, setTurnstileVerifier } from '../src/index.js';
 
 let server;
 let baseUrl;
@@ -44,17 +44,85 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     return raw.split(';')[0];
   }
 
-  // --- Test 1: Password Registration & Login Regression ---
+  // --- Test 0: Security Headers (COOP for Google Identity Services Popups) ---
+  await t.test('0. Security Headers: Cross-Origin-Opener-Policy allows Google Sign-In popups', async () => {
+    const configRes = await api('/api/auth/config');
+    assert.equal(configRes.status, 200);
+    const coop = configRes.headers.get('cross-origin-opener-policy');
+    assert.equal(coop, 'same-origin-allow-popups', 'COOP must be same-origin-allow-popups so Google OAuth popups can communicate');
+    const corp = configRes.headers.get('cross-origin-resource-policy');
+    assert.equal(corp, 'cross-origin', 'CORP must be cross-origin so external Google user avatar pictures can be loaded');
+  });
+
+  // --- Turnstile Mock & Verification Harness ---
+  const validTurnstileToken = 'VALID_TURNSTILE_TOKEN_123';
+  const usedTurnstileTokens = new Set();
+  setTurnstileVerifier(async (token) => {
+    if (!token) return { success: false, error: 'Missing security verification token.', code: 'MISSING_TOKEN' };
+    if (usedTurnstileTokens.has(token)) return { success: false, error: 'Security verification token has already been used.', code: 'REUSED_TOKEN' };
+    if (token === 'EXPIRED_TURNSTILE_TOKEN') return { success: false, error: 'Security challenge expired.', code: 'EXPIRED_OR_DUPLICATE' };
+    if (token === 'INVALID_TURNSTILE_TOKEN') return { success: false, error: 'Invalid security verification token.', code: 'INVALID_TOKEN' };
+    if (token === validTurnstileToken || token === '1x00000000000000000000AA') {
+      usedTurnstileTokens.add(token);
+      return { success: true, hostname: '127.0.0.1' };
+    }
+    return { success: false, error: 'Verification failed.', code: 'VERIFICATION_FAILED' };
+  });
+
+  // --- Test 1a: Missing Turnstile Token Rejection ---
+  await t.test('1a. Bot Protection: Registration rejects missing Turnstile token', async () => {
+    const res = await api('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email: `bot-${Date.now()}@test.edu`, password: 'StrongPassword123!' })
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'MISSING_TOKEN');
+    assert.equal(res.body.requiresTurnstile, true);
+  });
+
+  // --- Test 1b: Invalid Turnstile Token Rejection ---
+  await t.test('1b. Bot Protection: Registration rejects invalid Turnstile token', async () => {
+    const res = await api('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email: `bot-${Date.now()}@test.edu`, password: 'StrongPassword123!', turnstileToken: 'INVALID_TURNSTILE_TOKEN' })
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'INVALID_TOKEN');
+  });
+
+  // --- Test 1c: Expired Turnstile Token Rejection ---
+  await t.test('1c. Bot Protection: Registration rejects expired Turnstile token', async () => {
+    const res = await api('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email: `bot-${Date.now()}@test.edu`, password: 'StrongPassword123!', turnstileToken: 'EXPIRED_TURNSTILE_TOKEN' })
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'EXPIRED_OR_DUPLICATE');
+  });
+
+  // --- Test 1d: Reused Turnstile Token Rejection (Replay Protection) ---
+  await t.test('1d. Bot Protection: Registration rejects reused Turnstile token (Replay Protection)', async () => {
+    const freshToken = `REPLAY_TOKEN_${Date.now()}`;
+    usedTurnstileTokens.add(freshToken); // Mark as already used
+    const res = await api('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email: `bot-${Date.now()}@test.edu`, password: 'StrongPassword123!', turnstileToken: freshToken })
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'REUSED_TOKEN');
+  });
+
+  // --- Test 1e: Password Registration & Login Regression ---
   let emailUserToken = '';
   let emailUserId = '';
   const email = `author-${Date.now()}@university.edu`;
   const password = 'StrongPassword123!';
 
-  await t.test('1. Existing email/password authentication (registration & login regression)', async () => {
-    // Register
+  await t.test('1e. Existing email/password authentication (registration & login regression)', async () => {
+    // Register with valid Turnstile token
     const regRes = await api('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ email, password })
+      body: JSON.stringify({ email, password, turnstileToken: '1x00000000000000000000AA' })
     });
     assert.equal(regRes.status, 201, 'Registration should return 201 Created');
     assert.ok(regRes.body.token, 'Should return JWT token');
@@ -62,15 +130,38 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     emailUserToken = regRes.body.token;
     emailUserId = regRes.body.user.id;
 
-    // Login
+    // Login without Turnstile (normal zero-friction researcher login)
     const loginRes = await api('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password })
     });
-    assert.equal(loginRes.status, 200, 'Login should return 200 OK');
+    assert.equal(loginRes.status, 200, 'Normal login should return 200 OK without Turnstile challenge');
     assert.ok(loginRes.body.token, 'Should return JWT token');
     assert.equal(loginRes.body.user.email, email);
     assert.equal(loginRes.body.user.passwordHash, undefined, 'Password hash must never be returned');
+  });
+
+  // --- Test 1f: Risk-Based Login Verification ---
+  await t.test('1f. Risk-Based Bot Protection: Repeated failed logins trigger Turnstile requirement', async () => {
+    const attackEmail = `target-${Date.now()}@university.edu`;
+
+    // 1. Fail login 3 times
+    for (let i = 0; i < 3; i++) {
+      const failRes = await api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email: attackEmail, password: 'WrongPassword123!' })
+      });
+      assert.equal(failRes.status, 401);
+    }
+
+    // 2. 4th attempt without Turnstile is rejected with 403 Forbidden (Turnstile Required)
+    const blockedRes = await api('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email: attackEmail, password: 'WrongPassword123!' })
+    });
+    assert.equal(blockedRes.status, 403, 'Should return 403 Forbidden when risk threshold is met');
+    assert.equal(blockedRes.body.requiresTurnstile, true);
+    assert.ok(blockedRes.body.siteKey, 'Should provide siteKey for frontend widget initialization');
   });
 
   // --- Test 2: First-time Google Registration ---
@@ -109,6 +200,42 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     googleUserToken = res.body.token;
     googleSessionCookie = getCookie(res.headers);
     assert.ok(googleSessionCookie.includes('rp_session='), 'HttpOnly session cookie should be set');
+  });
+
+  // --- Test 2b: OAuth 2.0 Redirect Start Flow (/api/auth/google/start) ---
+  await t.test('2b. OAuth 2.0 Redirect Start: constructs secure Google authorization URL with PKCE & state', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/google/start?return_to=${encodeURIComponent('http://localhost:5173')}`, {
+      redirect: 'manual'
+    });
+    assert.equal(res.status, 302, 'Should return HTTP 302 Found redirect');
+    const location = res.headers.get('location');
+    assert.ok(location, 'Must provide Location header for redirect');
+    assert.ok(location.startsWith('https://accounts.google.com/o/oauth2/v2/auth'), 'Target must be Google OAuth authorization endpoint');
+
+    const authUrl = new URL(location);
+    assert.ok(authUrl.searchParams.get('client_id'), 'Must include client_id');
+    assert.equal(authUrl.searchParams.get('response_type'), 'code', 'Must request authorization code');
+    assert.equal(authUrl.searchParams.get('scope'), 'openid email profile');
+    assert.ok(authUrl.searchParams.get('state'), 'Must include cryptographically random state');
+    assert.ok(authUrl.searchParams.get('code_challenge'), 'Must include PKCE code_challenge');
+    assert.equal(authUrl.searchParams.get('code_challenge_method'), 'S256', 'Must enforce S256 PKCE');
+    assert.ok(authUrl.searchParams.get('redirect_uri').includes('/api/auth/google/callback'), 'Callback URI must route to /api/auth/google/callback');
+
+    // Check cookies set
+    const rawCookie = res.headers.get('set-cookie') || '';
+    assert.ok(rawCookie.includes('rp_oauth_state='), 'Sets HttpOnly state cookie');
+    assert.ok(rawCookie.includes('rp_oauth_verifier='), 'Sets HttpOnly PKCE verifier cookie');
+  });
+
+  // --- Test 2c: OAuth 2.0 Redirect Callback (/api/auth/google/callback) - CSRF / State protection ---
+  await t.test('2c. OAuth 2.0 Redirect Callback: rejects invalid or mismatched state', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/google/callback?code=fake_code&state=mismatched_state`, {
+      redirect: 'manual'
+    });
+    assert.equal(res.status, 302, 'Should redirect with error');
+    const redirectUrl = new URL(res.headers.get('location') || '', baseUrl);
+    assert.ok(redirectUrl.searchParams.get('auth_error'), 'Must return auth_error parameter on state mismatch');
+    assert.ok(!redirectUrl.searchParams.get('token'), 'Must NEVER put JWT in URL parameters');
   });
 
   // --- Test 3: Returning Google User Login ---
