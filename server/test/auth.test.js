@@ -19,6 +19,8 @@ test.before(async () => {
 });
 
 test.after(async () => {
+  setTurnstileVerifier(null);
+  setGoogleTokenVerifier(null);
   await new Promise((resolve) => server.close(resolve));
 });
 
