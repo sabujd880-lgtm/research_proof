@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { app, setGoogleTokenVerifier, setTurnstileVerifier } from '../src/index.js';
+import { app, setGoogleTokenVerifier, setTurnstileVerifier, getGoogleRedirectUri, getBackendOrigin } from '../src/index.js';
 
 let server;
 let baseUrl;
@@ -56,13 +56,14 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
 
   // --- Turnstile Mock & Verification Harness ---
   const validTurnstileToken = 'VALID_TURNSTILE_TOKEN_123';
+  const getFreshTurnstileToken = () => `VALID_TURNSTILE_TOKEN_${Math.random().toString(36).slice(2)}_${Date.now()}`;
   const usedTurnstileTokens = new Set();
   setTurnstileVerifier(async (token) => {
     if (!token) return { success: false, error: 'Missing security verification token.', code: 'MISSING_TOKEN' };
     if (usedTurnstileTokens.has(token)) return { success: false, error: 'Security verification token has already been used.', code: 'REUSED_TOKEN' };
     if (token === 'EXPIRED_TURNSTILE_TOKEN') return { success: false, error: 'Security challenge expired.', code: 'EXPIRED_OR_DUPLICATE' };
     if (token === 'INVALID_TURNSTILE_TOKEN') return { success: false, error: 'Invalid security verification token.', code: 'INVALID_TOKEN' };
-    if (token === validTurnstileToken || token === '1x00000000000000000000AA') {
+    if (token === validTurnstileToken || token.startsWith('VALID_TURNSTILE_TOKEN') || token === '1x00000000000000000000AA') {
       usedTurnstileTokens.add(token);
       return { success: true, hostname: '127.0.0.1' };
     }
@@ -225,6 +226,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     const rawCookie = res.headers.get('set-cookie') || '';
     assert.ok(rawCookie.includes('rp_oauth_state='), 'Sets HttpOnly state cookie');
     assert.ok(rawCookie.includes('rp_oauth_verifier='), 'Sets HttpOnly PKCE verifier cookie');
+    assert.ok(rawCookie.includes('rp_oauth_redirect_uri='), 'Sets HttpOnly redirect URI cookie');
   });
 
   // --- Test 2c: OAuth 2.0 Redirect Callback (/api/auth/google/callback) - CSRF / State protection ---
@@ -236,6 +238,37 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     const redirectUrl = new URL(res.headers.get('location') || '', baseUrl);
     assert.ok(redirectUrl.searchParams.get('auth_error'), 'Must return auth_error parameter on state mismatch');
     assert.ok(!redirectUrl.searchParams.get('token'), 'Must NEVER put JWT in URL parameters');
+  });
+
+  // --- Test 2d: Configurable GOOGLE_REDIRECT_URI & Render production URL resolution ---
+  await t.test('2d. OAuth 2.0 Redirect URI resolution & environment configuration', async () => {
+    // 1. Without override, default in test / fallback
+    const defaultUri = getGoogleRedirectUri();
+    assert.ok(defaultUri.includes('/api/auth/google/callback'));
+
+    // 2. With explicit GOOGLE_REDIRECT_URI environment variable
+    const originalEnv = process.env.GOOGLE_REDIRECT_URI;
+    try {
+      process.env.GOOGLE_REDIRECT_URI = 'https://research-proof-1.onrender.com/api/auth/google/callback';
+      assert.equal(getGoogleRedirectUri(), 'https://research-proof-1.onrender.com/api/auth/google/callback');
+
+      // /api/auth/config should also report this exact redirect_uri
+      const configRes = await api('/api/auth/config');
+      assert.equal(configRes.body.googleRedirectUri, 'https://research-proof-1.onrender.com/api/auth/google/callback');
+    } finally {
+      if (originalEnv) process.env.GOOGLE_REDIRECT_URI = originalEnv;
+      else delete process.env.GOOGLE_REDIRECT_URI;
+    }
+  });
+
+  // --- Test 2e: Dual-route alias support (/auth/google/callback without /api prefix) ---
+  await t.test('2e. Dual-route alias: root /auth/google/callback processes OAuth state verification', async () => {
+    const res = await fetch(`${baseUrl}/auth/google/callback?code=fake_code&state=mismatched_state`, {
+      redirect: 'manual'
+    });
+    assert.equal(res.status, 302, 'Root /auth/google/callback route must be handled by OAuth callback handler');
+    const redirectUrl = new URL(res.headers.get('location') || '', baseUrl);
+    assert.ok(redirectUrl.searchParams.get('auth_error'), 'Must return auth_error parameter instead of 404 or index.html');
   });
 
   // --- Test 3: Returning Google User Login ---
@@ -328,7 +361,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     const suspendedEmail = `suspended-${Date.now()}@dept.org`;
     const reg = await api('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ email: suspendedEmail, password: 'StrongPassword123!' })
+      body: JSON.stringify({ email: suspendedEmail, password: 'StrongPassword123!', turnstileToken: getFreshTurnstileToken() })
     });
     assert.equal(reg.status, 201);
 
@@ -339,7 +372,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     // Attempt login with suspended account
     const loginRes = await api('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email: suspendedEmail, password: 'StrongPassword123!' })
+      body: JSON.stringify({ email: suspendedEmail, password: 'StrongPassword123!', turnstileToken: getFreshTurnstileToken() })
     });
     assert.equal(loginRes.status, 403, 'Suspended user login should be rejected with 403');
   });
@@ -350,7 +383,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     // 1. Create password account
     const regRes = await api('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ email: unlinkedEmail, password: 'Password12345!' })
+      body: JSON.stringify({ email: unlinkedEmail, password: 'Password12345!', turnstileToken: getFreshTurnstileToken() })
     });
     assert.equal(regRes.status, 201);
 
@@ -378,7 +411,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     // 1. Authenticate with password
     const loginRes = await api('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email: unlinkedEmail, password: 'Password12345!' })
+      body: JSON.stringify({ email: unlinkedEmail, password: 'Password12345!', turnstileToken: getFreshTurnstileToken() })
     });
     assert.equal(loginRes.status, 200);
     const authToken = loginRes.body.token;
@@ -407,7 +440,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     // Login to obtain a fresh token
     const loginRes = await api('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email, password })
+      body: JSON.stringify({ email, password, turnstileToken: getFreshTurnstileToken() })
     });
     assert.equal(loginRes.status, 200);
     const activeToken = loginRes.body.token;
@@ -468,7 +501,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     // Login email user again to get a valid token
     const emailLogin = await api('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email, password })
+      body: JSON.stringify({ email, password, turnstileToken: getFreshTurnstileToken() })
     });
     const currentEmailToken = emailLogin.body.token;
 
@@ -625,7 +658,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     const userAEmail = `user-a-${Date.now()}@university.edu`;
     const regRes = await api('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ email: userAEmail, password: 'SecurePassword123!' })
+      body: JSON.stringify({ email: userAEmail, password: 'SecurePassword123!', turnstileToken: getFreshTurnstileToken() })
     });
     assert.equal(regRes.status, 201);
     const userAToken = regRes.body.token;
@@ -658,7 +691,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     // 1. Register User B and link sharedGoogleId
     const regB = await api('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ email: userBEmail, password: 'SecurePassword123!' })
+      body: JSON.stringify({ email: userBEmail, password: 'SecurePassword123!', turnstileToken: getFreshTurnstileToken() })
     });
     assert.equal(regB.status, 201);
     const tokenB = regB.body.token;
@@ -681,7 +714,7 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     // 2. Register User C
     const regC = await api('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ email: userCEmail, password: 'SecurePassword123!' })
+      body: JSON.stringify({ email: userCEmail, password: 'SecurePassword123!', turnstileToken: getFreshTurnstileToken() })
     });
     assert.equal(regC.status, 201);
     const tokenC = regC.body.token;

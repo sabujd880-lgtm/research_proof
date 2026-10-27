@@ -83,6 +83,9 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 24) {
   console.warn('WARNING: Set JWT_SECRET to a random secret of at least 24 characters in server/.env.');
 }
 
+// Enable trust proxy for Render / Cloudflare / reverse proxy SSL termination
+app.set('trust proxy', 1);
+
 app.use(
   helmet({
     contentSecurityPolicy: false,
@@ -636,7 +639,7 @@ apiRouter.post('/auth/login', async (req, res, next) => {
 });
 
 // Public Auth Configuration (exposes Client ID and Turnstile Site Key for frontend initialization)
-apiRouter.get('/auth/config', (_req, res) => {
+apiRouter.get('/auth/config', (req, res) => {
   const rawClientId = getGoogleClientId();
   const isConfigured = Boolean(
     rawClientId &&
@@ -646,6 +649,7 @@ apiRouter.get('/auth/config', (_req, res) => {
   res.json({
     googleClientId: isConfigured ? rawClientId : '',
     googleConfigured: isConfigured,
+    googleRedirectUri: getGoogleRedirectUri(req),
     turnstileSiteKey: getTurnstileSiteKey(),
     environment: process.env.NODE_ENV || 'development'
   });
@@ -664,12 +668,45 @@ apiRouter.get('/auth/risk-status', (req, res) => {
 
 // Helper to determine backend base URL for OAuth callbacks
 function getBackendOrigin(req) {
-  if (process.env.BACKEND_URL) {
-    return process.env.BACKEND_URL.replace(/\/+$/, '');
+  // 1. Explicit BACKEND_URL (ignore localhost in production)
+  if (process.env.BACKEND_URL && process.env.BACKEND_URL.trim()) {
+    const raw = process.env.BACKEND_URL.trim().replace(/\/+$/, '');
+    const isLocal = raw.includes('localhost') || raw.includes('127.0.0.1');
+    if (!(process.env.NODE_ENV === 'production' && isLocal)) {
+      return raw;
+    }
   }
-  const forwardedProto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || (req.secure ? 'https' : 'http');
-  const forwardedHost = (req.headers['x-forwarded-host'] || '').split(',')[0].trim() || req.headers.host;
-  return `${forwardedProto}://${forwardedHost}`;
+
+  // 2. Render automatically injects RENDER_EXTERNAL_URL (e.g. https://research-proof-1.onrender.com)
+  if (process.env.RENDER_EXTERNAL_URL && process.env.RENDER_EXTERNAL_URL.trim()) {
+    return process.env.RENDER_EXTERNAL_URL.trim().replace(/\/+$/, '');
+  }
+
+  // 3. Fallback to request host / headers
+  if (req) {
+    const forwardedProto = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || (req.secure ? 'https' : 'http');
+    const forwardedHost = (req.headers['x-forwarded-host'] || '').split(',')[0].trim() || req.headers.host || '';
+    const isProduction = process.env.NODE_ENV === 'production';
+    const isRenderDomain = forwardedHost.includes('.onrender.com');
+    const proto = (isProduction || isRenderDomain) ? 'https' : forwardedProto;
+    if (forwardedHost) {
+      return `${proto}://${forwardedHost}`;
+    }
+  }
+
+  return 'https://research-proof-1.onrender.com';
+}
+
+// Configurable, canonical Google OAuth 2.0 Redirect URI resolution
+function getGoogleRedirectUri(req) {
+  // 1. Explicit override via GOOGLE_REDIRECT_URI environment variable
+  if (process.env.GOOGLE_REDIRECT_URI && process.env.GOOGLE_REDIRECT_URI.trim()) {
+    return process.env.GOOGLE_REDIRECT_URI.trim().replace(/\/+$/, '');
+  }
+
+  // 2. Canonical callback URL on backend
+  const origin = getBackendOrigin(req);
+  return `${origin}/api/auth/google/callback`;
 }
 
 // Open redirect defense: sanitize frontend return destination
@@ -716,6 +753,8 @@ apiRouter.get('/auth/google/start', (req, res) => {
 
   const safeReturn = getSafeReturnUrl(req.query.return_to, req);
   const isProduction = process.env.NODE_ENV === 'production';
+  const redirectUri = getGoogleRedirectUri(req);
+  console.log(`[Google OAuth 2.0 Start] Client ID: ${rawClientId}, Redirect URI: ${redirectUri}`);
 
   const cookieOpts = {
     httpOnly: true,
@@ -727,10 +766,12 @@ apiRouter.get('/auth/google/start', (req, res) => {
   res.cookie('rp_oauth_state', state, cookieOpts);
   res.cookie('rp_oauth_verifier', codeVerifier, cookieOpts);
   res.cookie('rp_oauth_return', safeReturn, cookieOpts);
+  res.cookie('rp_oauth_redirect_uri', redirectUri, cookieOpts);
 
   app.locals.oauthSessions.set(state, {
     codeVerifier,
     returnTo: safeReturn,
+    redirectUri,
     createdAt: Date.now()
   });
 
@@ -740,7 +781,6 @@ apiRouter.get('/auth/google/start', (req, res) => {
     if (now - v.createdAt > 30 * 60 * 1000) app.locals.oauthSessions.delete(k);
   }
 
-  const redirectUri = `${getBackendOrigin(req)}/api/auth/google/callback`;
   const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   authUrl.searchParams.set('client_id', rawClientId);
   authUrl.searchParams.set('redirect_uri', redirectUri);
@@ -755,8 +795,8 @@ apiRouter.get('/auth/google/start', (req, res) => {
   res.redirect(authUrl.toString());
 });
 
-// Google OAuth 2.0 Authorization Code Callback
-apiRouter.get('/auth/google/callback', async (req, res, next) => {
+// Google OAuth 2.0 Authorization Code Callback Handler
+async function handleGoogleOAuthCallback(req, res, next) {
   const isProduction = process.env.NODE_ENV === 'production';
   const cookieOpts = {
     httpOnly: true,
@@ -768,6 +808,7 @@ apiRouter.get('/auth/google/callback', async (req, res, next) => {
     res.clearCookie('rp_oauth_state', cookieOpts);
     res.clearCookie('rp_oauth_verifier', cookieOpts);
     res.clearCookie('rp_oauth_return', cookieOpts);
+    res.clearCookie('rp_oauth_redirect_uri', cookieOpts);
   };
 
   const incomingState = req.query.state;
@@ -807,7 +848,9 @@ apiRouter.get('/auth/google/callback', async (req, res, next) => {
 
   try {
     const rawClientId = getGoogleClientId();
-    const redirectUri = `${getBackendOrigin(req)}/api/auth/google/callback`;
+    // Consistent redirect_uri: MUST match the exact redirect_uri used during the authorization request
+    const redirectUri = memSession?.redirectUri || req.cookies?.rp_oauth_redirect_uri || getGoogleRedirectUri(req);
+    console.log(`[Google OAuth 2.0 Callback] Processing state: ${incomingState}, redirect_uri: ${redirectUri}`);
 
     const tokenParams = new URLSearchParams({
       code,
@@ -817,7 +860,7 @@ apiRouter.get('/auth/google/callback', async (req, res, next) => {
       code_verifier: codeVerifier
     });
     if (process.env.GOOGLE_CLIENT_SECRET) {
-      tokenParams.set('client_secret', process.env.GOOGLE_CLIENT_SECRET);
+      tokenParams.set('client_secret', process.env.GOOGLE_CLIENT_SECRET.trim());
     }
 
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -828,7 +871,12 @@ apiRouter.get('/auth/google/callback', async (req, res, next) => {
 
     if (!tokenRes.ok) {
       const errText = await tokenRes.text().catch(() => '');
-      console.error('Google token exchange error:', tokenRes.status, errText);
+      console.error('[Google OAuth Token Exchange Failure]', {
+        status: tokenRes.status,
+        redirectUriSent: redirectUri,
+        clientIdUsed: rawClientId,
+        response: errText
+      });
       return sendAuthError('Google token exchange failed. Please verify Client Secret and Redirect URI in Google Cloud Console.');
     }
 
@@ -941,7 +989,18 @@ apiRouter.get('/auth/google/callback', async (req, res, next) => {
     console.error('Google OAuth callback error:', err);
     return sendAuthError(err.message || 'Authentication failed. Please try again.');
   }
+}
+
+// Mount callback handler on /api/auth/google/callback
+apiRouter.get('/auth/google/callback', handleGoogleOAuthCallback);
+
+// Also mount on root app (/auth/google/callback) so callback works whether or not /api prefix was used
+app.get('/auth/google/callback', handleGoogleOAuthCallback);
+app.get('/auth/google/start', (req, res) => {
+  const query = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  res.redirect(`/api/auth/google/start${query}`);
 });
+
 
 // Google Authentication (Section 2 & 4) - Direct ID Token fallback
 apiRouter.post('/auth/google', async (req, res, next) => {
@@ -4172,4 +4231,4 @@ if (mongoUri && !mongoUri.includes('localhost:5173')) {
   console.log(`Running with In-Memory Dev Store fallback: All features (Register, Login, Projects, Revisions) are fully functional!`);
 }
 
-export { app };
+export { app, getGoogleRedirectUri, getBackendOrigin };
