@@ -126,9 +126,18 @@ function clearSessionCookie(res, req) {
   const cookieOpts = getCookieOptions(req);
   delete cookieOpts.maxAge;
   res.clearCookie('rp_session', cookieOpts);
+  res.clearCookie('rp_session', { ...cookieOpts, sameSite: 'lax' });
+  if (cookieOpts.secure) {
+    res.clearCookie('rp_session', { ...cookieOpts, sameSite: 'none' });
+  }
   if (SESSION_COOKIE_NAME !== 'rp_session') {
     res.clearCookie(SESSION_COOKIE_NAME, cookieOpts);
+    res.clearCookie(SESSION_COOKIE_NAME, { ...cookieOpts, sameSite: 'lax' });
+    if (cookieOpts.secure) {
+      res.clearCookie(SESSION_COOKIE_NAME, { ...cookieOpts, sameSite: 'none' });
+    }
   }
+  res.clearCookie('researchproof_session', cookieOpts);
 }
 
 // Google OAuth Verification (Section 2)
@@ -481,7 +490,7 @@ apiRouter.post('/auth/register', async (req, res, next) => {
         jwtSecret,
         { expiresIn: `${SESSION_TTL_HOURS}h` }
       );
-      setSessionCookie(res, token);
+      setSessionCookie(res, token, req);
       await recordAudit(user._id, 'USER_REGISTERED', 'User', user._id);
       return res.status(201).json({
         token,
@@ -521,7 +530,7 @@ apiRouter.post('/auth/register', async (req, res, next) => {
       jwtSecret,
       { expiresIn: `${SESSION_TTL_HOURS}h` }
     );
-    setSessionCookie(res, token);
+    setSessionCookie(res, token, req);
     res.status(201).json({
       token,
       user: {
@@ -586,7 +595,7 @@ apiRouter.post('/auth/login', async (req, res, next) => {
         jwtSecret,
         { expiresIn: `${SESSION_TTL_HOURS}h` }
       );
-      setSessionCookie(res, token);
+      setSessionCookie(res, token, req);
       await recordAudit(user._id, 'USER_LOGIN', 'User', user._id);
       return res.json({
         token,
@@ -628,7 +637,7 @@ apiRouter.post('/auth/login', async (req, res, next) => {
       jwtSecret,
       { expiresIn: `${SESSION_TTL_HOURS}h` }
     );
-    setSessionCookie(res, token);
+    setSessionCookie(res, token, req);
     res.json({
       token,
       user: {
@@ -766,6 +775,7 @@ apiRouter.get('/auth/google/start', (req, res) => {
     httpOnly: true,
     secure: isProduction,
     sameSite: isProduction ? 'none' : 'lax',
+    path: '/',
     maxAge: 15 * 60 * 1000 // 15 minutes
   };
 
@@ -804,17 +814,16 @@ apiRouter.get('/auth/google/start', (req, res) => {
 // Google OAuth 2.0 Authorization Code Callback Handler
 async function handleGoogleOAuthCallback(req, res, next) {
   const isProduction = process.env.NODE_ENV === 'production';
-  const cookieOpts = {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: isProduction ? 'none' : 'lax'
-  };
-
   const clearOAuthCookies = () => {
-    res.clearCookie('rp_oauth_state', cookieOpts);
-    res.clearCookie('rp_oauth_verifier', cookieOpts);
-    res.clearCookie('rp_oauth_return', cookieOpts);
-    res.clearCookie('rp_oauth_redirect_uri', cookieOpts);
+    const opts = {
+      httpOnly: true,
+      secure: isProduction,
+      path: '/'
+    };
+    for (const name of ['rp_oauth_state', 'rp_oauth_verifier', 'rp_oauth_return', 'rp_oauth_redirect_uri']) {
+      res.clearCookie(name, { ...opts, sameSite: isProduction ? 'none' : 'lax' });
+      res.clearCookie(name, { ...opts, sameSite: 'lax' });
+    }
   };
 
   const incomingState = req.query.state;
@@ -1135,7 +1144,7 @@ apiRouter.post('/auth/google', async (req, res, next) => {
         jwtSecret,
         { expiresIn: `${SESSION_TTL_HOURS}h` }
       );
-      setSessionCookie(res, token);
+      setSessionCookie(res, token, req);
       await recordAudit(user._id, 'USER_LOGIN_GOOGLE', 'User', user._id);
 
       return res.json({
@@ -1203,7 +1212,7 @@ apiRouter.post('/auth/google', async (req, res, next) => {
       jwtSecret,
       { expiresIn: `${SESSION_TTL_HOURS}h` }
     );
-    setSessionCookie(res, token);
+    setSessionCookie(res, token, req);
 
     res.json({
       token,
@@ -1333,7 +1342,7 @@ apiRouter.post('/auth/logout', async (req, res) => {
       } catch (_) {}
     }
   } catch (_) {}
-  clearSessionCookie(res);
+  clearSessionCookie(res, req);
   res.json({ success: true, message: 'Logged out successfully.' });
 });
 
@@ -3078,7 +3087,7 @@ apiRouter.post('/privacy/delete-account', requireAuth, async (req, res, next) =>
     }
 
     // Invalidate sessions & clear cookie
-    clearSessionCookie(res);
+    clearSessionCookie(res, req);
     await recordAudit(userId, 'account_deleted', 'User', userId, { deletedCounts: counts });
 
     res.json({
