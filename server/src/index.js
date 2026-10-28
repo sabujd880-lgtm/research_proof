@@ -4349,6 +4349,9 @@ export function getSanitizedMongoDiagnostics(uri, sourceKey) {
 }
 
 function validateStartupConfiguration() {
+  const isTest = process.env.NODE_ENV === 'test' || process.argv.some(a => a.includes('test'));
+  if (isTest) return;
+
   const isProd = process.env.NODE_ENV === 'production';
   const gClientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
   const gClientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
@@ -4361,24 +4364,31 @@ function validateStartupConfiguration() {
   console.log(`[Config Check] Google Client Secret: ${gClientSecret ? 'Configured [REDACTED]' : 'Not set'}`);
   console.log(`[Config Check] Google Redirect URI: ${process.env.GOOGLE_REDIRECT_URI || 'Auto-detecting via getGoogleRedirectUri()'}`);
   console.log(`[Config Check] Client Origin: ${process.env.CLIENT_ORIGIN || 'Same-origin default'}`);
-  console.log(`[Config Check] MongoDB: ${mongoUri ? mongoDiag.summary : 'Not set (using in-memory fallback)'}`);
+  console.log(`[Config Check] MongoDB: ${mongoUri ? mongoDiag.summary : 'Not set (using in-memory fallback in dev)'}`);
   console.log(`[Config Check] JWT Secret: ${jwtSecretEnv ? 'Configured [REDACTED]' : 'Using default fallback'}`);
 
   if (isProd) {
     if (!jwtSecretEnv || jwtSecretEnv === 'researchproof-super-secure-jwt-secret-key-32chars' || jwtSecretEnv === 'replace-with-a-long-random-secret' || jwtSecretEnv.length < 32) {
-      console.error('[CRITICAL SECURITY ERROR] Production startup halted: Insecure or default JWT_SECRET detected. Provide a 32+ character high-entropy secret in Render Environment settings.');
+      console.error('[CRITICAL SECURITY ERROR] Production startup halted: Insecure or default JWT_SECRET detected.');
+      console.error('[Action Required] Add JWT_SECRET (32+ random characters) in Render Dashboard -> Environment.');
       process.exit(1);
     }
     if (!mongoUri) {
-      console.error('[CRITICAL DATA INTEGRITY ERROR] Production startup halted: MONGODB_URI (or MONGO_URI/DATABASE_URL) is not set in Render environment settings. Production must connect to MongoDB Atlas and will never silently fallback to ephemeral in-memory storage.');
+      console.error('[CRITICAL DATA INTEGRITY ERROR] Production startup halted: MONGODB_URI is not configured in Render environment.');
+      console.error('[Action Required] In Render Dashboard -> Environment, add MONGODB_URI set to your MongoDB Atlas connection string.');
+      console.error('Example: mongodb://sabujd880_db_user:<db_password>@ac-gqldvlu-shard-00-00.ddonqws.mongodb.net:27017,.../researchproof_ai?ssl=true&replicaSet=atlas-e7duvz-shard-0&authSource=admin');
       process.exit(1);
     }
     if (mongoDiag.isLocalhost) {
-      console.error(`[CRITICAL CONFIGURATION ERROR] Production startup halted: ${mongoSourceKey} is configured with a localhost/loopback address ("${mongoDiag.host}"). Render cloud containers do not host a local MongoDB instance. You must configure your remote MongoDB Atlas connection string (e.g. mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<dbname>?retryWrites=true&w=majority) in the Render Dashboard.`);
+      console.error(`[CRITICAL CONFIGURATION ERROR] Production startup halted: ${mongoSourceKey} points to localhost/loopback ("${mongoDiag.host}").`);
+      console.error('[Action Required] Render cloud containers do not run a local MongoDB instance. Replace localhost with your remote MongoDB Atlas connection string in the Render Dashboard.');
       process.exit(1);
     }
   }
 }
+
+// Run configuration check synchronously
+validateStartupConfiguration();
 
 // Start Express server
 const isTestEnv = process.env.NODE_ENV === 'test' || process.argv.some(a => a.includes('test'));
@@ -4386,7 +4396,6 @@ if (!isTestEnv) {
   app.listen(port, () => {
     console.log(`ResearchProof API listening on http://localhost:${port}`);
     console.log(`Endpoints available at /api and /api/v1`);
-    validateStartupConfiguration();
   });
 }
 
