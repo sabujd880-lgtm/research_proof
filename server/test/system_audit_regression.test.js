@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { app } from '../src/index.js';
+import { app, resolveMongoUri, getSanitizedMongoDiagnostics } from '../src/index.js';
 import { memDoiCache } from '../src/citationService.js';
 
 let server;
@@ -407,5 +407,56 @@ test('ResearchProof AI — Comprehensive System & Auth Audit Suite', async (t) =
       headers: { Authorization: `Bearer ${userToken}` }
     });
     assert.equal(docAccess.status, 401, 'Subsequent request with revoked token must return 401');
+  });
+
+  // 25. MongoDB Resolution: Resolves across MONGODB_URI, MONGO_URI, and DATABASE_URL
+  await t.test('25. MongoDB URI Resolution: Supports multiple environment variable aliases', async () => {
+    const origMongo = process.env.MONGODB_URI;
+    const origAlt = process.env.DATABASE_URL;
+
+    delete process.env.MONGODB_URI;
+    process.env.DATABASE_URL = 'mongodb+srv://admin:pass@cluster0.abcde.mongodb.net/testdb';
+
+    const res = resolveMongoUri();
+    assert.equal(res.sourceKey, 'DATABASE_URL');
+    assert.equal(res.uri, 'mongodb+srv://admin:pass@cluster0.abcde.mongodb.net/testdb');
+
+    // Clean up
+    delete process.env.DATABASE_URL;
+    if (origMongo !== undefined) process.env.MONGODB_URI = origMongo;
+    if (origAlt !== undefined) process.env.DATABASE_URL = origAlt;
+  });
+
+  // 26. MongoDB Diagnostics: Redacts credentials and distinguishes Atlas SRV vs Localhost
+  await t.test('26. MongoDB Diagnostics: Redacts passwords and detects Atlas vs Localhost', async () => {
+    const atlasUri = 'mongodb+srv://secretUser:superSecretPass123!@cluster0.xyz123.mongodb.net/prod_data?retryWrites=true&w=majority';
+    const diag = getSanitizedMongoDiagnostics(atlasUri, 'MONGODB_URI');
+
+    assert.equal(diag.scheme, 'mongodb+srv');
+    assert.equal(diag.targetType, 'ATLAS_SRV');
+    assert.equal(diag.host, 'cluster0.xyz123.mongodb.net');
+    assert.equal(diag.isLocalhost, false);
+    assert.ok(!diag.summary.includes('superSecretPass123!'), 'Password must never be logged');
+    assert.ok(!diag.summary.includes('secretUser'), 'Username should be excluded from sanitized summary');
+
+    const localUri = 'mongodb://127.0.0.1:27017/researchproof_ai';
+    const localDiag = getSanitizedMongoDiagnostics(localUri, 'MONGODB_URI');
+    assert.equal(localDiag.scheme, 'mongodb');
+    assert.equal(localDiag.targetType, 'LOCALHOST');
+    assert.equal(localDiag.isLocalhost, true);
+  });
+
+  // 27. Production Localhost Prevention: Rejects localhost in production environment
+  await t.test('27. Production Guardrail: Localhost/127.0.0.1 flagged to prevent cloud ECONNREFUSED', async () => {
+    const localhostUris = [
+      'mongodb://127.0.0.1:27017/researchproof_ai',
+      'mongodb://localhost:27017/researchproof_ai',
+      'mongodb://0.0.0.0:27017/researchproof_ai'
+    ];
+
+    for (const uri of localhostUris) {
+      const diag = getSanitizedMongoDiagnostics(uri, 'MONGODB_URI');
+      assert.equal(diag.isLocalhost, true, `URI ${uri} must be recognized as localhost`);
+    }
   });
 });

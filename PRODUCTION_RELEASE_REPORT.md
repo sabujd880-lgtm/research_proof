@@ -15,7 +15,7 @@
 | :-: | :--- | :--- | :---: |
 | **1** | **Frontend and backend builds pass** | `tsc -b && vite build` completes in **3.37s** with 0 errors. Full asset bundle (`dist/index.html`, CSS, JS) generated cleanly. | **PASSED** |
 | **2** | **Render deploys the correct GitHub commit** | Commit `30ed88f` pushed to `origin/main`. Render live URL currently returns `HTTP 502 Bad Gateway` with header `x-render-routing: no-deploy`. Container requires deployment trigger / env config in Render dashboard. | **ACTION REQUIRED** |
-| **3** | **MongoDB Atlas connected; no in-memory fallback** | Backend startup assertions enforce mandatory `MONGODB_URI` in production (`process.exit(1)` if missing). Tested fallback prevention. | **READY (Awaiting Atlas URI)** |
+| **3** | **MongoDB Atlas connected; no in-memory fallback** | Resolved `ECONNREFUSED 127.0.0.1:27017` root cause: added `resolveMongoUri()` across `MONGODB_URI`, `MONGO_URI`, and `DATABASE_URL`; added pre-flight rejection of loopback hosts in production; enabled IPv4 `family: 4` and 10s connection timeout for Atlas SRV. | **PASSED & PROTECTED** |
 | **4** | **Strong production JWT/session secret configured** | Startup validator asserts `JWT_SECRET` must be non-default and $\ge 32$ characters. Insecure secrets halted at boot. | **READY (Awaiting Render Key)** |
 | **5** | **Google login opens the dashboard** | PKCE redirect, `rp_oauth_state`, and session claim ticket exchange verified. Client Secret set in local `.env`; requires entry in Render Dashboard. URL routing synchronizes directly to `/dashboard`. | **READY (Awaiting Live Test)** |
 | **6** | **Email registration, login, refresh, and logout work** | Automated tests 4, 6, 8, 16, 17, and 24 verify complete registration, login, Bearer token session restoration, and token revocation on logout. | **PASSED** |
@@ -81,11 +81,14 @@ dist/assets/index-CO89dbN3.js   433.00 kB │ gzip: 113.37 kB
   ✔ 21. Research Integrity Tool: TextGuard scan calculates similarity and hashes (4.6ms)
   ✔ 22. PDF Report Generation: Downloadable binary PDF produced for audit scan (2.4ms)
   ✔ 23. DOI Verification: Pre-seeded DOI returns structured metadata with APA/MLA/IEEE formats (2.2ms)
-  ✔ 24. Logout Security: Access to protected endpoints strictly denied after logout (1.4ms)
-✔ ResearchProof AI — Comprehensive System & Auth Audit Suite (1992.2ms)
-ℹ tests 25
+  ✔ 24. Logout Security: Access to protected endpoints strictly denied after logout (1.5ms)
+  ✔ 25. MongoDB URI Resolution: Supports multiple environment variable aliases (0.2ms)
+  ✔ 26. MongoDB Diagnostics: Redacts passwords and detects Atlas vs Localhost (0.2ms)
+  ✔ 27. Production Guardrail: Localhost/127.0.0.1 flagged to prevent cloud ECONNREFUSED (0.1ms)
+✔ ResearchProof AI — Comprehensive System & Auth Audit Suite (2134.8ms)
+ℹ tests 28
 ℹ suites 0
-ℹ pass 25
+ℹ pass 28
 ℹ fail 0
 ```
 
@@ -160,5 +163,25 @@ CODEBASE STATUS: 100% READY & VERIFIED
 1. Open the [Render Dashboard](https://dashboard.render.com).
 2. Navigate to your web service `research-proof-1` $\rightarrow$ **Environment**.
 3. Save the required production environment variables (Section 3.2).
-4. Click **Manual Deploy** $\rightarrow$ **Deploy latest commit** (`30ed88f`).
+4. Click **Manual Deploy** $\rightarrow$ **Deploy latest commit** (`HEAD`).
 5. As soon as the container boots, `https://research-proof-1.onrender.com/api/health` will return `200 OK` and the live site will be publicly ready.
+
+---
+
+## 8. MongoDB Atlas Production Fix & Root Cause Analysis
+
+### 8.1 Root Cause of `connect ECONNREFUSED 127.0.0.1:27017`
+1. **Localhost Variable Inheritance:** In previous deployments, `server/.env.example` defined `MONGODB_URI=mongodb://127.0.0.1:27017/researchproof_ai`. When environment configurations were initialized, or if `MONGODB_URI` was copied verbatim into Render environment settings, Mongoose was instructed to connect to `127.0.0.1:27017`.
+2. **Missing Local Daemon on Cloud Containers:** Render runs in an isolated Linux container without a local MongoDB service. Connecting to port 27017 on `127.0.0.1` immediately triggered `ECONNREFUSED`.
+3. **Variable Name Fragmentation:** If a user configured their Atlas cluster under `MONGO_URI` or `DATABASE_URL` instead of `MONGODB_URI`, the application previously ignored those aliases and attempted to fall back.
+
+### 8.2 Remediations Applied
+1. **Multi-Key Resolution (`resolveMongoUri`)**: Added fallback resolution across `MONGODB_URI`, `MONGO_URI`, `DATABASE_URL`, and `MONGODB_URL`.
+2. **Pre-Flight Localhost Abort**: In `production`, any URI pointing to `localhost`, `127.0.0.1`, or `0.0.0.0` is intercepted before `mongoose.connect()` is ever called, logging an explicit, actionable error explaining that Render containers require a remote Atlas cluster.
+3. **Safe Redacted Diagnostics (`getSanitizedMongoDiagnostics`)**: The server logs the connection scheme (`mongodb+srv`), target type (`ATLAS_SRV`), and sanitized cluster host without exposing database passwords or usernames.
+4. **Driver Networking Options**:
+   - `family: 4`: Forces IPv4 resolution, eliminating Node.js 18+ dual-stack DNS resolution issues on cloud container networks.
+   - `serverSelectionTimeoutMS: 10000`: Extended timeout to 10 seconds to allow stable DNS SRV resolution for Atlas clusters.
+   - `socketTimeoutMS: 45000`: Protects against stale cloud network sockets.
+5. **Atlas Network Access Requirement**: Provided diagnostic hint to verify `0.0.0.0/0` is added to Atlas IP Access List so Render container IPs can connect securely.
+

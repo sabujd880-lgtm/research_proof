@@ -19,14 +19,14 @@ async function main() {
     process.exit(1);
   }
 
-  const mongoUri = process.env.MONGODB_URI;
+  const mongoUri = (process.env.MONGODB_URI || process.env.MONGO_URI || process.env.DATABASE_URL || process.env.MONGODB_URL || '').trim();
   if (!mongoUri) {
-    console.error('Error: MONGODB_URI environment variable is required to provision administrator.');
+    console.error('Error: MONGODB_URI (or MONGO_URI/DATABASE_URL) environment variable is required to provision administrator.');
     process.exit(1);
   }
 
   try {
-    await mongoose.connect(mongoUri);
+    await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 10000, family: 4 });
     console.log('Connected to MongoDB database.');
 
     const passwordHash = await bcrypt.hash(password, 10);

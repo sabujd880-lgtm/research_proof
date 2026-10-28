@@ -4301,11 +4301,59 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ error: status < 500 ? err.message : (err.status ? err.message : 'Unexpected server error.') });
 });
 
+export function resolveMongoUri() {
+  const candidateKeys = ['MONGODB_URI', 'MONGO_URI', 'DATABASE_URL', 'MONGODB_URL'];
+  for (const key of candidateKeys) {
+    const val = (process.env[key] || '').trim();
+    if (val) return { uri: val, sourceKey: key };
+  }
+  return { uri: '', sourceKey: null };
+}
+
+export function getSanitizedMongoDiagnostics(uri, sourceKey) {
+  if (!uri) {
+    return {
+      sourceKey: 'NONE',
+      scheme: 'none',
+      targetType: 'NOT_SET',
+      host: 'N/A',
+      isLocalhost: false,
+      summary: 'No MongoDB URI configured'
+    };
+  }
+  const isSrv = uri.startsWith('mongodb+srv://');
+  const isStandard = uri.startsWith('mongodb://');
+  const scheme = isSrv ? 'mongodb+srv' : isStandard ? 'mongodb' : 'unknown';
+
+  let host = 'unknown';
+  try {
+    const withoutScheme = uri.replace(/^mongodb(?:\+srv)?:\/\//, '');
+    const atIndex = withoutScheme.indexOf('@');
+    const afterAuth = atIndex !== -1 ? withoutScheme.substring(atIndex + 1) : withoutScheme;
+    host = afterAuth.split('/')[0].split('?')[0];
+  } catch (_) {
+    host = 'unparseable';
+  }
+
+  const isLocalhost = host.includes('localhost') || host.includes('127.0.0.1') || host.includes('0.0.0.0');
+  const targetType = isLocalhost ? 'LOCALHOST' : isSrv ? 'ATLAS_SRV' : 'REMOTE_CLUSTER';
+
+  return {
+    sourceKey: sourceKey || 'CUSTOM',
+    scheme,
+    targetType,
+    host,
+    isLocalhost,
+    summary: `${scheme}://${host} [${targetType}] (via ${sourceKey || 'env'})`
+  };
+}
+
 function validateStartupConfiguration() {
   const isProd = process.env.NODE_ENV === 'production';
   const gClientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
   const gClientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
-  const mongoUri = (process.env.MONGODB_URI || '').trim();
+  const { uri: mongoUri, sourceKey: mongoSourceKey } = resolveMongoUri();
+  const mongoDiag = getSanitizedMongoDiagnostics(mongoUri, mongoSourceKey);
   const jwtSecretEnv = (process.env.JWT_SECRET || '').trim();
 
   console.log(`[Config Check] Environment: ${process.env.NODE_ENV || 'development'}`);
@@ -4313,16 +4361,20 @@ function validateStartupConfiguration() {
   console.log(`[Config Check] Google Client Secret: ${gClientSecret ? 'Configured [REDACTED]' : 'Not set'}`);
   console.log(`[Config Check] Google Redirect URI: ${process.env.GOOGLE_REDIRECT_URI || 'Auto-detecting via getGoogleRedirectUri()'}`);
   console.log(`[Config Check] Client Origin: ${process.env.CLIENT_ORIGIN || 'Same-origin default'}`);
-  console.log(`[Config Check] MongoDB URI: ${mongoUri ? 'Configured [REDACTED]' : 'Not set (using in-memory fallback)'}`);
+  console.log(`[Config Check] MongoDB: ${mongoUri ? mongoDiag.summary : 'Not set (using in-memory fallback)'}`);
   console.log(`[Config Check] JWT Secret: ${jwtSecretEnv ? 'Configured [REDACTED]' : 'Using default fallback'}`);
 
   if (isProd) {
     if (!jwtSecretEnv || jwtSecretEnv === 'researchproof-super-secure-jwt-secret-key-32chars' || jwtSecretEnv === 'replace-with-a-long-random-secret' || jwtSecretEnv.length < 32) {
-      console.error('[CRITICAL SECURITY ERROR] Production startup halted: Insecure or default JWT_SECRET detected. Provide a 32+ character high-entropy secret.');
+      console.error('[CRITICAL SECURITY ERROR] Production startup halted: Insecure or default JWT_SECRET detected. Provide a 32+ character high-entropy secret in Render Environment settings.');
       process.exit(1);
     }
-    if (!mongoUri || mongoUri.includes('localhost:5173')) {
-      console.error('[CRITICAL DATA INTEGRITY ERROR] Production startup halted: MONGODB_URI is not set. Production must not silently use temporary in-memory storage.');
+    if (!mongoUri) {
+      console.error('[CRITICAL DATA INTEGRITY ERROR] Production startup halted: MONGODB_URI (or MONGO_URI/DATABASE_URL) is not set in Render environment settings. Production must connect to MongoDB Atlas and will never silently fallback to ephemeral in-memory storage.');
+      process.exit(1);
+    }
+    if (mongoDiag.isLocalhost) {
+      console.error(`[CRITICAL CONFIGURATION ERROR] Production startup halted: ${mongoSourceKey} is configured with a localhost/loopback address ("${mongoDiag.host}"). Render cloud containers do not host a local MongoDB instance. You must configure your remote MongoDB Atlas connection string (e.g. mongodb+srv://<username>:<password>@<cluster>.mongodb.net/<dbname>?retryWrites=true&w=majority) in the Render Dashboard.`);
       process.exit(1);
     }
   }
@@ -4339,24 +4391,53 @@ if (!isTestEnv) {
 }
 
 // Connect to MongoDB if URI is configured (non-blocking fallback for dev/test; mandatory for prod)
-const mongoUri = process.env.MONGODB_URI;
-if (mongoUri && !mongoUri.includes('localhost:5173')) {
-  mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 5000 })
+const { uri: resolvedMongoUri, sourceKey: resolvedMongoSource } = resolveMongoUri();
+const mongoDiagnostics = getSanitizedMongoDiagnostics(resolvedMongoUri, resolvedMongoSource);
+
+if (resolvedMongoUri && !mongoDiagnostics.isLocalhost) {
+  console.log(`[MongoDB Diagnostics] Connecting to remote cluster via ${mongoDiagnostics.summary}...`);
+  mongoose.connect(resolvedMongoUri, {
+    serverSelectionTimeoutMS: 10000,
+    connectTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+    family: 4 // Force IPv4 to prevent Node.js 18+ dual-stack ECONNREFUSED on Render cloud instances
+  })
     .then(() => {
       seedDemoUserToDb();
-      console.log(`Connected to MongoDB successfully at ${mongoUri.split('@').pop()}`);
+      console.log(`[MongoDB] Connected successfully to remote cluster at ${mongoDiagnostics.host}`);
     })
     .catch((err) => {
-      console.error(`[CRITICAL] MongoDB connection attempt failed: ${err.message}`);
+      const errCategory = err.name || 'ConnectionError';
+      console.error(`[CRITICAL] MongoDB connection attempt failed (${errCategory}): ${err.message}`);
+      if (err.message.includes('ECONNREFUSED')) {
+        console.error(`[MongoDB Diagnostic Hint] ECONNREFUSED at "${mongoDiagnostics.host}". The host actively rejected port 27017. Verify your Atlas cluster host format and ensure Render is not pointed to localhost.`);
+      } else if (err.message.includes('querySrv') || err.message.includes('ENOTFOUND')) {
+        console.error(`[MongoDB Diagnostic Hint] DNS lookup failed for "${mongoDiagnostics.host}". Verify that your Atlas cluster connection string is active and spelled correctly.`);
+      } else if (err.message.includes('bad auth') || err.message.includes('Authentication failed')) {
+        console.error(`[MongoDB Diagnostic Hint] Atlas authentication failed. Check your database username and password in Render's MONGODB_URI.`);
+      } else if (err.message.includes('Server selection timed out')) {
+        console.error(`[MongoDB Diagnostic Hint] Server selection timed out after 10000ms. In MongoDB Atlas, go to "Network Access" -> "IP Access List" and ensure "0.0.0.0/0" is added to allow inbound connections from Render cloud instances.`);
+      }
+
       if (process.env.NODE_ENV === 'production') {
         console.error('[FATAL] Failed to connect to MongoDB Atlas in production. Halting startup.');
         process.exit(1);
       }
       console.log(`Running with In-Memory Dev Store fallback: All features (Register, Login, Projects, Revisions) are fully functional!`);
     });
+} else if (resolvedMongoUri && mongoDiagnostics.isLocalhost && process.env.NODE_ENV !== 'production') {
+  console.log(`[MongoDB] Attempting local development connection to ${mongoDiagnostics.host}...`);
+  mongoose.connect(resolvedMongoUri, { serverSelectionTimeoutMS: 3000, family: 4 })
+    .then(() => {
+      seedDemoUserToDb();
+      console.log(`[MongoDB] Connected to local MongoDB at ${mongoDiagnostics.host}`);
+    })
+    .catch((err) => {
+      console.log(`[MongoDB Dev Notice] Local MongoDB not running on 27017 (${err.message}). Using In-Memory Dev Store fallback.`);
+    });
 } else {
   if (process.env.NODE_ENV === 'production') {
-    console.error('[FATAL] MONGODB_URI is required in production. In-memory storage is disallowed in production.');
+    console.error('[FATAL] MONGODB_URI is required in production and must point to a remote MongoDB Atlas cluster. In-memory storage is strictly prohibited in production.');
     process.exit(1);
   }
   console.log(`Running with In-Memory Dev Store fallback: All features (Register, Login, Projects, Revisions) are fully functional!`);
