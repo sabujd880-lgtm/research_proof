@@ -1,0 +1,338 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { app } from '../src/index.js';
+
+let server;
+let pipeName;
+
+function api(path, options = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = options.body ? (typeof options.body === 'string' ? options.body : JSON.stringify(options.body)) : null;
+    const req = http.request({
+      socketPath: pipeName,
+      path,
+      method: options.method || 'GET',
+      headers: {
+        'x-forwarded-for': '127.0.0.1',
+        ...(payload ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {}),
+        ...(options.headers || {})
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        let body = {};
+        try { body = data ? JSON.parse(data) : {}; } catch (_) { body = data; }
+        resolve({ status: res.statusCode, headers: res.headers, body });
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+test.before(async () => {
+  process.env.NODE_ENV = 'test';
+  pipeName = `\\\\.\\pipe\\rp-audit-test-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  await new Promise((resolve) => {
+    server = http.createServer(app);
+    server.listen(pipeName, resolve);
+  });
+});
+
+test.after(async () => {
+  if (server) {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('ResearchProof AI — Comprehensive System & Auth Audit Suite', async (t) => {
+  let userToken = '';
+  let userId = '';
+  let userEmail = `auditor-${Date.now()}@university.edu`;
+  const userPassword = 'StrongPassword123!';
+  let docId = '';
+
+  // 1. Health Endpoints
+  await t.test('1. Health check works on both /api and /api/v1 prefixes', async () => {
+    const res1 = await api('/api/health');
+    assert.equal(res1.status, 200);
+    assert.equal(res1.body.status, 'ok');
+
+    const res2 = await api('/api/v1/health');
+    assert.equal(res2.status, 200);
+    assert.equal(res2.body.status, 'ok');
+  });
+
+  // 2. Auth Config: Google client ID present, Turnstile disabled by default
+  await t.test('2. Auth Config endpoint reflects non-blocking security posture', async () => {
+    const res = await api('/api/auth/config');
+    assert.equal(res.status, 200);
+    assert.ok(res.body.googleConfigured !== undefined);
+    assert.equal(res.body.turnstileSiteKey, '', 'Turnstile should be disabled by default');
+  });
+
+  // 3. Risk status returns requiresTurnstile: false for unflagged users
+  await t.test('3. Risk status returns false by default for clean login', async () => {
+    const res = await api(`/api/auth/risk-status?email=${encodeURIComponent(userEmail)}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.requiresTurnstile, false);
+  });
+
+  // 4. Registration without Turnstile
+  await t.test('4. Direct email/password registration succeeds without CAPTCHA challenge', async () => {
+    const res = await api('/api/auth/register', {
+      method: 'POST',
+      body: { email: userEmail, password: userPassword }
+    });
+    assert.equal(res.status, 201);
+    assert.ok(res.body.token, 'Should issue JWT token');
+    assert.equal(res.body.user.email, userEmail);
+    assert.ok(!res.body.user.passwordHash, 'Password hash must never be returned');
+    userId = res.body.user.id;
+    userToken = res.body.token;
+  });
+
+  // 5. Duplicate registration rejected
+  await t.test('5. Duplicate user registration rejected with 409 Conflict', async () => {
+    const res = await api('/api/auth/register', {
+      method: 'POST',
+      body: { email: userEmail, password: userPassword }
+    });
+    assert.equal(res.status, 409);
+  });
+
+  // 6. Direct Login without Turnstile
+  await t.test('6. Direct login succeeds without CAPTCHA challenge', async () => {
+    const res = await api('/api/auth/login', {
+      method: 'POST',
+      body: { email: userEmail, password: userPassword }
+    });
+    assert.equal(res.status, 200);
+    assert.ok(res.body.token);
+    assert.equal(res.body.user.email, userEmail);
+    userToken = res.body.token;
+  });
+
+  // 7. Wrong password rejected
+  await t.test('7. Wrong password rejected with 401 Unauthorized', async () => {
+    const res = await api('/api/auth/login', {
+      method: 'POST',
+      body: { email: userEmail, password: 'IncorrectPassword999!' }
+    });
+    assert.equal(res.status, 401);
+  });
+
+  // 8. Session validation via /api/auth/me
+  await t.test('8. Authenticated session validation (/api/auth/me) works with Bearer token', async () => {
+    const res = await api('/api/auth/me', {
+      headers: { Authorization: `Bearer ${userToken}` }
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.user.email, userEmail);
+  });
+
+  // 9. Unauthenticated /api/auth/me rejected
+  await t.test('9. Unauthenticated /api/auth/me request rejected with 401', async () => {
+    const res = await api('/api/auth/me');
+    assert.equal(res.status, 401);
+  });
+
+  // 10. Google OAuth 2.0 Start flow
+  await t.test('10. Google OAuth start endpoint redirects to Google with state and PKCE cookies', async () => {
+    const res = await api('/api/auth/google/start?return_to=http%3A%2F%2Flocalhost%3A5173');
+    assert.equal(res.status, 302);
+    assert.ok(res.headers.location?.startsWith('https://accounts.google.com/o/oauth2/v2/auth'));
+    const cookies = res.headers['set-cookie'] || [];
+    assert.ok(cookies.some(c => c.includes('rp_oauth_state')), 'Must set rp_oauth_state cookie');
+    assert.ok(cookies.some(c => c.includes('rp_oauth_verifier')), 'Must set rp_oauth_verifier cookie');
+  });
+
+  // 11. Document creation
+  await t.test('11. Authenticated user can create a manuscript document', async () => {
+    const res = await api('/api/documents', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${userToken}` },
+      body: {
+        title: 'Neural Networks in Empirical Econometrics',
+        content: 'This manuscript explores non-linear functional estimation across high-dimensional macroeconomic panels.'
+      }
+    });
+    assert.equal(res.status, 201);
+    assert.ok(res.body._id);
+    assert.equal(res.body.title, 'Neural Networks in Empirical Econometrics');
+    docId = res.body._id;
+  });
+
+  // 12. Document reading & patching
+  await t.test('12. Authenticated user can retrieve and update their document', async () => {
+    const getRes = await api(`/api/documents/${docId}`, {
+      headers: { Authorization: `Bearer ${userToken}` }
+    });
+    assert.equal(getRes.status, 200);
+    assert.equal(getRes.body._id, docId);
+
+    const patchRes = await api(`/api/documents/${docId}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${userToken}` },
+      body: {
+        title: 'Neural Networks in Empirical Econometrics (Revised)',
+        content: 'Updated content with additional empirical specifications (p < 0.01).'
+      }
+    });
+    assert.equal(patchRes.status, 200);
+    assert.equal(patchRes.body.title, 'Neural Networks in Empirical Econometrics (Revised)');
+  });
+
+  // 13. DOCX Export
+  await t.test('13. Authenticated user can export document as DOCX binary', async () => {
+    const res = await api(`/api/documents/${docId}/export-docx`, {
+      headers: { Authorization: `Bearer ${userToken}` }
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers['content-type'], /vnd\.openxmlformats-officedocument\.wordprocessingml\.document/i);
+  });
+
+  // 14. Academic Citation Formatting
+  await t.test('14. Citation formatting endpoint works with APA 7', async () => {
+    const res = await api('/api/citations/format', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${userToken}` },
+      body: {
+        style: 'apa',
+        citation: {
+          title: 'Deep Learning in Scholarly Publishing',
+          authors: [{ given: 'Alan', family: 'Turing' }],
+          year: 2024,
+          journal: 'Journal of Academic Computing',
+          volume: '42',
+          doi: '10.1000/182'
+        }
+      }
+    });
+    assert.equal(res.status, 200);
+    assert.ok(res.body.formatted?.includes('Turing'));
+  });
+
+  // 15. System verification health grid
+  await t.test('15. System verification panel returns operational service diagnostics', async () => {
+    const res = await api('/api/system/verification');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.status, 'healthy');
+    assert.ok(res.body.services?.similarityEngine);
+    assert.ok(res.body.services?.database);
+  });
+
+  // 16. Logout clears session
+  await t.test('16. Logout invalidates session and clears cookies', async () => {
+    const res = await api('/api/auth/logout', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${userToken}` }
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.success, true);
+    const cookies = res.headers['set-cookie'] || [];
+    assert.ok(cookies.some(c => c.includes('Max-Age=0') || c.includes('Expires=')), 'Must clear session cookie');
+  });
+
+  // 17. Authentication Contract & User Object Schema
+  await t.test('17. Authentication Contract: /api/auth/me returns complete User schema with usage metrics', async () => {
+    const loginRes = await api('/api/auth/login', {
+      method: 'POST',
+      body: { email: userEmail, password: userPassword }
+    });
+    assert.equal(loginRes.status, 200);
+    const meRes = await api('/api/auth/me', {
+      headers: { Authorization: `Bearer ${loginRes.body.token}` }
+    });
+    assert.equal(meRes.status, 200);
+    const u = meRes.body.user;
+    assert.ok(u.id, 'User must have id');
+    assert.equal(u.email, userEmail);
+    assert.ok('displayName' in u, 'Must contain displayName');
+    assert.ok('avatarUrl' in u, 'Must contain avatarUrl');
+    assert.ok('role' in u, 'Must contain role');
+    assert.ok('status' in u, 'Must contain status');
+    assert.ok('usage' in u, 'Must contain usage metrics');
+    assert.ok('dailyRequests' in u.usage, 'Usage must specify dailyRequests');
+    assert.ok('dailyLimit' in u.usage, 'Usage must specify dailyLimit');
+  });
+
+  // 18. Cross-User Document Isolation
+  await t.test('18. Cross-User Document Isolation: User B cannot access User A documents', async () => {
+    const userBEmail = `userb-${Date.now()}@university.edu`;
+    const regB = await api('/api/auth/register', {
+      method: 'POST',
+      body: { email: userBEmail, password: 'StrongPassword123!' }
+    });
+    assert.equal(regB.status, 201);
+    const userBToken = regB.body.token;
+
+    // User B tries to read User A's document
+    const readAttempt = await api(`/api/documents/${docId}`, {
+      headers: { Authorization: `Bearer ${userBToken}` }
+    });
+    assert.equal(readAttempt.status, 404, 'User B must not access User A document');
+
+    // User B tries to patch User A's document
+    const patchAttempt = await api(`/api/documents/${docId}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${userBToken}` },
+      body: { title: 'Compromised Document Title' }
+    });
+    assert.equal(patchAttempt.status, 404, 'User B must not modify User A document');
+
+    // User B tries to export User A's document
+    const exportAttempt = await api(`/api/documents/${docId}/export-docx`, {
+      headers: { Authorization: `Bearer ${userBToken}` }
+    });
+    assert.equal(exportAttempt.status, 404, 'User B must not export User A document');
+  });
+
+  // 19. Dual API Prefix Contract Consistency (/api vs /api/v1)
+  await t.test('19. Dual API Prefix Consistency: /api and /api/v1 share identical contracts', async () => {
+    const resA = await api('/api/documents', {
+      headers: { Authorization: `Bearer ${userToken}` }
+    });
+    const resB = await api('/api/v1/documents', {
+      headers: { Authorization: `Bearer ${userToken}` }
+    });
+    assert.equal(resA.status, resB.status);
+    assert.equal(Array.isArray(resA.body), Array.isArray(resB.body));
+    assert.equal(resA.body.length, resB.body.length);
+  });
+
+  // 20. File Upload Security Filter
+  await t.test('20. File Upload Security: Unsupported file formats (.exe, .sh) are rejected', async () => {
+    // Re-login to get active session
+    const authRes = await api('/api/auth/login', {
+      method: 'POST',
+      body: { email: userEmail, password: userPassword }
+    });
+    const activeTok = authRes.body.token;
+
+    // Send multipart-like boundary with invalid file extension
+    const boundary = '----WebKitFormBoundaryTest123';
+    const body = [
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="file"; filename="malware.exe"',
+      'Content-Type: application/octet-stream',
+      '',
+      'MZThisIsNotADocx',
+      `--${boundary}--`
+    ].join('\r\n');
+
+    const res = await api('/api/documents/import-docx', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${activeTok}`,
+        'content-type': `multipart/form-data; boundary=${boundary}`
+      },
+      body
+    });
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /Unsupported file format/i);
+  });
+});

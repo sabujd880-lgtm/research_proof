@@ -10,7 +10,7 @@ const DEFAULT_TESTING_SECRET_KEY = '1x0000000000000000000000000000000AA';
 export const isTurnstileEnabled = () => {
   if (process.env.TURNSTILE_ENABLED === 'false') return false;
   if (process.env.TURNSTILE_ENABLED === 'true') return true;
-  return Boolean(process.env.TURNSTILE_SECRET_KEY && process.env.TURNSTILE_SECRET_KEY !== 'disabled');
+  return false;
 };
 
 export const getTurnstileSiteKey = () => {

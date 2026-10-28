@@ -44,17 +44,32 @@ import {
   resetFailedLogins,
   isLoginVerificationRequired,
   getFailedAttemptsCount,
-  setTurnstileVerifier
+  setTurnstileVerifier,
+  isTurnstileEnabled
 } from './turnstileService.js';
 export { setTurnstileVerifier };
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  fileFilter: (_req, file, cb) => {
+    const allowed = /\.(docx|txt|tex|bib|zip)$/i;
+    if (!file.originalname.match(allowed)) {
+      const err = new Error('Unsupported file format. Only .docx, .tex, .bib, .txt, and .zip files are allowed.');
+      err.status = 400;
+      return cb(err);
+    }
+    cb(null, true);
+  }
 });
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
-const jwtSecret = process.env.JWT_SECRET || 'researchproof-super-secure-jwt-secret-key-32chars';
+const rawJwtSecret = (process.env.JWT_SECRET || '').trim();
+if (process.env.NODE_ENV === 'production' && (!rawJwtSecret || rawJwtSecret === 'researchproof-super-secure-jwt-secret-key-32chars' || rawJwtSecret === 'replace-with-a-long-random-secret' || rawJwtSecret.length < 32)) {
+  console.error('[CRITICAL SECURITY ERROR] Insecure or missing JWT_SECRET in production. Set a random 32+ character secret.');
+  process.exit(1);
+}
+const jwtSecret = rawJwtSecret || 'researchproof-super-secure-jwt-secret-key-32chars';
 const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'rp_session';
 const SESSION_TTL_HOURS = Number(process.env.SESSION_TTL_HOURS || 24);
 
@@ -677,7 +692,7 @@ apiRouter.get('/auth/config', (req, res) => {
     googleClientId: isConfigured ? rawClientId : '',
     googleConfigured: isConfigured,
     googleRedirectUri: getGoogleRedirectUri(req),
-    turnstileSiteKey: getTurnstileSiteKey(),
+    turnstileSiteKey: isTurnstileEnabled() ? getTurnstileSiteKey() : '',
     environment: process.env.NODE_ENV || 'development'
   });
 });
@@ -686,10 +701,10 @@ apiRouter.get('/auth/config', (req, res) => {
 apiRouter.get('/auth/risk-status', (req, res) => {
   const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress;
   const email = (req.query.email || '').toLowerCase().trim();
-  const requiresTurnstile = isLoginVerificationRequired(email, clientIp);
+  const requiresTurnstile = isTurnstileEnabled() && isLoginVerificationRequired(email, clientIp);
   res.json({
     requiresTurnstile,
-    siteKey: getTurnstileSiteKey()
+    siteKey: isTurnstileEnabled() ? getTurnstileSiteKey() : ''
   });
 });
 
@@ -3018,7 +3033,7 @@ apiRouter.delete('/privacy/documents/:id', requireAuth, async (req, res, next) =
       if (!doc) return res.status(404).json({ error: 'Document not found.' });
       await Revision.deleteMany({ documentId: req.params.id, userId: req.user.id });
       await recordAudit(req.user.id, 'document_deleted', 'Document', req.params.id);
-      return res.json({ deleted: true });
+      return res.json({ deleted: true, success: true, message: 'Document and revision history deleted.' });
     } else {
       const doc = memDocuments.get(req.params.id);
       if (!doc || doc.ownerId !== req.user.id) return res.status(404).json({ error: 'Document not found.' });
@@ -3027,7 +3042,7 @@ apiRouter.delete('/privacy/documents/:id', requireAuth, async (req, res, next) =
         if (rev.documentId === req.params.id && rev.userId === req.user.id) memRevisions.delete(revId);
       }
       await recordAudit(req.user.id, 'document_deleted', 'Document', req.params.id);
-      return res.json({ deleted: true });
+      return res.json({ deleted: true, success: true, message: 'Document and revision history deleted.' });
     }
   } catch (err) { next(err); }
 });
@@ -4135,41 +4150,6 @@ apiRouter.get('/privacy/overview', requireAuth, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Export personal research data package
-apiRouter.post('/privacy/export', requireAuth, async (req, res, next) => {
-  try {
-    const userId = req.user.id;
-    let userDocs = [];
-    let userScans = [];
-
-    if (isDbConnected()) {
-      userDocs = await Document.find({ ownerId: userId }).select('title content wordCount createdAt updatedAt').lean();
-      userScans = await TextGuardScan.find({ userId }).select('documentTitle similarityCoverage unmatchedCoverage doiVerification sha256 createdAt').lean();
-    } else {
-      userDocs = [...memDocuments.values()].filter(d => String(d.ownerId) === String(userId));
-      userScans = [...memTextGuardScans.values()].filter(s => String(s.userId) === String(userId));
-    }
-
-    const exportBundle = {
-      exportManifest: {
-        platform: 'ResearchProof AI',
-        exportedAt: new Date().toISOString(),
-        userEmail: req.user.email,
-        totalDocuments: userDocs.length,
-        totalScans: userScans.length,
-        dataIntegrityHash: Buffer.from(`${req.user.id}-${Date.now()}`).toString('base64')
-      },
-      documents: userDocs,
-      scans: userScans,
-      privacyPolicyNotice: 'This archive contains your research documents and authenticity scan history exported under your explicit request.'
-    };
-
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', `attachment; filename="ResearchProof-Data-Export-${Date.now()}.json"`);
-    res.json(exportBundle);
-  } catch (err) { next(err); }
-});
-
 // Delete all scans for user
 apiRouter.delete('/privacy/scans', requireAuth, async (req, res, next) => {
   try {
@@ -4183,30 +4163,6 @@ apiRouter.delete('/privacy/scans', requireAuth, async (req, res, next) => {
     }
     await recordAudit(userId, 'delete_all_scans', 'TextGuardScan', userId, {}, null, 'User privacy wipe');
     res.json({ success: true, message: 'All TextGuard scan history successfully erased.' });
-  } catch (err) { next(err); }
-});
-
-// Delete specific document
-apiRouter.delete('/privacy/documents/:id', requireAuth, async (req, res, next) => {
-  try {
-    const docId = req.params.id;
-    const userId = req.user.id;
-
-    if (isDbConnected()) {
-      const doc = await Document.findOne({ _id: docId, ownerId: userId });
-      if (!doc) return res.status(404).json({ error: 'Document not found or unauthorized.' });
-      await Document.deleteOne({ _id: docId });
-      await Revision.deleteMany({ documentId: docId });
-    } else {
-      const doc = memDocuments.get(docId);
-      if (!doc || String(doc.ownerId) !== String(userId)) {
-        return res.status(404).json({ error: 'Document not found or unauthorized.' });
-      }
-      memDocuments.delete(docId);
-    }
-
-    await recordAudit(userId, 'delete_document', 'Document', docId, {}, null, 'User document privacy deletion');
-    res.json({ success: true, message: 'Document and revision history deleted.' });
   } catch (err) { next(err); }
 });
 
@@ -4332,21 +4288,44 @@ app.get('*', (req, res, next) => {
 });
 
 // Global Error Handler
-app.use((err, _req, res, _next) => {
-  console.error(err.message);
-  res.status(err.status || 500).json({ error: err.status ? err.message : 'Unexpected server error.' });
+app.use((err, req, res, _next) => {
+  const status = err.status || 500;
+  // Structured safe logging without exposing credentials, tokens, or body text
+  console.error('[API Error]', {
+    timestamp: new Date().toISOString(),
+    method: req.method,
+    path: req.path,
+    status,
+    message: err.message || 'Unexpected server error.'
+  });
+  res.status(status).json({ error: status < 500 ? err.message : (err.status ? err.message : 'Unexpected server error.') });
 });
 
 function validateStartupConfiguration() {
+  const isProd = process.env.NODE_ENV === 'production';
   const gClientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
   const gClientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+  const mongoUri = (process.env.MONGODB_URI || '').trim();
+  const jwtSecretEnv = (process.env.JWT_SECRET || '').trim();
+
   console.log(`[Config Check] Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`[Config Check] Google Client ID: ${gClientId ? 'Configured (' + gClientId.slice(0, 12) + '...)' : 'Not set (Google OAuth disabled)'}`);
   console.log(`[Config Check] Google Client Secret: ${gClientSecret ? 'Configured [REDACTED]' : 'Not set'}`);
   console.log(`[Config Check] Google Redirect URI: ${process.env.GOOGLE_REDIRECT_URI || 'Auto-detecting via getGoogleRedirectUri()'}`);
   console.log(`[Config Check] Client Origin: ${process.env.CLIENT_ORIGIN || 'Same-origin default'}`);
-  console.log(`[Config Check] MongoDB URI: ${process.env.MONGODB_URI ? 'Configured [REDACTED]' : 'Not set (using in-memory fallback)'}`);
-  console.log(`[Config Check] JWT Secret: ${process.env.JWT_SECRET ? 'Configured [REDACTED]' : 'Using default fallback'}`);
+  console.log(`[Config Check] MongoDB URI: ${mongoUri ? 'Configured [REDACTED]' : 'Not set (using in-memory fallback)'}`);
+  console.log(`[Config Check] JWT Secret: ${jwtSecretEnv ? 'Configured [REDACTED]' : 'Using default fallback'}`);
+
+  if (isProd) {
+    if (!jwtSecretEnv || jwtSecretEnv === 'researchproof-super-secure-jwt-secret-key-32chars' || jwtSecretEnv === 'replace-with-a-long-random-secret' || jwtSecretEnv.length < 32) {
+      console.error('[CRITICAL SECURITY ERROR] Production startup halted: Insecure or default JWT_SECRET detected. Provide a 32+ character high-entropy secret.');
+      process.exit(1);
+    }
+    if (!mongoUri || mongoUri.includes('localhost:5173')) {
+      console.error('[CRITICAL DATA INTEGRITY ERROR] Production startup halted: MONGODB_URI is not set. Production must not silently use temporary in-memory storage.');
+      process.exit(1);
+    }
+  }
 }
 
 // Start Express server
@@ -4359,19 +4338,27 @@ if (!isTestEnv) {
   });
 }
 
-// Connect to MongoDB if URI is configured (non-blocking fallback)
+// Connect to MongoDB if URI is configured (non-blocking fallback for dev/test; mandatory for prod)
 const mongoUri = process.env.MONGODB_URI;
 if (mongoUri && !mongoUri.includes('localhost:5173')) {
-  mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 4000 })
+  mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 5000 })
     .then(() => {
       seedDemoUserToDb();
       console.log(`Connected to MongoDB successfully at ${mongoUri.split('@').pop()}`);
     })
     .catch((err) => {
-      console.warn(`[Notice] MongoDB connection attempt failed: ${err.message}`);
+      console.error(`[CRITICAL] MongoDB connection attempt failed: ${err.message}`);
+      if (process.env.NODE_ENV === 'production') {
+        console.error('[FATAL] Failed to connect to MongoDB Atlas in production. Halting startup.');
+        process.exit(1);
+      }
       console.log(`Running with In-Memory Dev Store fallback: All features (Register, Login, Projects, Revisions) are fully functional!`);
     });
 } else {
+  if (process.env.NODE_ENV === 'production') {
+    console.error('[FATAL] MONGODB_URI is required in production. In-memory storage is disallowed in production.');
+    process.exit(1);
+  }
   console.log(`Running with In-Memory Dev Store fallback: All features (Register, Login, Projects, Revisions) are fully functional!`);
 }
 

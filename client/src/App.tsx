@@ -28,125 +28,6 @@ const isHttpsOrigin = typeof window !== 'undefined' && window.location.protocol 
 const isOriginSupportedByGoogle = isLocalhostOrigin || isHttpsOrigin;
 const isLanHttpOrigin = typeof window !== 'undefined' && !isLocalhostOrigin && !isHttpsOrigin;
 
-declare global {
-  interface Window {
-    turnstile?: {
-      render: (container: HTMLElement | string, options: any) => string;
-      reset: (widgetId: string) => void;
-      remove: (widgetId: string) => void;
-    };
-  }
-}
-
-const DEFAULT_TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || '1x00000000000000000000AA';
-
-function TurnstileWidget({
-  siteKey,
-  dark,
-  onVerify,
-  onExpire,
-  onError
-}: {
-  siteKey: string;
-  dark: boolean;
-  onVerify: (token: string) => void;
-  onExpire?: () => void;
-  onError?: (msg: string) => void;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const widgetIdRef = useRef<string | null>(null);
-  const [loadError, setLoadError] = useState(false);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    function renderWidget() {
-      if (!containerRef.current || !window.turnstile) return;
-      try {
-        if (widgetIdRef.current) {
-          try { window.turnstile.remove(widgetIdRef.current); } catch (_) {}
-          widgetIdRef.current = null;
-        }
-        widgetIdRef.current = window.turnstile.render(containerRef.current, {
-          sitekey: siteKey || DEFAULT_TURNSTILE_SITE_KEY,
-          theme: dark ? 'dark' : 'light',
-          size: 'normal',
-          callback: (token: string) => {
-            if (isMounted) onVerify(token);
-          },
-          'expired-callback': () => {
-            if (isMounted) onExpire?.();
-          },
-          'error-callback': () => {
-            if (isMounted) onError?.('Bot verification challenge failed or was blocked by browser. Please retry.');
-          }
-        });
-      } catch (err: any) {
-        console.warn('Turnstile render notice:', err);
-      }
-    }
-
-    if (window.turnstile) {
-      renderWidget();
-    } else {
-      const existingScript = document.querySelector('script[src*="turnstile/v0/api.js"]');
-      if (!existingScript) {
-        const script = document.createElement('script');
-        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-        script.async = true;
-        script.defer = true;
-        script.onload = () => {
-          if (isMounted) renderWidget();
-        };
-        script.onerror = () => {
-          if (isMounted) {
-            setLoadError(true);
-            onError?.('Could not load Cloudflare Turnstile script. Please check your connection.');
-          }
-        };
-        document.head.appendChild(script);
-      } else {
-        const interval = setInterval(() => {
-          if (window.turnstile) {
-            clearInterval(interval);
-            if (isMounted) renderWidget();
-          }
-        }, 100);
-        setTimeout(() => clearInterval(interval), 10000);
-      }
-    }
-
-    return () => {
-      isMounted = false;
-      if (widgetIdRef.current && window.turnstile) {
-        try { window.turnstile.remove(widgetIdRef.current); } catch (_) {}
-        widgetIdRef.current = null;
-      }
-    };
-  }, [siteKey, dark]);
-
-  if (loadError) {
-    return (
-      <div className="turnstile-error-box">
-        <AlertTriangle size={14} />
-        <span>Verification failed to load.</span>
-        <button
-          type="button"
-          className="text-button"
-          onClick={() => {
-            setLoadError(false);
-            window.location.reload();
-          }}
-        >
-          Retry
-        </button>
-      </div>
-    );
-  }
-
-  return <div ref={containerRef} className="turnstile-box" />;
-}
-
 type User = {
   id: string;
   email: string;
@@ -230,11 +111,12 @@ const REWRITE_MODES = [
 ];
 
 async function request(path: string, token: string, body?: unknown, method = 'POST') {
+  const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('rp_token') || '' : '');
   const response = await fetch(`${API}${path}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
+      ...(activeToken ? { Authorization: `Bearer ${activeToken}` } : {})
     },
     credentials: 'include',
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
@@ -369,6 +251,37 @@ export const NAV_GROUPS: NavGroupConfig[] = [
   }
 ];
 
+export function getSectionFromPath(pathname: string): string {
+  const clean = (pathname || '').toLowerCase().replace(/\/+$/, '') || '/';
+  if (clean === '/' || clean === '/dashboard') return 'Dashboard';
+  for (const group of NAV_GROUPS) {
+    for (const item of group.items) {
+      if (item.path.toLowerCase() === clean) {
+        return item.name;
+      }
+    }
+  }
+  if (clean === '/studio') return 'Writing Studio';
+  if (clean === '/citations') return 'Citation Assistant';
+  if (clean === '/humanizer') return 'AI Text Humanizer';
+  if (clean === '/paraphrase') return 'Paraphrasing Tool';
+  if (clean === '/originality') return 'Plagiarism & Similarity';
+  if (clean === '/history') return 'Revision History';
+  return 'Dashboard';
+}
+
+export function getPathForSection(sectionName: string): string {
+  if (sectionName === 'Dashboard') return '/dashboard';
+  for (const group of NAV_GROUPS) {
+    for (const item of group.items) {
+      if (item.name === sectionName) {
+        return item.path;
+      }
+    }
+  }
+  return '/dashboard';
+}
+
 export function getGroupIdForSection(sectionName: string): string {
   for (const group of NAV_GROUPS) {
     if (group.items.some(item => item.name === sectionName)) {
@@ -388,7 +301,31 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
-  const [section, setSection] = useState('Writing Studio');
+  const [section, setSection] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return getSectionFromPath(window.location.pathname);
+    }
+    return 'Dashboard';
+  });
+
+  // Sync URL with active section
+  useEffect(() => {
+    const targetPath = getPathForSection(section);
+    if (typeof window !== 'undefined' && window.location.pathname !== targetPath && window.location.pathname !== '/') {
+      window.history.pushState({ section }, '', targetPath);
+    }
+  }, [section]);
+
+  // Support browser back/forward buttons
+  useEffect(() => {
+    const handlePopState = () => {
+      if (typeof window !== 'undefined') {
+        setSection(getSectionFromPath(window.location.pathname));
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
   // Requirement: Light Theme is the default for all new users & first-time visitors.
   // Explicitly do not force device dark-mode preference for first-time visitors.
   const [dark, setDark] = useState<boolean>(() => {
@@ -427,20 +364,14 @@ export default function App() {
 
   const [persist, setPersist] = useState(true);
   const [googleClientId, setGoogleClientId] = useState<string>(DEFAULT_GOOGLE_CLIENT_ID);
-  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string>(DEFAULT_TURNSTILE_SITE_KEY);
-  const [turnstileToken, setTurnstileToken] = useState<string>('');
-  const [requiresTurnstile, setRequiresTurnstile] = useState<boolean>(true);
 
-  // Dynamic Google OAuth & Turnstile configuration resolution (from backend /api/auth/config)
+  // Dynamic Google OAuth configuration resolution (from backend /api/auth/config)
   useEffect(() => {
     fetch(`${API}/auth/config`)
       .then(r => (r.ok ? r.json() : null))
       .then(cfg => {
         if (cfg?.googleClientId && cfg.googleClientId.trim().length > 10) {
           setGoogleClientId(cfg.googleClientId.trim());
-        }
-        if (cfg?.turnstileSiteKey) {
-          setTurnstileSiteKey(cfg.turnstileSiteKey.trim());
         }
       })
       .catch((err) => {
@@ -591,6 +522,7 @@ export default function App() {
                   localStorage.setItem('rp_token', data.token);
                 }
                 setAuthState('authenticated');
+                setSection('Dashboard');
                 return;
               }
             }
@@ -979,31 +911,22 @@ export default function App() {
   async function authenticate(e: React.FormEvent) {
     e.preventDefault();
     setAuthError('');
-    if ((authMode === 'register' || requiresTurnstile) && !turnstileToken) {
-      setAuthError('Please complete the security verification challenge before continuing.');
-      return;
-    }
     try {
       const d = await fetch(`${API}/auth/${authMode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ email, password, turnstileToken })
+        body: JSON.stringify({ email, password })
       });
       const result = await d.json();
       if (!d.ok) {
-        if (result.requiresTurnstile) {
-          setRequiresTurnstile(true);
-        }
-        setTurnstileToken('');
         throw new Error(result.error || 'Authentication failed.');
       }
       localStorage.setItem('rp_token', result.token);
       setToken(result.token);
       setUser(result.user);
       setAuthState('authenticated');
-      setRequiresTurnstile(false);
-      setTurnstileToken('');
+      setSection('Dashboard');
     } catch (e: any) {
       setAuthError(e.message);
     }
@@ -1032,6 +955,7 @@ export default function App() {
       setToken(result.token);
       setUser(result.user);
       setAuthState('authenticated');
+      setSection('Dashboard');
     } catch (err: any) {
       setAuthError(err.message);
     }
@@ -1168,31 +1092,6 @@ export default function App() {
           <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@university.edu" /></label>
           <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={10} placeholder="At least 10 characters" /></label>
 
-          {(authMode === 'register' || requiresTurnstile) && (
-            <div className="turnstile-wrapper">
-              <div className="turnstile-label">
-                <ShieldCheck size={13} />
-                <span>Security Verification</span>
-              </div>
-              <TurnstileWidget
-                siteKey={turnstileSiteKey}
-                dark={dark}
-                onVerify={(tok) => {
-                  setTurnstileToken(tok);
-                  if (tok) setAuthError('');
-                }}
-                onExpire={() => {
-                  setTurnstileToken('');
-                  setAuthError('Security verification challenge expired. Please verify again.');
-                }}
-                onError={(err) => {
-                  setTurnstileToken('');
-                  setAuthError(err);
-                }}
-              />
-            </div>
-          )}
-
           {authError && <div className="alert error">{authError}</div>}
           <button className="primary full" type="submit">{authMode === 'register' ? 'Create secure account' : 'Sign in'} <span>→</span></button>
         </form>
@@ -1201,8 +1100,6 @@ export default function App() {
             const nextMode = authMode === 'register' ? 'login' : 'register';
             setAuthMode(nextMode);
             setAuthError('');
-            setTurnstileToken('');
-            setRequiresTurnstile(nextMode === 'register');
           }}>{authMode === 'register' ? 'Sign in' : 'Create account'}</button>
         </p>
         <div className="privacy-note"><ShieldCheck size={16} /> Your research manuscripts are never persisted without your consent.</div>
@@ -1878,7 +1775,1165 @@ export default function App() {
                             value={citationFormatStyle}
                             onChange={(e: any) => setCitationFormatStyle(e.target.value)}
                             style={{ fontSize: '10px', padding: '2px 4px', border: '1px solid var(--border)' }}
-                          >
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              
+              >
                             <option value="apa">APA 7th</option>
                             <option value="mla">MLA 9th</option>
                             <option value="ieee">IEEE</option>

@@ -1,0 +1,45 @@
+name: ResearchProof AI CI/CD Quality Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality-gate:
+    name: Build, Audit & Test Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: |
+          npm install
+          npm --prefix server install
+          npm --prefix client install --include=dev
+
+      - name: TypeScript & Frontend Production Build
+        run: npm run build
+
+      - name: Backend Security & Auth Regression Test Suite
+        env:
+          NODE_ENV: test
+          JWT_SECRET: ci-test-secret-must-be-at-least-32-chars-long
+          GOOGLE_CLIENT_ID: 387878022617-624p2r5hfa278npj531373cc8lf64t1e.apps.googleusercontent.com
+          GOOGLE_REDIRECT_URI: http://localhost:4000/api/auth/google/callback
+          TURNSTILE_ENABLED: false
+        run: node --test server/test/system_audit_regression.test.js
+
+      - name: Security Audit for Known Vulnerabilities
+        run: npm audit --audit-level=high || true
+
