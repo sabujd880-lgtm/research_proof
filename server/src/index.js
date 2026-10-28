@@ -102,9 +102,21 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 250, standardHeaders: true,
 // Session Cookie Management (Section 4 & 5)
 function getCookieOptions(req) {
   const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true' || Boolean(process.env.RENDER_EXTERNAL_URL);
-  const origin = req?.headers?.origin || req?.headers?.referer || '';
-  const isCrossOrigin = Boolean(origin && !origin.includes('.onrender.com') && !origin.includes('localhost') && !origin.includes('127.0.0.1'));
   
+  // For same-origin Render deployments, always use host-only SameSite: Lax
+  // Never fall back to referer, because OAuth redirect from Google sets referer to accounts.google.com
+  let isCrossOrigin = false;
+  const originHeader = req?.headers?.origin;
+  if (originHeader) {
+    try {
+      const originHost = new URL(originHeader).host;
+      const reqHost = req?.headers?.host;
+      if (originHost && reqHost && originHost !== reqHost && !originHost.includes('google.com')) {
+        isCrossOrigin = true;
+      }
+    } catch (_) {}
+  }
+
   return {
     httpOnly: true,
     secure: isProduction,
@@ -774,7 +786,7 @@ apiRouter.get('/auth/google/start', (req, res) => {
   const cookieOpts = {
     httpOnly: true,
     secure: isProduction,
-    sameSite: isProduction ? 'none' : 'lax',
+    sameSite: 'lax',
     path: '/',
     maxAge: 15 * 60 * 1000 // 15 minutes
   };
@@ -821,8 +833,10 @@ async function handleGoogleOAuthCallback(req, res, next) {
       path: '/'
     };
     for (const name of ['rp_oauth_state', 'rp_oauth_verifier', 'rp_oauth_return', 'rp_oauth_redirect_uri']) {
-      res.clearCookie(name, { ...opts, sameSite: isProduction ? 'none' : 'lax' });
       res.clearCookie(name, { ...opts, sameSite: 'lax' });
+      if (isProduction) {
+        res.clearCookie(name, { ...opts, sameSite: 'none' });
+      }
     }
   };
 
@@ -861,6 +875,25 @@ async function handleGoogleOAuthCallback(req, res, next) {
     return sendAuthError('No authorization code returned from Google.');
   }
 
+  // Consume OAuth memory session state immediately to prevent state replay
+  if (incomingState) {
+    app.locals.oauthSessions?.delete(incomingState);
+  }
+
+  // Anti-replay: Track and reject authorization code reuse / duplicate callback invocations
+  if (!app.locals.usedAuthCodes) {
+    app.locals.usedAuthCodes = new Set();
+  }
+  const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+  if (app.locals.usedAuthCodes.has(codeHash)) {
+    console.warn('[Google OAuth Callback] Authorization code reuse attempted (duplicate callback).');
+    return sendAuthError('The Google authorization code has already been used (invalid_grant). Please sign in again.');
+  }
+  app.locals.usedAuthCodes.add(codeHash);
+  setTimeout(() => {
+    app.locals.usedAuthCodes?.delete(codeHash);
+  }, 10 * 60 * 1000);
+
   try {
     const rawClientId = getGoogleClientId();
     // Consistent redirect_uri: MUST match the exact redirect_uri used during the authorization request
@@ -874,8 +907,11 @@ async function handleGoogleOAuthCallback(req, res, next) {
       grant_type: 'authorization_code',
       code_verifier: codeVerifier
     });
-    if (process.env.GOOGLE_CLIENT_SECRET) {
-      tokenParams.set('client_secret', process.env.GOOGLE_CLIENT_SECRET.trim());
+    const clientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+    if (!clientSecret) {
+      console.warn('[Google OAuth Token Exchange] WARNING: GOOGLE_CLIENT_SECRET is missing from environment. Google Web Client token exchange may fail with invalid_client.');
+    } else {
+      tokenParams.set('client_secret', clientSecret);
     }
 
     const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
@@ -886,13 +922,39 @@ async function handleGoogleOAuthCallback(req, res, next) {
 
     if (!tokenRes.ok) {
       const errText = await tokenRes.text().catch(() => '');
+      let googleError = 'token_exchange_failed';
+      let googleErrorDesc = '';
+      try {
+        const errJson = JSON.parse(errText);
+        googleError = errJson.error || googleError;
+        googleErrorDesc = errJson.error_description || '';
+      } catch (_) {
+        googleErrorDesc = (errText || '').slice(0, 200);
+      }
+
+      // Safe, sanitized logging without exposing code, secret, or tokens
       console.error('[Google OAuth Token Exchange Failure]', {
         status: tokenRes.status,
-        redirectUriSent: redirectUri,
-        clientIdUsed: rawClientId,
-        response: errText
+        error: googleError,
+        description: googleErrorDesc,
+        clientIdUsed: rawClientId ? `${rawClientId.substring(0, 15)}...` : 'none',
+        hasClientSecret: Boolean(clientSecret),
+        redirectUriSent: redirectUri
       });
-      return sendAuthError('Google token exchange failed. Please verify Client Secret and Redirect URI in Google Cloud Console.');
+
+      // Distinguish specific failure reasons according to RFC 6749 & Google OAuth specifications
+      let userFriendlyMsg = 'Google authentication failed. Please try again.';
+      if (googleError === 'invalid_client') {
+        userFriendlyMsg = `Google OAuth client authentication failed (invalid_client). The GOOGLE_CLIENT_SECRET in Render environment settings does not match Client ID ${rawClientId ? `${rawClientId.substring(0, 15)}...` : ''}. Please verify in Google Cloud Console and Render.`;
+      } else if (googleError === 'invalid_grant') {
+        userFriendlyMsg = 'Google authorization code is invalid, expired, or already used (invalid_grant). Please try signing in again.';
+      } else if (googleError === 'redirect_uri_mismatch') {
+        userFriendlyMsg = `Google redirect URI mismatch (redirect_uri_mismatch). Expected registered URI: ${redirectUri}`;
+      } else if (googleErrorDesc) {
+        userFriendlyMsg = `Google authentication failed: ${googleErrorDesc}`;
+      }
+
+      return sendAuthError(userFriendlyMsg, { google_error: googleError });
     }
 
     const tokenData = await tokenRes.json();

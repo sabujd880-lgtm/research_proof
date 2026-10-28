@@ -798,4 +798,98 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     assert.equal(unauthLink.status, 401, 'Should require authentication with 401');
   });
 
+  // --- Test 25: Priority 8 End-to-End OAuth Callback to /api/auth/me Integration Test ---
+  await t.test('25. End-to-End OAuth Callback: captures real session cookie and authenticates /api/auth/me', async () => {
+    const originalFetch = globalThis.fetch;
+    const testGoogleId = `int-google-${Date.now()}`;
+    const testEmail = `oauth-integration-${Date.now()}@test.edu`;
+    const testDisplayName = 'OAuth Integration Researcher';
+
+    // 1. Intercept only Google token exchange endpoint
+    globalThis.fetch = async (url, options) => {
+      if (typeof url === 'string' && url.includes('oauth2.googleapis.com/token')) {
+        return new Response(JSON.stringify({
+          id_token: 'fake-jwt-id-token-for-test',
+          access_token: 'fake-access-token',
+          expires_in: 3600,
+          token_type: 'Bearer'
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return originalFetch(url, options);
+    };
+
+    setGoogleTokenVerifier(async (idToken) => ({
+      googleId: testGoogleId,
+      email: testEmail,
+      displayName: testDisplayName,
+      avatarUrl: 'https://example.com/avatar.jpg',
+      emailVerified: true
+    }));
+
+    try {
+      // Step A: Hit /api/auth/google/start to initiate flow and obtain state & PKCE cookies
+      const startRes = await fetch(`${baseUrl}/api/auth/google/start`, { redirect: 'manual' });
+      assert.equal(startRes.status, 302, 'Start route must redirect to Google authorization');
+      
+      const rawCookies = startRes.headers.getSetCookie ? startRes.headers.getSetCookie() : [startRes.headers.get('set-cookie')].filter(Boolean);
+      const cookieHeader = rawCookies.map(c => c.split(';')[0]).join('; ');
+      
+      const redirectLocation = startRes.headers.get('location');
+      const authUrl = new URL(redirectLocation);
+      const state = authUrl.searchParams.get('state');
+      assert.ok(state, 'Start endpoint must generate state parameter');
+
+      // Step B: Invoke actual OAuth callback with the issued state & authorization code
+      const callbackRes = await fetch(`${baseUrl}/api/auth/google/callback?state=${state}&code=test-auth-code-${Date.now()}`, {
+        headers: { Cookie: cookieHeader },
+        redirect: 'manual'
+      });
+      assert.equal(callbackRes.status, 302, 'Callback must redirect on successful authentication');
+      
+      const callbackLocation = callbackRes.headers.get('location');
+      assert.match(callbackLocation, /auth_status=google_success/, 'Redirect must indicate google_success');
+      assert.match(callbackLocation, /ticket=/, 'Redirect must supply claim ticket');
+
+      // Step C: Extract the issued application session cookie (rp_session)
+      const callbackCookies = callbackRes.headers.getSetCookie ? callbackRes.headers.getSetCookie() : [callbackRes.headers.get('set-cookie')].filter(Boolean);
+      const sessionCookie = callbackCookies.find(c => c.startsWith('rp_session='));
+      assert.ok(sessionCookie, 'Callback must issue rp_session cookie header');
+      const sessionCookieValue = sessionCookie.split(';')[0];
+      assert.match(sessionCookie, /SameSite=Lax/i, 'Session cookie must enforce SameSite=Lax for same-origin Render deployment');
+      assert.match(sessionCookie, /HttpOnly/i, 'Session cookie must enforce HttpOnly');
+
+      // Step D: Send the issued session cookie directly to /api/auth/me WITHOUT mocking the session
+      const meRes = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: { Cookie: sessionCookieValue }
+      });
+      assert.equal(meRes.status, 200, '/api/auth/me must return HTTP 200 when authenticated with issued session cookie');
+      const meData = await meRes.json();
+      assert.equal(meData.user.email, testEmail, 'User profile email must match Google account');
+      assert.equal(meData.user.displayName, testDisplayName, 'User profile displayName must match Google account');
+      assert.equal(meData.user.role, 'researcher', 'Default role must be researcher');
+
+      // Step E: Session persistence - Calling /api/auth/me a second time retains valid session
+      const refreshRes = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: { Cookie: sessionCookieValue }
+      });
+      assert.equal(refreshRes.status, 200, 'Page refresh must preserve session');
+
+      // Step F: Logout clears session
+      const logoutRes = await fetch(`${baseUrl}/api/auth/logout`, {
+        method: 'POST',
+        headers: { Cookie: sessionCookieValue }
+      });
+      assert.equal(logoutRes.status, 200, 'Logout must succeed');
+
+      // Step G: Tampered/invalid cookie rejected by /api/auth/me
+      const invalidMeRes = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: { Cookie: 'rp_session=invalid.tampered.token' }
+      });
+      assert.equal(invalidMeRes.status, 401, 'Invalid session cookie must return 401');
+
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
 });

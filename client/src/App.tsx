@@ -630,6 +630,9 @@ export default function App() {
 
         // 5. Unauthenticated session
         if (isMounted) {
+          if (authStatus === 'google_success') {
+            setAuthError('Google authentication succeeded, but an active application session could not be established. Please ensure cookies are allowed and try signing in again.');
+          }
           setUser(null);
           setToken('');
           localStorage.removeItem('rp_token');
