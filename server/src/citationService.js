@@ -11,7 +11,7 @@
 import { DoiCache } from './models.js';
 
 // In-memory cache fallback for development/test runs
-const memDoiCache = new Map();
+export const memDoiCache = new Map();
 
 /**
  * Normalizes DOI strings into clean standard identifiers (e.g., 10.1038/s41586-020-2649-2)

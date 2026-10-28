@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { app } from '../src/index.js';
+import { memDoiCache } from '../src/citationService.js';
 
 let server;
 let pipeName;
@@ -19,12 +20,14 @@ function api(path, options = {}) {
         ...(options.headers || {})
       }
     }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => {
+        const rawBuffer = Buffer.concat(chunks);
+        const text = rawBuffer.toString('utf8');
         let body = {};
-        try { body = data ? JSON.parse(data) : {}; } catch (_) { body = data; }
-        resolve({ status: res.statusCode, headers: res.headers, body });
+        try { body = text ? JSON.parse(text) : {}; } catch (_) { body = text; }
+        resolve({ status: res.statusCode, headers: res.headers, body, rawBuffer });
       });
     });
     req.on('error', reject);
@@ -54,6 +57,7 @@ test('ResearchProof AI — Comprehensive System & Auth Audit Suite', async (t) =
   let userEmail = `auditor-${Date.now()}@university.edu`;
   const userPassword = 'StrongPassword123!';
   let docId = '';
+  let scanId = '';
 
   // 1. Health Endpoints
   await t.test('1. Health check works on both /api and /api/v1 prefixes', async () => {
@@ -334,5 +338,74 @@ test('ResearchProof AI — Comprehensive System & Auth Audit Suite', async (t) =
     });
     assert.equal(res.status, 400);
     assert.match(res.body.error, /Unsupported file format/i);
+    userToken = activeTok;
+  });
+
+  // 21. Research Tool: TextGuard Similarity Scan
+  await t.test('21. Research Integrity Tool: TextGuard scan calculates similarity and hashes', async () => {
+    const scanRes = await api('/api/textguard/scan', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${userToken}` },
+      body: {
+        documentTitle: 'Econometric Estimation Study',
+        text: 'This paper evaluates high dimensional vector autoregressions with sparse factor structures across macroeconomic time series.',
+        documentId: docId
+      }
+    });
+    assert.equal(scanRes.status, 200);
+    assert.ok(scanRes.body.sha256, 'Must generate cryptographic document hash');
+    assert.ok(scanRes.body.status === 'completed' || scanRes.body.status === 'clean');
+    assert.ok(typeof scanRes.body.analyzedWordCount === 'number');
+    scanId = scanRes.body._id || scanRes.body.id;
+    assert.ok(scanId, 'Scan must produce persistent ID');
+  });
+
+  // 22. PDF Report Generation & Export
+  await t.test('22. PDF Report Generation: Downloadable binary PDF produced for audit scan', async () => {
+    const pdfRes = await api(`/api/textguard/scans/${scanId}/report`, {
+      headers: { Authorization: `Bearer ${userToken}` }
+    });
+    assert.equal(pdfRes.status, 200);
+    assert.equal(pdfRes.headers['content-type'], 'application/pdf');
+    assert.ok(pdfRes.rawBuffer.length > 50, 'PDF buffer must contain binary payload');
+  });
+
+  // 23. DOI Verification & Citation Lookup
+  await t.test('23. DOI Verification: Pre-seeded DOI returns structured metadata with APA/MLA/IEEE formats', async () => {
+    const testDoi = '10.1038/s41586-020-2649-2';
+    memDoiCache.set(testDoi, {
+      title: 'Array programming with NumPy',
+      authors: [{ given: 'Charles R.', family: 'Harris' }, { given: 'K. Jarrod', family: 'Millman' }],
+      year: 2020,
+      journal: 'Nature',
+      volume: '585',
+      pages: '357-362',
+      doi: testDoi
+    });
+
+    const doiRes = await api('/api/citations/lookup', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${userToken}` },
+      body: { doi: testDoi }
+    });
+    assert.equal(doiRes.status, 200);
+    assert.equal(doiRes.body.metadata?.doi, testDoi);
+    assert.ok(doiRes.body.formatted?.apa?.includes('Harris'));
+    assert.ok(doiRes.body.formatted?.mla?.includes('Harris'));
+    assert.ok(doiRes.body.formatted?.ieee?.includes('Harris'));
+  });
+
+  // 24. End-to-End Workflow: Post-Logout Protected Resource Access Denied
+  await t.test('24. Logout Security: Access to protected endpoints strictly denied after logout', async () => {
+    const logoutRes = await api('/api/auth/logout', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${userToken}` }
+    });
+    assert.equal(logoutRes.status, 200);
+
+    const docAccess = await api('/api/documents', {
+      headers: { Authorization: `Bearer ${userToken}` }
+    });
+    assert.equal(docAccess.status, 401, 'Subsequent request with revoked token must return 401');
   });
 });

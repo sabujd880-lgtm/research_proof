@@ -262,16 +262,21 @@ export function getSectionFromPath(pathname: string): string {
     }
   }
   if (clean === '/studio') return 'Writing Studio';
-  if (clean === '/citations') return 'Citation Assistant';
+  if (clean === '/citations' || clean === '/reference-manager') return 'Reference Manager';
   if (clean === '/humanizer') return 'AI Text Humanizer';
   if (clean === '/paraphrase') return 'Paraphrasing Tool';
-  if (clean === '/originality') return 'Plagiarism & Similarity';
+  if (clean === '/originality' || clean === '/plagiarism-similarity') return 'Plagiarism & Similarity';
   if (clean === '/history') return 'Revision History';
+  if (clean === '/settings') return 'Settings';
   return 'Dashboard';
 }
 
 export function getPathForSection(sectionName: string): string {
   if (sectionName === 'Dashboard') return '/dashboard';
+  if (sectionName === 'Originality Review') return '/plagiarism-similarity';
+  if (sectionName === 'AI Assessment') return '/ai-authorship';
+  if (sectionName === 'Citation Assistant') return '/reference-manager';
+  if (sectionName === 'Citation Checker') return '/citation-formatter';
   for (const group of NAV_GROUPS) {
     for (const item of group.items) {
       if (item.name === sectionName) {
@@ -3350,6 +3355,15 @@ export default function App() {
 
           {section === 'Platform Audit Logs' && user?.role === 'admin' && (
             <AdminAuditLogsPage token={token} setError={setError} />
+          )}
+
+          {/* Access Restricted fallback for non-admin accounts */}
+          {(section === 'Admin Overview' || section === 'User Management' || section === 'Platform Audit Logs') && user?.role !== 'admin' && (
+            <div className="card" style={{ padding: '3rem', textAlign: 'center', margin: '2rem auto', maxWidth: '520px' }}>
+              <h2 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.5rem' }}>Access Restricted</h2>
+              <p className="muted" style={{ marginBottom: '1.5rem' }}>Administrator privileges are required to view this section.</p>
+              <button className="primary small" onClick={() => setSection('Dashboard')}>Return to Dashboard</button>
+            </div>
           )}
 
           {/* PHASE 5: LATEX EXPORT STUDIO VIEW */}
