@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { app, resolveMongoUri, getSanitizedMongoDiagnostics } from '../src/index.js';
+import { app, resolveMongoUri, getSanitizedMongoDiagnostics, setTurnstileVerifier } from '../src/index.js';
 import { memDoiCache } from '../src/citationService.js';
 
 let server;
@@ -106,6 +106,64 @@ test('ResearchProof AI — Comprehensive System & Auth Audit Suite', async (t) =
       body: { email: userEmail, password: userPassword }
     });
     assert.equal(res.status, 409);
+  });
+
+  // 5a. Invalid input rejection
+  await t.test('5a. Registration rejects invalid email and weak passwords (<10 chars)', async () => {
+    const invalidEmailRes = await api('/api/auth/register', {
+      method: 'POST',
+      body: { email: 'invalid-email', password: 'ValidPassword123!' }
+    });
+    assert.equal(invalidEmailRes.status, 400);
+
+    const shortPassRes = await api('/api/auth/register', {
+      method: 'POST',
+      body: { email: `test-${Date.now()}@university.edu`, password: 'short' }
+    });
+    assert.equal(shortPassRes.status, 400);
+  });
+
+  // 5b. When Turnstile is enabled: Missing token rejected
+  await t.test('5b. Verification Challenge: When Turnstile is active, registration without token is rejected', async () => {
+    // Inject mock verifier
+    setTurnstileVerifier(async (token) => {
+      if (!token) return { success: false, error: 'Missing security verification token. Please complete the verification challenge.', code: 'MISSING_TOKEN' };
+      if (token === 'VALID_TEST_TOKEN') return { success: true };
+      return { success: false, error: 'Invalid security verification token.', code: 'INVALID_TOKEN' };
+    });
+
+    try {
+      const res = await api('/api/auth/register', {
+        method: 'POST',
+        body: { email: `turnstile-test-${Date.now()}@university.edu`, password: 'StrongPassword123!' }
+      });
+      assert.equal(res.status, 400);
+      assert.ok(res.body.code === 'MISSING_TOKEN' || res.body.code === 'TURNSTILE_REQUIRED');
+      assert.equal(res.body.requiresTurnstile, true);
+    } finally {
+      setTurnstileVerifier(null);
+    }
+  });
+
+  // 5c. When Turnstile is enabled: Valid token succeeds
+  await t.test('5c. Verification Challenge: When Turnstile is active, registration with valid token succeeds', async () => {
+    setTurnstileVerifier(async (token) => {
+      if (token === 'VALID_TEST_TOKEN') return { success: true };
+      return { success: false, error: 'Invalid token.' };
+    });
+
+    try {
+      const turnstileEmail = `turnstile-success-${Date.now()}@university.edu`;
+      const res = await api('/api/auth/register', {
+        method: 'POST',
+        body: { email: turnstileEmail, password: 'StrongPassword123!', turnstileToken: 'VALID_TEST_TOKEN' }
+      });
+      assert.equal(res.status, 201);
+      assert.ok(res.body.token);
+      assert.equal(res.body.user.email, turnstileEmail);
+    } finally {
+      setTurnstileVerifier(null);
+    }
   });
 
   // 6. Direct Login without Turnstile

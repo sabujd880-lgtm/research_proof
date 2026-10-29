@@ -8,17 +8,22 @@ const DEFAULT_TESTING_SITE_KEY = '1x00000000000000000000AA';
 const DEFAULT_TESTING_SECRET_KEY = '1x0000000000000000000000000000000AA';
 
 export const isTurnstileEnabled = () => {
+  // If a mock verifier has been plugged in (e.g., in automated unit/integration tests), honor it
+  if (turnstileVerifierFn !== verifyTurnstileToken) return true;
   if (process.env.TURNSTILE_ENABLED === 'false') return false;
-  if (process.env.TURNSTILE_ENABLED === 'true') return true;
+  if (process.env.TURNSTILE_ENABLED === 'true') {
+    const siteKey = (process.env.TURNSTILE_SITE_KEY || '').trim();
+    return siteKey.length > 0;
+  }
   return false;
 };
 
 export const getTurnstileSiteKey = () => {
-  return process.env.TURNSTILE_SITE_KEY || DEFAULT_TESTING_SITE_KEY;
+  return (process.env.TURNSTILE_SITE_KEY || DEFAULT_TESTING_SITE_KEY).trim();
 };
 
 export const getTurnstileSecretKey = () => {
-  return process.env.TURNSTILE_SECRET_KEY || DEFAULT_TESTING_SECRET_KEY;
+  return (process.env.TURNSTILE_SECRET_KEY || DEFAULT_TESTING_SECRET_KEY).trim();
 };
 
 // Replay protection cache (tokens cannot be used more than once)

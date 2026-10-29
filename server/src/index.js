@@ -500,17 +500,19 @@ apiRouter.post('/auth/register', async (req, res, next) => {
     if (!parsed.success) return res.status(400).json({ error: 'Enter a valid email and a password of at least 10 characters.' });
     const email = parsed.data.email.toLowerCase();
 
-    // Mandatory Bot Protection for Account Creation
-    const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress;
-    const turnstileToken = req.body?.turnstileToken;
-    const turnstileCheck = await executeTurnstileVerification(turnstileToken, clientIp);
-    if (!turnstileCheck.success) {
-      return res.status(400).json({
-        error: turnstileCheck.error || 'Bot verification required. Please complete the security challenge.',
-        code: turnstileCheck.code || 'TURNSTILE_REQUIRED',
-        requiresTurnstile: true,
-        siteKey: getTurnstileSiteKey()
-      });
+    // Bot Protection for Account Creation (enforced when Turnstile is active)
+    if (isTurnstileEnabled()) {
+      const clientIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress;
+      const turnstileToken = req.body?.turnstileToken;
+      const turnstileCheck = await executeTurnstileVerification(turnstileToken, clientIp);
+      if (!turnstileCheck.success) {
+        return res.status(400).json({
+          error: turnstileCheck.error || 'Bot verification required. Please complete the security challenge.',
+          code: turnstileCheck.code || 'TURNSTILE_REQUIRED',
+          requiresTurnstile: true,
+          siteKey: getTurnstileSiteKey()
+        });
+      }
     }
 
     if (isDbConnected()) {
@@ -700,11 +702,13 @@ apiRouter.get('/auth/config', (req, res) => {
     rawClientId !== 'your-google-oauth-client-id.apps.googleusercontent.com' &&
     rawClientId.trim().length > 10
   );
+  const turnstileActive = isTurnstileEnabled();
   res.json({
     googleClientId: isConfigured ? rawClientId : '',
     googleConfigured: isConfigured,
     googleRedirectUri: getGoogleRedirectUri(req),
-    turnstileSiteKey: isTurnstileEnabled() ? getTurnstileSiteKey() : '',
+    turnstileSiteKey: turnstileActive ? getTurnstileSiteKey() : '',
+    turnstileEnabled: turnstileActive,
     environment: process.env.NODE_ENV || 'development'
   });
 });

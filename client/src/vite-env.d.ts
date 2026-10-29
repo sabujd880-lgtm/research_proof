@@ -8,3 +8,22 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+interface Window {
+  turnstile?: {
+    render: (
+      container: string | HTMLElement,
+      options: {
+        sitekey: string;
+        callback?: (token: string) => void;
+        'error-callback'?: (errorCode: string) => void;
+        'expired-callback'?: () => void;
+        theme?: 'light' | 'dark' | 'auto';
+        size?: 'normal' | 'compact' | 'flexible';
+      }
+    ) => string;
+    reset: (widgetId?: string) => void;
+    remove: (widgetId?: string) => void;
+  };
+}
+

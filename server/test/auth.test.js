@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { app, setGoogleTokenVerifier, setTurnstileVerifier, getGoogleRedirectUri, getBackendOrigin } from '../src/index.js';
+import { User } from '../src/models.js';
 
 let server;
 let baseUrl;
@@ -416,9 +417,10 @@ test('ResearchProof AI — Phase 1 Comprehensive Security & Test Suite', async (
     });
     assert.equal(reg.status, 201);
 
-    // Mark suspended in app.locals.memUsers
+    // Mark suspended in app.locals.memUsers and MongoDB
     const memUser = app.locals.memUsers?.get(suspendedEmail);
     if (memUser) memUser.status = 'suspended';
+    await User.updateOne({ email: suspendedEmail }, { status: 'suspended' }).catch(() => {});
 
     // Attempt login with suspended account
     const loginRes = await api('/api/auth/login', {

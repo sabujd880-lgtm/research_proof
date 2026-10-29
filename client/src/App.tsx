@@ -298,6 +298,94 @@ export function getGroupIdForSection(sectionName: string): string {
   return 'management';
 }
 
+interface TurnstileWidgetProps {
+  siteKey: string;
+  onVerify: (token: string) => void;
+  onExpire?: () => void;
+  onError?: (error: string) => void;
+  dark?: boolean;
+  resetTrigger?: number;
+}
+
+function TurnstileWidget({ siteKey, onVerify, onExpire, onError, dark, resetTrigger }: TurnstileWidgetProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const widgetIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    function renderWidget() {
+      if (!isMounted || !containerRef.current || !window.turnstile || !siteKey) return;
+      if (widgetIdRef.current) {
+        try {
+          window.turnstile.remove(widgetIdRef.current);
+        } catch {}
+        widgetIdRef.current = null;
+      }
+      try {
+        const id = window.turnstile.render(containerRef.current, {
+          sitekey: siteKey,
+          theme: dark ? 'dark' : 'light',
+          callback: (token: string) => {
+            if (isMounted) onVerify(token);
+          },
+          'expired-callback': () => {
+            if (isMounted) onExpire?.();
+          },
+          'error-callback': (err: string) => {
+            if (isMounted) onError?.(err);
+          }
+        });
+        widgetIdRef.current = id;
+      } catch (err: any) {
+        console.warn('Turnstile render warning:', err);
+      }
+    }
+
+    const scriptId = 'cf-turnstile-script';
+    let script = document.getElementById(scriptId) as HTMLScriptElement | null;
+    if (!script) {
+      script = document.createElement('script');
+      script.id = scriptId;
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true;
+      script.defer = true;
+      script.onload = () => {
+        if (window.turnstile) {
+          renderWidget();
+        }
+      };
+      document.head.appendChild(script);
+    } else if (window.turnstile) {
+      renderWidget();
+    } else {
+      script.addEventListener('load', () => {
+        if (window.turnstile) renderWidget();
+      });
+    }
+
+    return () => {
+      isMounted = false;
+      if (widgetIdRef.current && window.turnstile) {
+        try {
+          window.turnstile.remove(widgetIdRef.current);
+        } catch {}
+        widgetIdRef.current = null;
+      }
+    };
+  }, [siteKey, dark]);
+
+  useEffect(() => {
+    if (resetTrigger && widgetIdRef.current && window.turnstile) {
+      try {
+        window.turnstile.reset(widgetIdRef.current);
+      } catch {}
+    }
+  }, [resetTrigger]);
+
+  return <div ref={containerRef} className="cf-turnstile-slot" />;
+}
+
 export default function App() {
   const [token, setToken] = useState(localStorage.getItem('rp_token') || '');
   const [user, setUser] = useState<User | null>(null);
@@ -369,14 +457,21 @@ export default function App() {
 
   const [persist, setPersist] = useState(true);
   const [googleClientId, setGoogleClientId] = useState<string>(DEFAULT_GOOGLE_CLIENT_ID);
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string>('');
+  const [turnstileToken, setTurnstileToken] = useState<string>('');
+  const [requiresTurnstile, setRequiresTurnstile] = useState<boolean>(false);
+  const [turnstileResetCount, setTurnstileResetCount] = useState<number>(0);
 
-  // Dynamic Google OAuth configuration resolution (from backend /api/auth/config)
+  // Dynamic Google OAuth & Turnstile configuration resolution (from backend /api/auth/config)
   useEffect(() => {
     fetch(`${API}/auth/config`)
       .then(r => (r.ok ? r.json() : null))
       .then(cfg => {
         if (cfg?.googleClientId && cfg.googleClientId.trim().length > 10) {
           setGoogleClientId(cfg.googleClientId.trim());
+        }
+        if (cfg?.turnstileSiteKey && cfg.turnstileSiteKey.trim().length > 0) {
+          setTurnstileSiteKey(cfg.turnstileSiteKey.trim());
         }
       })
       .catch((err) => {
@@ -916,15 +1011,39 @@ export default function App() {
   async function authenticate(e: React.FormEvent) {
     e.preventDefault();
     setAuthError('');
+
+    // Pre-flight validation for Turnstile verification
+    if (authMode === 'register' && turnstileSiteKey && !turnstileToken) {
+      setAuthError('Please complete the security verification challenge before continuing.');
+      return;
+    }
+    if (authMode === 'login' && requiresTurnstile && turnstileSiteKey && !turnstileToken) {
+      setAuthError('Security verification required. Please complete the verification challenge.');
+      return;
+    }
+
     try {
+      const payload: Record<string, string> = { email, password };
+      if (turnstileToken) {
+        payload.turnstileToken = turnstileToken;
+      }
+
       const d = await fetch(`${API}/auth/${authMode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify(payload)
       });
       const result = await d.json();
       if (!d.ok) {
+        if (result.requiresTurnstile) {
+          setRequiresTurnstile(true);
+        }
+        if (result.siteKey) {
+          setTurnstileSiteKey(result.siteKey);
+        }
+        setTurnstileToken('');
+        setTurnstileResetCount(c => c + 1);
         throw new Error(result.error || 'Authentication failed.');
       }
       localStorage.setItem('rp_token', result.token);
@@ -1097,6 +1216,29 @@ export default function App() {
           <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@university.edu" /></label>
           <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={10} placeholder="At least 10 characters" /></label>
 
+          {/* Turnstile verification widget rendered if active for registration or flagged for login */}
+          {((authMode === 'register' && Boolean(turnstileSiteKey)) || (authMode === 'login' && requiresTurnstile && Boolean(turnstileSiteKey))) && (
+            <div className="turnstile-container" style={{ margin: '14px 0 8px', minHeight: '65px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <TurnstileWidget
+                siteKey={turnstileSiteKey}
+                onVerify={(tok) => {
+                  setTurnstileToken(tok);
+                  setAuthError('');
+                }}
+                onExpire={() => {
+                  setTurnstileToken('');
+                  setAuthError('Security challenge expired. Please complete it again.');
+                }}
+                onError={(err) => {
+                  setTurnstileToken('');
+                  console.warn('Turnstile widget notice:', err);
+                }}
+                dark={dark}
+                resetTrigger={turnstileResetCount}
+              />
+            </div>
+          )}
+
           {authError && <div className="alert error">{authError}</div>}
           <button className="primary full" type="submit">{authMode === 'register' ? 'Create secure account' : 'Sign in'} <span>→</span></button>
         </form>
@@ -1105,6 +1247,8 @@ export default function App() {
             const nextMode = authMode === 'register' ? 'login' : 'register';
             setAuthMode(nextMode);
             setAuthError('');
+            setTurnstileToken('');
+            setTurnstileResetCount(c => c + 1);
           }}>{authMode === 'register' ? 'Sign in' : 'Create account'}</button>
         </p>
         <div className="privacy-note"><ShieldCheck size={16} /> Your research manuscripts are never persisted without your consent.</div>

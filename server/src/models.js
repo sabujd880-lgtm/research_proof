@@ -27,7 +27,7 @@ const userSchema = new mongoose.Schema({
   },
   usage: {
     dailyRequests: { type: Number, default: 0 },
-    dailyLimit: { type: Number, default: 50 },
+    dailyLimit: { type: mongoose.Schema.Types.Mixed, default: 50 },
     lastResetDate: { type: Date, default: Date.now }
   }
 }, { timestamps: true });
