@@ -181,3 +181,4 @@ The following endpoints remain 100% backward-compatible:
 - `GET /api/v1/projects/:id/pdf-chat`
 - `GET /api/v1/projects/:id/pdf-chat/:chatId`
 - `POST /api/v1/projects/:id/pdf-chat/:chatId/message`
+

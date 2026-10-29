@@ -290,37 +290,96 @@ const synthesisDraftSchema = new mongoose.Schema({
   }]
 }, { timestamps: true });
 
-// Dataset and Analysis Models (Statistical Analysis Studio)
+// Dataset and Analysis Models (Statistical Analysis Studio - Phase 7 Extended)
 const datasetSchema = new mongoose.Schema({
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   name: { type: String, required: true, trim: true },
+  description: { type: String, default: '' },
   fileName: { type: String, default: '' },
+  originalFilename: { type: String, default: '' },
+  fileType: { type: String, default: 'csv' },
+  checksum: { type: String, default: '' },
   rowCount: { type: Number, default: 0 },
   columnCount: { type: Number, default: 0 },
+  missingValueCount: { type: Number, default: 0 },
+  status: { type: String, default: 'ready' },
+  currentVersionNumber: { type: Number, default: 1 },
   columns: [{
     name: { type: String, required: true },
-    type: { type: String, enum: ['numeric', 'categorical', 'date', 'text'], default: 'numeric' },
+    type: { type: String, enum: ['numeric', 'categorical', 'date', 'text', 'boolean'], default: 'numeric' },
+    measurementLevel: { type: String, enum: ['nominal', 'ordinal', 'scale'], default: 'scale' },
     sampleValues: [{ type: mongoose.Schema.Types.Mixed }]
   }],
-  rawData: { type: mongoose.Schema.Types.Mixed, default: [] }
+  rawData: { type: mongoose.Schema.Types.Mixed, default: [] },
+  deletedAt: { type: Date, default: null }
 }, { timestamps: true });
 datasetSchema.index({ projectId: 1, createdAt: -1 });
+
+const datasetVersionSchema = new mongoose.Schema({
+  datasetId: { type: mongoose.Schema.Types.ObjectId, ref: 'Dataset', required: true, index: true },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  versionNumber: { type: Number, required: true },
+  transformationSummary: { type: String, default: 'Initial import' },
+  rowCount: { type: Number, default: 0 },
+  columnCount: { type: Number, default: 0 },
+  checksum: { type: String, default: '' },
+  rawData: { type: mongoose.Schema.Types.Mixed, default: [] }
+}, { timestamps: true });
+
+const datasetVariableSchema = new mongoose.Schema({
+  datasetId: { type: mongoose.Schema.Types.ObjectId, ref: 'Dataset', required: true, index: true },
+  name: { type: String, required: true },
+  label: { type: String, default: '' },
+  dataType: { type: String, enum: ['numeric', 'categorical', 'date', 'text', 'boolean'], default: 'numeric' },
+  measurementLevel: { type: String, enum: ['nominal', 'ordinal', 'scale'], default: 'scale' },
+  missingValueCodes: [{ type: String }],
+  valueLabels: { type: mongoose.Schema.Types.Mixed, default: {} },
+  role: { type: String, enum: ['independent', 'dependent', 'covariate', 'id', 'none'], default: 'none' },
+  summaryStats: { type: mongoose.Schema.Types.Mixed, default: {} }
+}, { timestamps: true });
 
 const analysisSchema = new mongoose.Schema({
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   datasetId: { type: mongoose.Schema.Types.ObjectId, ref: 'Dataset', required: true, index: true },
+  datasetVersionId: { type: mongoose.Schema.Types.ObjectId, ref: 'DatasetVersion' },
+  title: { type: String, default: 'Statistical Analysis' },
   analysisType: {
     type: String,
-    enum: ['descriptive', 't_test', 'anova', 'correlation', 'regression', 'chi_square'],
     required: true
   },
+  variables: { type: mongoose.Schema.Types.Mixed, default: {} },
   parameters: { type: mongoose.Schema.Types.Mixed, default: {} },
+  missingDataPolicy: { type: String, default: 'listwise_deletion' },
+  status: { type: String, default: 'completed' },
   results: { type: mongoose.Schema.Types.Mixed, default: {} },
-  apaReport: { type: String, default: '' }
+  apaReport: { type: String, default: '' },
+  deletedAt: { type: Date, default: null }
 }, { timestamps: true });
 analysisSchema.index({ projectId: 1, datasetId: 1, createdAt: -1 });
+
+const analysisResultSchema = new mongoose.Schema({
+  analysisId: { type: mongoose.Schema.Types.ObjectId, ref: 'Analysis', required: true, index: true },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  numericalResults: { type: mongoose.Schema.Types.Mixed, default: {} },
+  assumptions: { type: mongoose.Schema.Types.Mixed, default: {} },
+  effectSizes: { type: mongoose.Schema.Types.Mixed, default: {} },
+  confidenceIntervals: { type: mongoose.Schema.Types.Mixed, default: {} },
+  diagnostics: { type: mongoose.Schema.Types.Mixed, default: {} },
+  warnings: [{ type: String }],
+  apa7Narrative: { type: String, default: '' },
+  softwareVersions: { type: mongoose.Schema.Types.Mixed, default: {} }
+}, { timestamps: true });
+
+const analysisJobSchema = new mongoose.Schema({
+  analysisId: { type: mongoose.Schema.Types.ObjectId, ref: 'Analysis', required: true, index: true },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  status: { type: String, enum: ['queued', 'running', 'completed', 'failed'], default: 'queued' },
+  progress: { type: Number, default: 0 },
+  error: { type: String, default: null }
+}, { timestamps: true });
 
 // PDF Research Chat Model (Phase 6 Extended)
 const researchChatSchema = new mongoose.Schema({
@@ -844,7 +903,11 @@ export const StudyComparison = mongoose.model('StudyComparison', studyComparison
 export const ResearchGapCandidate = mongoose.model('ResearchGapCandidate', researchGapCandidateSchema);
 export const SynthesisDraft = mongoose.model('SynthesisDraft', synthesisDraftSchema);
 export const Dataset = mongoose.model('Dataset', datasetSchema);
+export const DatasetVersion = mongoose.model('DatasetVersion', datasetVersionSchema);
+export const DatasetVariable = mongoose.model('DatasetVariable', datasetVariableSchema);
 export const Analysis = mongoose.model('Analysis', analysisSchema);
+export const AnalysisResult = mongoose.model('AnalysisResult', analysisResultSchema);
+export const AnalysisJob = mongoose.model('AnalysisJob', analysisJobSchema);
 export const ResearchChat = mongoose.model('ResearchChat', researchChatSchema);
 export const ResearchDocument = mongoose.model('ResearchDocument', researchDocumentSchema);
 export const DocumentChunk = mongoose.model('DocumentChunk', documentChunkSchema);

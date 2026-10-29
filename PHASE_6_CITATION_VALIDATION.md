@@ -84,3 +84,4 @@ When a researcher interacts with the PDF Research Chat:
    - Automatically switches the left-hand Document Viewer to the cited page.
    - Highlights the cited text with an evidence marker.
 3. Researcher can copy the verbatim quote with provenance or export the paper to the Literature Matrix.
+

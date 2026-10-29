@@ -36,3 +36,4 @@
    `git commit -m "feat(phase-6): implement complete PDF Research Chat and Document Intelligence module"`
 3. Push to `main`: `git push origin main`
 4. Render automated deployment will trigger and build both frontend and backend.
+

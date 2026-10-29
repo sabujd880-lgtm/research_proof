@@ -92,3 +92,4 @@ Unlike generic document chat implementations that indiscriminately summarize ent
 - Scans generated responses for all citation tags.
 - Verifies that every cited page number and title prefix corresponds to an actual chunk in the retrieved context set.
 - Stores `CitationEvidence` provenance records with verbatim excerpts, confidence scores, and claims.
+

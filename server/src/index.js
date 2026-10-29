@@ -58,7 +58,11 @@ import {
   ResearchGapCandidate,
   SynthesisDraft,
   Dataset,
+  DatasetVersion,
+  DatasetVariable,
   Analysis,
+  AnalysisResult,
+  AnalysisJob,
   ResearchChat,
   ResearchDocument,
   DocumentChunk,
@@ -113,10 +117,21 @@ export { setTurnstileVerifier };
 
 import {
   computeDescriptive,
+  computeOneSampleTTest,
   computeTTest,
   computeAnova,
+  computeTwoWayAnova,
   computeCorrelation,
   computeLinearRegression,
+  computeMultipleRegression,
+  computeMannWhitneyU,
+  computeWilcoxonSignedRank,
+  computeKruskalWallis,
+  computeChiSquareTest,
+  checkNormalityShapiroWilk,
+  checkLeveneTest,
+  parseDatasetBuffer,
+  applyDatasetTransformations,
   formatApa7StatisticalNarrative
 } from './statService.js';
 import {
@@ -142,9 +157,9 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit
   fileFilter: (_req, file, cb) => {
-    const allowed = /\.(docx|txt|tex|bib|zip|pdf|ris|csv|xlsx|json)$/i;
+    const allowed = /\.(docx|txt|tex|bib|zip|pdf|ris|csv|xlsx|tsv|json)$/i;
     if (!file.originalname.match(allowed)) {
-      const err = new Error('Unsupported file format. Allowed formats: .docx, .tex, .bib, .ris, .pdf, .csv, .xlsx, .json, .txt, .zip.');
+      const err = new Error('Unsupported file format. Allowed formats: .docx, .tex, .bib, .ris, .pdf, .csv, .xlsx, .tsv, .json, .txt, .zip.');
       err.status = 400;
       return cb(err);
     }
@@ -352,7 +367,11 @@ const memStudyComparisons = new Map();
 const memResearchGaps = new Map();
 const memSynthesisDrafts = new Map();
 const memDatasets = new Map();
+const memDatasetVersions = new Map();
+const memDatasetVariables = new Map();
 const memAnalyses = new Map();
+const memAnalysisResults = new Map();
+const memAnalysisJobs = new Map();
 const memResearchChats = new Map();
 const memResearchDocuments = new Map();
 const memDocumentChunks = new Map();
@@ -384,7 +403,11 @@ app.locals.memStudyComparisons = memStudyComparisons;
 app.locals.memResearchGaps = memResearchGaps;
 app.locals.memSynthesisDrafts = memSynthesisDrafts;
 app.locals.memDatasets = memDatasets;
+app.locals.memDatasetVersions = memDatasetVersions;
+app.locals.memDatasetVariables = memDatasetVariables;
 app.locals.memAnalyses = memAnalyses;
+app.locals.memAnalysisResults = memAnalysisResults;
+app.locals.memAnalysisJobs = memAnalysisJobs;
 app.locals.memResearchChats = memResearchChats;
 app.locals.memResearchDocuments = memResearchDocuments;
 app.locals.memDocumentChunks = memDocumentChunks;
@@ -5539,128 +5562,292 @@ apiRouter.post('/pdf-chat/documents/:documentId/link-reference', requireAuth, as
   } catch (e) { next(e); }
 });
 
-// Statistical Analysis Studio Endpoints (Module 5)
+// Statistical Analysis Studio Endpoints (Module 5 & Phase 7 Research-Grade Studio)
+
+// Legacy compatibility endpoint: List datasets for project
 apiRouter.get('/projects/:id/datasets', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
-      const datasets = await Dataset.find({ projectId: req.params.id }).select('-rawData').lean();
+      const datasets = await Dataset.find({ projectId: req.params.id, deletedAt: null }).select('-rawData').lean();
       return res.json(datasets);
     }
-    const datasets = [...memDatasets.values()].filter(d => d.projectId === req.params.id);
+    const datasets = [...memDatasets.values()].filter(d => d.projectId === req.params.id && !d.deletedAt);
     res.json(datasets.map(({ rawData, ...rest }) => rest));
   } catch (e) { next(e); }
 });
 
+// Legacy compatibility endpoint: Upload dataset for project
 apiRouter.post('/projects/:id/datasets', requireAuth, upload.single('file'), async (req, res, next) => {
   try {
     let rows = [];
     let fileName = req.file?.originalname || 'dataset.csv';
+    let fileType = 'csv';
+    let columns = [];
+    let missingValueCount = 0;
 
     if (req.file) {
-      const content = req.file.buffer.toString('utf8');
-      const lines = content.split(/\r?\n/).filter(l => l.trim().length > 0);
-      if (lines.length > 0) {
-        const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
-        for (let i = 1; i < lines.length; i++) {
-          const cells = lines[i].split(',').map(c => c.trim().replace(/^["']|["']$/g, ''));
-          const rowObj = {};
-          headers.forEach((h, idx) => {
-            rowObj[h] = cells[idx] !== undefined ? cells[idx] : '';
-          });
-          rows.push(rowObj);
-        }
-      }
+      fileName = req.file.originalname;
+      fileType = fileName.endsWith('.xlsx') ? 'xlsx' : 'csv';
+      const parsed = parseDatasetBuffer(req.file.buffer, fileName);
+      rows = parsed.rows;
+      columns = parsed.columns;
+      missingValueCount = parsed.missingValueCount || 0;
     } else if (Array.isArray(req.body?.rows)) {
       rows = req.body.rows;
       fileName = req.body.name || 'manual_data.json';
+      fileType = 'json';
+      const firstRow = rows[0] || {};
+      columns = Object.keys(firstRow).map(colName => {
+        const vals = rows.map(r => r[colName]).filter(v => v !== '' && v !== null && v !== undefined);
+        const isNum = vals.length > 0 && vals.every(v => !isNaN(Number(v)));
+        return {
+          name: colName,
+          type: isNum ? 'numeric' : 'categorical',
+          measurementLevel: isNum ? 'scale' : 'nominal',
+          sampleValues: vals.slice(0, 5)
+        };
+      });
     }
 
     if (rows.length === 0) return res.status(400).json({ error: 'No data rows detected in dataset.' });
 
-    // Infer column types
-    const firstRow = rows[0] || {};
-    const columns = Object.keys(firstRow).map(colName => {
-      const vals = rows.map(r => r[colName]).filter(v => v !== '' && v !== null && v !== undefined);
-      const isNum = vals.length > 0 && vals.every(v => !isNaN(Number(v)));
-      return {
-        name: colName,
-        type: isNum ? 'numeric' : 'categorical',
-        sampleValues: vals.slice(0, 5)
-      };
-    });
-
     const datasetName = req.body?.name || fileName.replace(/\.[^/.]+$/, '');
+    const checksum = crypto.createHash('sha256').update(req.file?.buffer || Buffer.from(JSON.stringify(rows))).digest('hex');
 
     if (isDbConnected()) {
       const dataset = await Dataset.create({
         projectId: req.params.id,
         userId: req.user.id,
+        ownerId: req.user.id,
         name: datasetName,
         fileName,
+        originalFilename: fileName,
+        fileType,
+        checksum,
         rowCount: rows.length,
         columnCount: columns.length,
+        missingValueCount,
+        status: 'ready',
+        currentVersionNumber: 1,
         columns,
-        rawData: rows.slice(0, 1000) // bounded storage
+        rawData: rows.slice(0, 5000)
       });
+
+      await DatasetVersion.create({
+        datasetId: dataset._id,
+        projectId: req.params.id,
+        versionNumber: 1,
+        transformationSummary: 'Initial dataset import',
+        rowCount: rows.length,
+        columnCount: columns.length,
+        checksum,
+        rawData: rows.slice(0, 5000)
+      });
+
+      for (const col of columns) {
+        await DatasetVariable.create({
+          datasetId: dataset._id,
+          name: col.name,
+          label: col.name,
+          dataType: col.type,
+          measurementLevel: col.measurementLevel || (col.type === 'numeric' ? 'scale' : 'nominal'),
+          role: 'none',
+          sampleValues: col.sampleValues
+        });
+      }
+
       return res.status(201).json(dataset);
     }
 
     const datasetId = new mongoose.Types.ObjectId().toString();
     const newDs = {
       _id: datasetId,
+      id: datasetId,
       projectId: req.params.id,
       userId: req.user.id,
+      ownerId: req.user.id,
       name: datasetName,
       fileName,
+      originalFilename: fileName,
+      fileType,
+      checksum,
       rowCount: rows.length,
       columnCount: columns.length,
+      missingValueCount,
+      status: 'ready',
+      currentVersionNumber: 1,
       columns,
-      rawData: rows.slice(0, 1000),
+      rawData: rows.slice(0, 5000),
       createdAt: new Date().toISOString()
     };
     memDatasets.set(datasetId, newDs);
+
+    memDatasetVersions.set(`${datasetId}_v1`, {
+      datasetId,
+      projectId: req.params.id,
+      versionNumber: 1,
+      transformationSummary: 'Initial dataset import',
+      rowCount: rows.length,
+      columnCount: columns.length,
+      checksum,
+      rawData: rows.slice(0, 5000),
+      createdAt: new Date().toISOString()
+    });
+
+    for (const col of columns) {
+      memDatasetVariables.set(`${datasetId}_${col.name}`, {
+        datasetId,
+        name: col.name,
+        label: col.name,
+        dataType: col.type,
+        measurementLevel: col.measurementLevel || (col.type === 'numeric' ? 'scale' : 'nominal'),
+        role: 'none',
+        sampleValues: col.sampleValues
+      });
+    }
+
     res.status(201).json(newDs);
   } catch (e) { next(e); }
 });
 
+// Legacy compatibility endpoint: Get single dataset
 apiRouter.get('/projects/:id/datasets/:datasetId', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
-      const ds = await Dataset.findOne({ _id: req.params.datasetId, projectId: req.params.id }).lean();
+      const ds = await Dataset.findOne({ _id: req.params.datasetId, projectId: req.params.id, deletedAt: null }).lean();
       if (!ds) return res.status(404).json({ error: 'Dataset not found.' });
       return res.json(ds);
     }
     const ds = memDatasets.get(req.params.datasetId);
-    if (!ds) return res.status(404).json({ error: 'Dataset not found.' });
+    if (!ds || ds.deletedAt || (ds.projectId && ds.projectId !== req.params.id)) {
+      return res.status(404).json({ error: 'Dataset not found.' });
+    }
     res.json(ds);
   } catch (e) { next(e); }
 });
 
+// Legacy & Unified statistical analysis execution endpoint
 apiRouter.post('/projects/:id/datasets/:datasetId/analyze', requireAuth, async (req, res, next) => {
   try {
-    const { analysisType, varX, varY, groupVar, paired = false } = req.body || {};
+    const {
+      analysisType,
+      varX,
+      varY,
+      ivs,
+      groupVar,
+      factorA,
+      factorB,
+      paired = false,
+      mu0 = 0,
+      table,
+      confLevel = 0.95
+    } = req.body || {};
 
     let dataset = null;
     if (isDbConnected()) {
-      dataset = await Dataset.findOne({ _id: req.params.datasetId, projectId: req.params.id });
+      dataset = await Dataset.findOne({ _id: req.params.datasetId, projectId: req.params.id, deletedAt: null });
     } else {
       dataset = memDatasets.get(req.params.datasetId);
     }
-    if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
+    if (!dataset || dataset.deletedAt) return res.status(404).json({ error: 'Dataset not found.' });
 
     const rows = dataset.rawData || [];
     let results = {};
+    let assumptions = {};
     let apaReport = '';
 
     switch (analysisType) {
       case 'descriptive': {
         const vals = rows.map(r => r[varX]).filter(v => v !== undefined && v !== '');
-        results = computeDescriptive(vals);
+        results = computeDescriptive(vals, confLevel);
+        const normCheck = checkNormalityShapiroWilk(vals);
+        assumptions = { normality: normCheck };
         apaReport = `Descriptive statistics for ${varX} (N = ${results.count}): Mean = ${results.mean}, SD = ${results.stdDev}, Median = ${results.median}, IQR = ${results.iqr}, Skewness = ${results.skewness}.`;
         break;
       }
+      case 'one_sample_t_test': {
+        const vals = rows.map(r => r[varX]).filter(v => v !== undefined && v !== '');
+        results = computeOneSampleTTest(vals, Number(mu0) || 0, confLevel);
+        assumptions = { normality: checkNormalityShapiroWilk(vals) };
+        apaReport = formatApa7StatisticalNarrative('one_sample_t_test', results, { varX });
+        break;
+      }
       case 'independent_t_test': {
-        // Group by groupVar or compare varX and varY
+        let gA = [];
+        let gB = [];
+        let labelA = 'Group A';
+        let labelB = 'Group B';
+        if (groupVar) {
+          const groupVals = [...new Set(rows.map(r => r[groupVar]))];
+          labelA = String(groupVals[0] || 'Group 1');
+          labelB = String(groupVals[1] || 'Group 2');
+          gA = rows.filter(r => r[groupVar] === groupVals[0]).map(r => r[varX]);
+          gB = rows.filter(r => r[groupVar] === groupVals[1]).map(r => r[varX]);
+        } else {
+          labelA = varX;
+          labelB = varY;
+          gA = rows.map(r => r[varX]);
+          gB = rows.map(r => r[varY]);
+        }
+        results = computeTTest(gA, gB, false, confLevel);
+        assumptions = {
+          normalityA: checkNormalityShapiroWilk(gA),
+          normalityB: checkNormalityShapiroWilk(gB),
+          homogeneity: checkLeveneTest([gA, gB], 'median')
+        };
+        apaReport = formatApa7StatisticalNarrative('independent_t_test', results, { groupA: labelA, groupB: labelB });
+        break;
+      }
+      case 'paired_t_test': {
+        const gA = rows.map(r => r[varX]);
+        const gB = rows.map(r => r[varY]);
+        results = computeTTest(gA, gB, true, confLevel);
+        const diffs = gA.map((v, i) => Number(v) - Number(gB[i])).filter(d => !isNaN(d));
+        assumptions = { normalityOfDiffs: checkNormalityShapiroWilk(diffs) };
+        apaReport = formatApa7StatisticalNarrative('paired_t_test', results, { varX, varY });
+        break;
+      }
+      case 'one_way_anova': {
+        if (!groupVar) return res.status(400).json({ error: 'ANOVA requires a grouping factor (groupVar).' });
+        const distinctGroups = [...new Set(rows.map(r => r[groupVar]))];
+        const groupArrays = distinctGroups.map(gName => rows.filter(r => r[groupVar] === gName).map(r => r[varX]));
+        results = computeAnova(groupArrays);
+        assumptions = {
+          homogeneity: checkLeveneTest(groupArrays, 'median'),
+          normality: checkNormalityShapiroWilk(rows.map(r => r[varX]))
+        };
+        apaReport = formatApa7StatisticalNarrative('one_way_anova', results, { varX });
+        break;
+      }
+      case 'two_way_anova': {
+        const fA = factorA || groupVar;
+        const fB = factorB || varY;
+        const dv = varX;
+        results = computeTwoWayAnova(rows, fA, fB, dv);
+        apaReport = formatApa7StatisticalNarrative('two_way_anova', results);
+        break;
+      }
+      case 'pearson_correlation':
+      case 'spearman_correlation': {
+        const x = rows.map(r => r[varX]);
+        const y = rows.map(r => r[varY]);
+        results = computeCorrelation(x, y, analysisType === 'spearman_correlation' ? 'spearman' : 'pearson', confLevel);
+        assumptions = {
+          normalityX: checkNormalityShapiroWilk(x),
+          normalityY: checkNormalityShapiroWilk(y)
+        };
+        apaReport = formatApa7StatisticalNarrative(analysisType, results, { varX, varY });
+        break;
+      }
+      case 'linear_regression':
+      case 'multiple_linear_regression': {
+        const predictorList = (Array.isArray(ivs) && ivs.length > 0) ? ivs : [varX];
+        const dv = varY;
+        results = computeMultipleRegression(rows, dv, predictorList);
+        apaReport = formatApa7StatisticalNarrative('multiple_linear_regression', results, { varX, varY });
+        break;
+      }
+      case 'mann_whitney_u': {
         let gA = [];
         let gB = [];
         if (groupVar) {
@@ -5671,82 +5858,843 @@ apiRouter.post('/projects/:id/datasets/:datasetId/analyze', requireAuth, async (
           gA = rows.map(r => r[varX]);
           gB = rows.map(r => r[varY]);
         }
-        results = computeTTest(gA, gB, false);
-        apaReport = formatApa7StatisticalNarrative('independent_t_test', results, { groupA: varX, groupB: varY });
+        results = computeMannWhitneyU(gA, gB);
+        apaReport = formatApa7StatisticalNarrative('mann_whitney_u', results, { varX });
         break;
       }
-      case 'paired_t_test': {
+      case 'wilcoxon_signed_rank': {
         const gA = rows.map(r => r[varX]);
         const gB = rows.map(r => r[varY]);
-        results = computeTTest(gA, gB, true);
-        apaReport = formatApa7StatisticalNarrative('paired_t_test', results);
+        results = computeWilcoxonSignedRank(gA, gB);
+        apaReport = `A Wilcoxon signed-rank test indicated a ${results.significant ? 'statistically significant' : 'non-significant'} median difference between paired observations, W = ${results.w}, z = ${results.z}, p = ${results.pValue}.`;
         break;
       }
-      case 'one_way_anova': {
-        if (!groupVar) return res.status(400).json({ error: 'ANOVA requires a grouping factor (groupVar).' });
+      case 'kruskal_wallis': {
+        if (!groupVar) return res.status(400).json({ error: 'Kruskal-Wallis requires a grouping variable (groupVar).' });
         const distinctGroups = [...new Set(rows.map(r => r[groupVar]))];
         const groupArrays = distinctGroups.map(gName => rows.filter(r => r[groupVar] === gName).map(r => r[varX]));
-        results = computeAnova(groupArrays);
-        apaReport = formatApa7StatisticalNarrative('one_way_anova', results);
+        results = computeKruskalWallis(groupArrays);
+        apaReport = formatApa7StatisticalNarrative('kruskal_wallis', results);
         break;
       }
-      case 'pearson_correlation':
-      case 'spearman_correlation': {
-        const x = rows.map(r => r[varX]);
-        const y = rows.map(r => r[varY]);
-        results = computeCorrelation(x, y, analysisType === 'spearman_correlation' ? 'spearman' : 'pearson');
-        apaReport = formatApa7StatisticalNarrative(analysisType, results, { varX, varY });
-        break;
-      }
-      case 'linear_regression': {
-        const x = rows.map(r => r[varX]);
-        const y = rows.map(r => r[varY]);
-        results = computeLinearRegression(x, y);
-        apaReport = formatApa7StatisticalNarrative('linear_regression', results, { varX, varY });
+      case 'chi_square':
+      case 'chi_square_independence': {
+        let contingencyMatrix = table;
+        if (!contingencyMatrix && varX && varY) {
+          const distinctX = [...new Set(rows.map(r => String(r[varX])))];
+          const distinctY = [...new Set(rows.map(r => String(r[varY])))];
+          contingencyMatrix = distinctX.map(xVal => {
+            return distinctY.map(yVal => {
+              return rows.filter(r => String(r[varX]) === xVal && String(r[varY]) === yVal).length;
+            });
+          });
+        }
+        results = computeChiSquareTest(contingencyMatrix);
+        apaReport = formatApa7StatisticalNarrative('chi_square_independence', results);
         break;
       }
       default:
         return res.status(400).json({ error: `Unsupported analysis type: ${analysisType}` });
     }
 
+    const aId = new mongoose.Types.ObjectId().toString();
+    const resId = new mongoose.Types.ObjectId().toString();
+
+    const analysisPayload = {
+      _id: isDbConnected() ? new mongoose.Types.ObjectId(aId) : aId,
+      id: aId,
+      projectId: req.params.id,
+      userId: req.user.id,
+      datasetId: req.params.datasetId,
+      title: req.body?.title || `${analysisType.replace(/_/g, ' ')} Analysis`,
+      analysisType,
+      parameters: req.body,
+      results,
+      assumptions,
+      apaReport,
+      status: 'completed',
+      createdAt: new Date().toISOString()
+    };
+
     if (isDbConnected()) {
-      const saved = await Analysis.create({
+      const saved = await Analysis.create(analysisPayload);
+      await AnalysisResult.create({
+        _id: new mongoose.Types.ObjectId(resId),
+        analysisId: saved._id,
         projectId: req.params.id,
-        userId: req.user.id,
-        datasetId: req.params.datasetId,
-        analysisType,
-        parameters: req.body,
-        results,
-        apaReport
+        numericalResults: results,
+        assumptions,
+        apa7Narrative: apaReport,
+        softwareVersions: { statEngine: 'Phase 7 Numerical Matrix Core 1.0', node: process.version }
       });
       return res.status(201).json(saved);
     }
 
-    const aId = new mongoose.Types.ObjectId().toString();
-    const newAnalysis = {
-      _id: aId,
+    memAnalyses.set(aId, analysisPayload);
+    memAnalysisResults.set(resId, {
+      _id: resId,
+      analysisId: aId,
       projectId: req.params.id,
-      userId: req.user.id,
-      datasetId: req.params.datasetId,
-      analysisType,
-      parameters: req.body,
-      results,
-      apaReport,
+      numericalResults: results,
+      assumptions,
+      apa7Narrative: apaReport,
       createdAt: new Date().toISOString()
-    };
-    memAnalyses.set(aId, newAnalysis);
-    res.status(201).json(newAnalysis);
+    });
+
+    res.status(201).json(analysisPayload);
   } catch (e) { next(e); }
 });
 
+// Legacy compatibility endpoint: List analyses for project
 apiRouter.get('/projects/:id/analyses', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
-      const list = await Analysis.find({ projectId: req.params.id }).sort({ createdAt: -1 }).lean();
+      const list = await Analysis.find({ projectId: req.params.id, deletedAt: null }).sort({ createdAt: -1 }).lean();
       return res.json(list);
     }
-    const list = [...memAnalyses.values()].filter(a => a.projectId === req.params.id);
+    const list = [...memAnalyses.values()].filter(a => a.projectId === req.params.id && !a.deletedAt);
     res.json(list);
+  } catch (e) { next(e); }
+});
+
+// ==========================================
+// Phase 7 Enterprise Statistical Studio Routes
+// ==========================================
+
+// POST /statistics/datasets/upload - Upload and index CSV/XLSX dataset
+apiRouter.post('/statistics/datasets/upload', requireAuth, upload.single('file'), async (req, res, next) => {
+  try {
+    let rows = [];
+    let fileName = req.file?.originalname || 'dataset.csv';
+    let fileType = 'csv';
+    let columns = [];
+    let missingValueCount = 0;
+
+    if (req.file) {
+      fileName = req.file.originalname;
+      fileType = fileName.endsWith('.xlsx') ? 'xlsx' : 'csv';
+      const parsed = parseDatasetBuffer(req.file.buffer, fileName);
+      rows = parsed.rows;
+      columns = parsed.columns;
+      missingValueCount = parsed.missingValueCount || 0;
+    } else if (Array.isArray(req.body?.rows)) {
+      rows = req.body.rows;
+      fileName = req.body.name || 'manual_data.json';
+      fileType = 'json';
+      const firstRow = rows[0] || {};
+      columns = Object.keys(firstRow).map(colName => {
+        const vals = rows.map(r => r[colName]).filter(v => v !== '' && v !== null && v !== undefined);
+        const isNum = vals.length > 0 && vals.every(v => !isNaN(Number(v)));
+        return {
+          name: colName,
+          type: isNum ? 'numeric' : 'categorical',
+          measurementLevel: isNum ? 'scale' : 'nominal',
+          sampleValues: vals.slice(0, 5)
+        };
+      });
+    }
+
+    if (rows.length === 0) return res.status(400).json({ error: 'No data rows detected in dataset.' });
+
+    const projectId = req.body?.projectId || req.query?.projectId || 'default-project';
+    const datasetName = req.body?.name || fileName.replace(/\.[^/.]+$/, '');
+    const checksum = crypto.createHash('sha256').update(req.file?.buffer || Buffer.from(JSON.stringify(rows))).digest('hex');
+    const docId = new mongoose.Types.ObjectId().toString();
+
+    const dsData = {
+      _id: isDbConnected() ? new mongoose.Types.ObjectId(docId) : docId,
+      id: docId,
+      projectId,
+      userId: req.user.id,
+      ownerId: req.user.id,
+      name: datasetName,
+      description: req.body?.description || '',
+      fileName,
+      originalFilename: fileName,
+      fileType,
+      checksum,
+      rowCount: rows.length,
+      columnCount: columns.length,
+      missingValueCount,
+      status: 'ready',
+      currentVersionNumber: 1,
+      columns,
+      rawData: rows.slice(0, 5000),
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    if (isDbConnected()) {
+      await Dataset.create(dsData);
+      await DatasetVersion.create({
+        datasetId: dsData._id,
+        projectId,
+        versionNumber: 1,
+        transformationSummary: 'Initial dataset import',
+        rowCount: rows.length,
+        columnCount: columns.length,
+        checksum,
+        rawData: rows.slice(0, 5000)
+      });
+      for (const col of columns) {
+        await DatasetVariable.create({
+          datasetId: dsData._id,
+          name: col.name,
+          label: col.name,
+          dataType: col.type,
+          measurementLevel: col.measurementLevel || (col.type === 'numeric' ? 'scale' : 'nominal'),
+          role: 'none',
+          sampleValues: col.sampleValues
+        });
+      }
+      return res.status(201).json({ ...dsData, success: true, dataset: dsData, version: 1 });
+    }
+
+    memDatasets.set(docId, dsData);
+    memDatasetVersions.set(`${docId}_v1`, {
+      datasetId: docId,
+      projectId,
+      versionNumber: 1,
+      transformationSummary: 'Initial dataset import',
+      rowCount: rows.length,
+      columnCount: columns.length,
+      checksum,
+      rawData: rows.slice(0, 5000),
+      createdAt: new Date().toISOString()
+    });
+
+    for (const col of columns) {
+      memDatasetVariables.set(`${docId}_${col.name}`, {
+        datasetId: docId,
+        name: col.name,
+        label: col.name,
+        dataType: col.type,
+        measurementLevel: col.measurementLevel || (col.type === 'numeric' ? 'scale' : 'nominal'),
+        role: 'none',
+        sampleValues: col.sampleValues
+      });
+    }
+
+    res.status(201).json({ ...dsData, success: true, dataset: dsData, version: 1 });
+  } catch (e) { next(e); }
+});
+
+// GET /statistics/datasets - List datasets with search and pagination
+apiRouter.get('/statistics/datasets', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId, search, page = 1, limit = 50 } = req.query;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10) || 50));
+
+    if (isDbConnected()) {
+      const filter = { deletedAt: null };
+      if (projectId && projectId !== 'all') filter.projectId = projectId;
+      if (search && search.trim()) {
+        const regex = new RegExp(search.trim(), 'i');
+        filter.$or = [{ name: regex }, { fileName: regex }, { description: regex }];
+      }
+      const total = await Dataset.countDocuments(filter);
+      const list = await Dataset.find(filter)
+        .select('-rawData')
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum)
+        .lean();
+      return res.json({
+        datasets: list.map(d => ({ ...d, id: d._id.toString() })),
+        pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) }
+      });
+    }
+
+    let list = [...memDatasets.values()].filter(d => {
+      if (d.deletedAt) return false;
+      if (projectId && projectId !== 'all' && d.projectId !== projectId) return false;
+      if (search && search.trim()) {
+        const term = search.trim().toLowerCase();
+        if (!d.name?.toLowerCase().includes(term) && !d.fileName?.toLowerCase().includes(term)) return false;
+      }
+      return true;
+    }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    const total = list.length;
+    const paginated = list.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+    res.json({
+      datasets: paginated.map(({ rawData, ...rest }) => ({ ...rest, id: (rest._id || rest.id).toString() })),
+      pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) }
+    });
+  } catch (e) { next(e); }
+});
+
+// Helper: Deterministic Numerical Engine Execution for Statistics Studio
+function runStatisticalEngine(analysisType, vars = {}, params = {}, rows = []) {
+  const varX = vars.varX || vars.dependent || params.varX || params.dependent;
+  const varY = vars.varY || params.varY;
+  const ivs = vars.ivs || vars.independents || params.ivs || params.independents;
+  const groupVar = vars.groupVar || vars.groupFactor || params.groupVar || params.groupFactor;
+  const confLevel = Number(params.confLevel || params.confidenceLevel || 0.95);
+
+  let results = {};
+  let assumptions = {};
+  let apaReport = '';
+
+  switch (analysisType) {
+    case 'descriptive': {
+      const vals = rows.map(r => r[varX]).filter(v => v !== undefined && v !== '');
+      results = computeDescriptive(vals, confLevel);
+      assumptions = { normality: checkNormalityShapiroWilk(vals) };
+      apaReport = `Descriptive statistics for ${varX} (N = ${results.count}): Mean = ${results.mean}, SD = ${results.stdDev}, Median = ${results.median}, IQR = ${results.iqr}, Skewness = ${results.skewness}.`;
+      break;
+    }
+    case 'one_sample_t_test': {
+      const vals = rows.map(r => r[varX]).filter(v => v !== undefined && v !== '');
+      results = computeOneSampleTTest(vals, Number(params.mu0) || 0, confLevel);
+      assumptions = { normality: checkNormalityShapiroWilk(vals) };
+      apaReport = formatApa7StatisticalNarrative('one_sample_t_test', results, { varX });
+      break;
+    }
+    case 'independent_t_test': {
+      let gA = []; let gB = [];
+      let labelA = 'Group A'; let labelB = 'Group B';
+      if (groupVar) {
+        const groupVals = [...new Set(rows.map(r => r[groupVar]))].filter(v => v !== undefined && v !== null && v !== '');
+        labelA = String(groupVals[0] || 'Group 1');
+        labelB = String(groupVals[1] || 'Group 2');
+        gA = rows.filter(r => String(r[groupVar]) === labelA).map(r => r[varX]);
+        gB = rows.filter(r => String(r[groupVar]) === labelB).map(r => r[varX]);
+      } else {
+        labelA = varX; labelB = varY;
+        gA = rows.map(r => r[varX]);
+        gB = rows.map(r => r[varY]);
+      }
+      results = computeTTest(gA, gB, false, confLevel);
+      assumptions = {
+        normalityA: checkNormalityShapiroWilk(gA),
+        normalityB: checkNormalityShapiroWilk(gB),
+        homogeneityOfVariance: checkLeveneTest([gA, gB], 'median'),
+        homogeneity: checkLeveneTest([gA, gB], 'median')
+      };
+      apaReport = formatApa7StatisticalNarrative('independent_t_test', results, { groupA: labelA, groupB: labelB });
+      break;
+    }
+    case 'paired_t_test': {
+      const gA = rows.map(r => r[varX]);
+      const gB = rows.map(r => r[varY]);
+      results = computeTTest(gA, gB, true, confLevel);
+      const diffs = gA.map((v, i) => Number(v) - Number(gB[i])).filter(d => !isNaN(d));
+      assumptions = { normalityOfDiffs: checkNormalityShapiroWilk(diffs) };
+      apaReport = formatApa7StatisticalNarrative('paired_t_test', results, { varX, varY });
+      break;
+    }
+    case 'one_way_anova': {
+      const distinctGroups = [...new Set(rows.map(r => r[groupVar]))].filter(v => v !== undefined && v !== '');
+      const groupArrays = distinctGroups.map(gName => rows.filter(r => r[groupVar] === gName).map(r => r[varX]));
+      results = computeAnova(groupArrays);
+      assumptions = {
+        homogeneityOfVariance: checkLeveneTest(groupArrays, 'median'),
+        homogeneity: checkLeveneTest(groupArrays, 'median'),
+        normality: checkNormalityShapiroWilk(rows.map(r => r[varX]))
+      };
+      apaReport = formatApa7StatisticalNarrative('one_way_anova', results, { varX });
+      break;
+    }
+    case 'two_way_anova': {
+      results = computeTwoWayAnova(rows, params.factorA || groupVar, params.factorB || varY, varX);
+      apaReport = formatApa7StatisticalNarrative('two_way_anova', results);
+      break;
+    }
+    case 'pearson_correlation':
+    case 'spearman_correlation': {
+      const x = rows.map(r => r[varX]);
+      const y = rows.map(r => r[varY]);
+      results = computeCorrelation(x, y, analysisType === 'spearman_correlation' ? 'spearman' : 'pearson', confLevel);
+      assumptions = {
+        normalityX: checkNormalityShapiroWilk(x),
+        normalityY: checkNormalityShapiroWilk(y)
+      };
+      apaReport = formatApa7StatisticalNarrative(analysisType, results, { varX, varY });
+      break;
+    }
+    case 'linear_regression':
+    case 'multiple_linear_regression': {
+      const predictorList = (Array.isArray(ivs) && ivs.length > 0) ? ivs : [varX];
+      const dv = varY || varX;
+      results = computeMultipleRegression(rows, dv, predictorList);
+      apaReport = formatApa7StatisticalNarrative('multiple_linear_regression', results, { varX, varY });
+      break;
+    }
+    case 'mann_whitney_u': {
+      let gA = []; let gB = [];
+      if (groupVar) {
+        const groupVals = [...new Set(rows.map(r => r[groupVar]))].filter(v => v !== undefined && v !== '');
+        gA = rows.filter(r => String(r[groupVar]) === String(groupVals[0])).map(r => r[varX]);
+        gB = rows.filter(r => String(r[groupVar]) === String(groupVals[1])).map(r => r[varX]);
+      } else {
+        gA = rows.map(r => r[varX]);
+        gB = rows.map(r => r[varY]);
+      }
+      results = computeMannWhitneyU(gA, gB);
+      apaReport = formatApa7StatisticalNarrative('mann_whitney_u', results, { varX });
+      break;
+    }
+    case 'wilcoxon_signed_rank': {
+      const gA = rows.map(r => r[varX]);
+      const gB = rows.map(r => r[varY]);
+      results = computeWilcoxonSignedRank(gA, gB);
+      apaReport = `A Wilcoxon signed-rank test indicated a ${results.significant ? 'statistically significant' : 'non-significant'} median difference between paired observations, W = ${results.w}, z = ${results.z}, p = ${results.pValue}.`;
+      break;
+    }
+    case 'kruskal_wallis': {
+      const distinctGroups = [...new Set(rows.map(r => r[groupVar]))].filter(v => v !== undefined && v !== '');
+      const groupArrays = distinctGroups.map(gName => rows.filter(r => r[groupVar] === gName).map(r => r[varX]));
+      results = computeKruskalWallis(groupArrays);
+      apaReport = formatApa7StatisticalNarrative('kruskal_wallis', results);
+      break;
+    }
+    case 'chi_square':
+    case 'chi_square_independence': {
+      let contingencyMatrix = params.table;
+      if (!contingencyMatrix && varX && varY) {
+        const distinctX = [...new Set(rows.map(r => String(r[varX])))];
+        const distinctY = [...new Set(rows.map(r => String(r[varY])))];
+        contingencyMatrix = distinctX.map(xVal => {
+          return distinctY.map(yVal => {
+            return rows.filter(r => String(r[varX]) === xVal && String(r[varY]) === yVal).length;
+          });
+        });
+      }
+      results = computeChiSquareTest(contingencyMatrix);
+      apaReport = formatApa7StatisticalNarrative('chi_square_independence', results);
+      break;
+    }
+    default:
+      throw new Error(`Unsupported analysis type: ${analysisType}`);
+  }
+
+  return { results, assumptions, apaReport };
+}
+
+// GET /statistics/datasets/:datasetId - Single dataset inspection
+apiRouter.get('/statistics/datasets/:datasetId', requireAuth, async (req, res, next) => {
+  try {
+    const { datasetId } = req.params;
+    let ds = null;
+    if (isDbConnected()) {
+      ds = await Dataset.findOne({ _id: datasetId, deletedAt: null }).select('-rawData').lean();
+    } else {
+      ds = memDatasets.get(datasetId);
+    }
+    const isOwner = ds && (String(ds.ownerId) === String(req.user.id) || String(ds.userId) === String(req.user.id));
+    if (!ds || ds.deletedAt || !isOwner) return res.status(404).json({ error: 'Dataset not found.' });
+
+    const { rawData, ...rest } = ds;
+    res.json({ ...rest, id: (rest._id || rest.id).toString() });
+  } catch (e) { next(e); }
+});
+
+// GET /statistics/datasets/:datasetId/variables - Variable Explorer dictionary
+apiRouter.get('/statistics/datasets/:datasetId/variables', requireAuth, async (req, res, next) => {
+  try {
+    const { datasetId } = req.params;
+    let ds = isDbConnected() ? await Dataset.findOne({ _id: datasetId, deletedAt: null }).lean() : memDatasets.get(datasetId);
+    const isOwner = ds && (String(ds.ownerId) === String(req.user.id) || String(ds.userId) === String(req.user.id));
+    if (!ds || ds.deletedAt || !isOwner) return res.status(404).json({ error: 'Dataset not found.' });
+
+    let vars = [];
+    if (isDbConnected()) {
+      vars = await DatasetVariable.find({ datasetId }).lean();
+    } else {
+      vars = [...memDatasetVariables.values()].filter(v => v.datasetId?.toString() === datasetId);
+    }
+    res.json(vars.map(v => ({ ...v, id: (v._id || v.id || v.name).toString() })));
+  } catch (e) { next(e); }
+});
+
+// PATCH /statistics/datasets/:datasetId/variables/:varName - Update variable metadata & measurement levels
+apiRouter.patch('/statistics/datasets/:datasetId/variables/:varName', requireAuth, async (req, res, next) => {
+  try {
+    const { datasetId, varName } = req.params;
+    const { label, displayName, measurementLevel, role, missingValueCodes } = req.body || {};
+    let ds = isDbConnected() ? await Dataset.findOne({ _id: datasetId, deletedAt: null }).lean() : memDatasets.get(datasetId);
+    const isOwner = ds && (String(ds.ownerId) === String(req.user.id) || String(ds.userId) === String(req.user.id));
+    if (!ds || ds.deletedAt || !isOwner) return res.status(404).json({ error: 'Dataset not found.' });
+
+    const targetLabel = displayName || label;
+    if (isDbConnected()) {
+      const updated = await DatasetVariable.findOneAndUpdate(
+        { datasetId, name: varName },
+        { $set: { ...(targetLabel && { label: targetLabel }), ...(measurementLevel && { measurementLevel }), ...(role && { role }), ...(missingValueCodes && { missingValueCodes }) } },
+        { new: true, upsert: true }
+      );
+      return res.json(updated);
+    }
+
+    const key = `${datasetId}_${varName}`;
+    let existing = memDatasetVariables.get(key) || { datasetId, name: varName };
+    Object.assign(existing, { ...(targetLabel && { label: targetLabel }), ...(measurementLevel && { measurementLevel }), ...(role && { role }), ...(missingValueCodes && { missingValueCodes }) });
+    memDatasetVariables.set(key, existing);
+    res.json(existing);
+  } catch (e) { next(e); }
+});
+
+// GET /statistics/datasets/:datasetId/preview - Paginated data grid preview
+apiRouter.get('/statistics/datasets/:datasetId/preview', requireAuth, async (req, res, next) => {
+  try {
+    const { datasetId } = req.params;
+    const { page = 1, limit = 50 } = req.query;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, Math.min(200, parseInt(limit, 10) || 50));
+
+    let ds = null;
+    if (isDbConnected()) {
+      ds = await Dataset.findOne({ _id: datasetId, deletedAt: null }).lean();
+    } else {
+      ds = memDatasets.get(datasetId);
+    }
+    const isOwner = ds && (String(ds.ownerId) === String(req.user.id) || String(ds.userId) === String(req.user.id));
+    if (!ds || ds.deletedAt || !isOwner) return res.status(404).json({ error: 'Dataset not found.' });
+
+    const allRows = ds.rawData || [];
+    const total = allRows.length;
+    const rows = allRows.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+
+    res.json({
+      columns: ds.columns || [],
+      rowCount: total,
+      rows,
+      pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) }
+    });
+  } catch (e) { next(e); }
+});
+
+// POST /statistics/datasets/:datasetId/transform - Data cleaning and transformations with versioning
+apiRouter.post('/statistics/datasets/:datasetId/transform', requireAuth, async (req, res, next) => {
+  try {
+    const { datasetId } = req.params;
+    const { type, column, targetColumn, missingPolicy, recodeMap, transformations } = req.body || {};
+
+    let ds = null;
+    if (isDbConnected()) {
+      ds = await Dataset.findOne({ _id: datasetId, deletedAt: null });
+    } else {
+      ds = memDatasets.get(datasetId);
+    }
+    const isOwner = ds && (String(ds.ownerId) === String(req.user.id) || String(ds.userId) === String(req.user.id));
+    if (!ds || ds.deletedAt || !isOwner) return res.status(404).json({ error: 'Dataset not found.' });
+
+    const effectiveType = type || (transformations && transformations[0]?.operation) || 'standardize_z';
+    const effectiveCol = column || (transformations && transformations[0]?.column) || ds.columns?.[0]?.name;
+
+    const transformedRows = applyDatasetTransformations(ds.rawData || [], {
+      type: effectiveType,
+      column: effectiveCol,
+      targetColumn,
+      missingPolicy,
+      recodeMap
+    });
+
+    const newVersionNum = (ds.currentVersionNumber || 1) + 1;
+    const summary = req.body?.summary || `Transformation [${effectiveType}] applied on column "${effectiveCol}"`;
+    const checksum = crypto.createHash('sha256').update(JSON.stringify(transformedRows)).digest('hex');
+
+    if (isDbConnected()) {
+      ds.rawData = transformedRows;
+      ds.currentVersionNumber = newVersionNum;
+      ds.rowCount = transformedRows.length;
+      ds.updatedAt = new Date();
+      await ds.save();
+
+      await DatasetVersion.create({
+        datasetId: ds._id,
+        projectId: ds.projectId,
+        versionNumber: newVersionNum,
+        transformationSummary: summary,
+        rowCount: transformedRows.length,
+        columnCount: ds.columnCount,
+        checksum,
+        rawData: transformedRows.slice(0, 5000)
+      });
+      return res.json({ success: true, currentVersionNumber: newVersionNum, versionNumber: newVersionNum, summary, rowCount: transformedRows.length });
+    }
+
+    ds.rawData = transformedRows;
+    ds.currentVersionNumber = newVersionNum;
+    ds.rowCount = transformedRows.length;
+    ds.updatedAt = new Date().toISOString();
+    memDatasets.set(datasetId, ds);
+
+    memDatasetVersions.set(`${datasetId}_v${newVersionNum}`, {
+      datasetId,
+      projectId: ds.projectId,
+      versionNumber: newVersionNum,
+      transformationSummary: summary,
+      rowCount: transformedRows.length,
+      columnCount: ds.columnCount,
+      checksum,
+      rawData: transformedRows.slice(0, 5000),
+      createdAt: new Date().toISOString()
+    });
+
+    res.json({ success: true, currentVersionNumber: newVersionNum, versionNumber: newVersionNum, summary, rowCount: transformedRows.length });
+  } catch (e) { next(e); }
+});
+
+// GET /statistics/datasets/:datasetId/versions - Version history list
+apiRouter.get('/statistics/datasets/:datasetId/versions', requireAuth, async (req, res, next) => {
+  try {
+    const { datasetId } = req.params;
+    let ds = isDbConnected() ? await Dataset.findOne({ _id: datasetId, deletedAt: null }).lean() : memDatasets.get(datasetId);
+    const isOwner = ds && (String(ds.ownerId) === String(req.user.id) || String(ds.userId) === String(req.user.id));
+    if (!ds || ds.deletedAt || !isOwner) return res.status(404).json({ error: 'Dataset not found.' });
+
+    if (isDbConnected()) {
+      const versions = await DatasetVersion.find({ datasetId }).select('-rawData').sort({ versionNumber: -1 }).lean();
+      return res.json(versions);
+    }
+    const versions = [...memDatasetVersions.values()]
+      .filter(v => v.datasetId?.toString() === datasetId)
+      .sort((a, b) => b.versionNumber - a.versionNumber)
+      .map(({ rawData, ...rest }) => rest);
+    res.json(versions);
+  } catch (e) { next(e); }
+});
+
+// POST /statistics/analyses - Configure & Execute Statistical Analysis
+apiRouter.post('/statistics/analyses', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId, datasetId, title, analysisType, variables, parameters, missingDataPolicy } = req.body || {};
+    if (!analysisType) return res.status(400).json({ error: 'analysisType is required.' });
+
+    const aId = new mongoose.Types.ObjectId().toString();
+    const resId = new mongoose.Types.ObjectId().toString();
+
+    let computedResults = null;
+    let computedAssumptions = null;
+    let computedApa = null;
+
+    if (datasetId) {
+      let ds = null;
+      if (isDbConnected()) {
+        ds = await Dataset.findOne({ _id: datasetId, deletedAt: null });
+      } else {
+        ds = memDatasets.get(datasetId);
+      }
+      if (ds && !ds.deletedAt) {
+        const rows = ds.rawData || [];
+        const execOut = runStatisticalEngine(analysisType, variables || {}, parameters || {}, rows);
+        computedResults = execOut.results;
+        computedAssumptions = execOut.assumptions;
+        computedApa = execOut.apaReport;
+      }
+    }
+
+    const payload = {
+      _id: isDbConnected() ? new mongoose.Types.ObjectId(aId) : aId,
+      id: aId,
+      projectId: projectId || 'default-project',
+      userId: req.user.id,
+      datasetId,
+      title: title || `${analysisType.replace(/_/g, ' ')} Analysis`,
+      analysisType,
+      variables: variables || {},
+      parameters: parameters || {},
+      missingDataPolicy: missingDataPolicy || 'listwise_deletion',
+      status: computedResults ? 'completed' : 'configured',
+      results: computedResults,
+      assumptions: computedAssumptions,
+      diagnostics: computedAssumptions,
+      apaReport: computedApa,
+      apaNarrative: computedApa,
+      createdAt: new Date()
+    };
+
+    if (isDbConnected()) {
+      const created = await Analysis.create(payload);
+      if (computedResults) {
+        await AnalysisResult.create({
+          _id: new mongoose.Types.ObjectId(resId),
+          analysisId: created._id,
+          projectId: payload.projectId,
+          numericalResults: computedResults,
+          assumptions: computedAssumptions,
+          apa7Narrative: computedApa,
+          softwareVersions: { statEngine: 'Phase 7 Numerical Matrix Core 1.0', node: process.version }
+        });
+      }
+      return res.status(201).json(created);
+    }
+
+    memAnalyses.set(aId, payload);
+    if (computedResults) {
+      memAnalysisResults.set(resId, {
+        _id: resId,
+        analysisId: aId,
+        projectId: payload.projectId,
+        numericalResults: computedResults,
+        assumptions: computedAssumptions,
+        apa7Narrative: computedApa,
+        createdAt: new Date().toISOString()
+      });
+    }
+
+    res.status(201).json(payload);
+  } catch (e) { next(e); }
+});
+
+// GET /statistics/analyses - List analyses with search and filters
+apiRouter.get('/statistics/analyses', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId, datasetId } = req.query;
+    if (isDbConnected()) {
+      const filter = { userId: req.user.id, deletedAt: null };
+      if (projectId && projectId !== 'all') filter.projectId = projectId;
+      if (datasetId) filter.datasetId = datasetId;
+      const list = await Analysis.find(filter).sort({ createdAt: -1 }).lean();
+      return res.json(list.map(a => ({ ...a, id: a._id.toString() })));
+    }
+
+    const list = [...memAnalyses.values()].filter(a => {
+      if (a.deletedAt) return false;
+      if (a.userId && a.userId !== req.user.id) return false;
+      if (projectId && projectId !== 'all' && a.projectId !== projectId) return false;
+      if (datasetId && a.datasetId !== datasetId) return false;
+      return true;
+    }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    res.json(list.map(a => ({ ...a, id: (a._id || a.id).toString() })));
+  } catch (e) { next(e); }
+});
+
+// POST /statistics/analyses/:analysisId/run - Execute configured analysis
+apiRouter.post('/statistics/analyses/:analysisId/run', requireAuth, async (req, res, next) => {
+  try {
+    const { analysisId } = req.params;
+    let analysis = null;
+    if (isDbConnected()) {
+      analysis = await Analysis.findOne({ _id: analysisId, deletedAt: null });
+    } else {
+      analysis = memAnalyses.get(analysisId);
+    }
+    if (!analysis || analysis.deletedAt || (analysis.userId && analysis.userId !== req.user.id)) {
+      return res.status(404).json({ error: 'Analysis configuration not found.' });
+    }
+
+    let dataset = null;
+    if (isDbConnected()) {
+      dataset = await Dataset.findOne({ _id: analysis.datasetId, deletedAt: null });
+    } else {
+      dataset = memDatasets.get(analysis.datasetId?.toString());
+    }
+    if (!dataset || dataset.deletedAt) return res.status(404).json({ error: 'Dataset not found.' });
+
+    const rows = dataset.rawData || [];
+    const params = { ...analysis.parameters, ...req.body };
+    const vars = { ...analysis.variables, ...req.body.variables };
+
+    const { results, assumptions, apaReport } = runStatisticalEngine(analysis.analysisType, vars, params, rows);
+
+    analysis.results = results;
+    analysis.assumptions = assumptions;
+    analysis.apaReport = apaReport;
+    analysis.apaNarrative = apaReport;
+    analysis.status = 'completed';
+    analysis.updatedAt = new Date();
+
+    const resId = new mongoose.Types.ObjectId().toString();
+    const resultRecord = {
+      _id: isDbConnected() ? new mongoose.Types.ObjectId(resId) : resId,
+      id: resId,
+      analysisId: (analysis._id || analysis.id).toString(),
+      projectId: analysis.projectId,
+      numericalResults: results,
+      assumptions,
+      apa7Narrative: apaReport,
+      softwareVersions: { statEngine: 'Phase 7 Numerical Matrix Core 1.0', node: process.version },
+      createdAt: new Date()
+    };
+
+    if (isDbConnected()) {
+      await analysis.save();
+      await AnalysisResult.create(resultRecord);
+    } else {
+      memAnalyses.set(analysisId, analysis);
+      memAnalysisResults.set(resId, resultRecord);
+    }
+
+    res.json({
+      success: true,
+      analysisId,
+      results,
+      assumptions,
+      diagnostics: assumptions,
+      apaReport,
+      apaNarrative: apaReport
+    });
+  } catch (e) { next(e); }
+});
+
+// GET /statistics/analyses/:analysisId/results - Retrieve numerical results
+apiRouter.get('/statistics/analyses/:analysisId/results', requireAuth, async (req, res, next) => {
+  try {
+    const { analysisId } = req.params;
+    let an = isDbConnected() ? await Analysis.findOne({ _id: analysisId, deletedAt: null }).lean() : memAnalyses.get(analysisId);
+    if (!an || an.deletedAt || (an.userId && an.userId !== req.user.id)) {
+      return res.status(404).json({ error: 'Analysis results not found.' });
+    }
+
+    let resRecord = null;
+    if (isDbConnected()) {
+      resRecord = await AnalysisResult.findOne({ analysisId }).lean();
+    } else {
+      resRecord = [...memAnalysisResults.values()].find(r => r.analysisId === analysisId);
+    }
+    if (!resRecord) {
+      if (an.results) {
+        return res.json({
+          analysisId,
+          results: an.results,
+          numericalResults: an.results,
+          assumptions: an.assumptions,
+          apa7Narrative: an.apaReport || an.apaNarrative
+        });
+      }
+      return res.status(404).json({ error: 'Analysis results not found.' });
+    }
+    res.json({ ...resRecord, results: resRecord.numericalResults || resRecord.results });
+  } catch (e) { next(e); }
+});
+
+// DELETE /statistics/datasets/:datasetId - Soft delete dataset
+apiRouter.delete('/statistics/datasets/:datasetId', requireAuth, async (req, res, next) => {
+  try {
+    const { datasetId } = req.params;
+    if (isDbConnected()) {
+      const ds = await Dataset.findOne({ _id: datasetId, deletedAt: null });
+      if (!ds || (ds.ownerId && ds.ownerId !== req.user.id && ds.userId !== req.user.id)) return res.status(404).json({ error: 'Dataset not found.' });
+      ds.deletedAt = new Date();
+      await ds.save();
+      return res.json({ success: true, deleted: true });
+    }
+    const ds = memDatasets.get(datasetId);
+    if (!ds || ds.deletedAt || (ds.ownerId && ds.ownerId !== req.user.id && ds.userId !== req.user.id)) return res.status(404).json({ error: 'Dataset not found.' });
+    ds.deletedAt = new Date().toISOString();
+    res.json({ success: true, deleted: true });
+  } catch (e) { next(e); }
+});
+
+// DELETE /statistics/analyses/:analysisId - Soft delete analysis
+apiRouter.delete('/statistics/analyses/:analysisId', requireAuth, async (req, res, next) => {
+  try {
+    const { analysisId } = req.params;
+    if (isDbConnected()) {
+      const an = await Analysis.findOne({ _id: analysisId, deletedAt: null });
+      if (!an || (an.userId && an.userId !== req.user.id)) return res.status(404).json({ error: 'Analysis not found.' });
+      an.deletedAt = new Date();
+      await an.save();
+      return res.json({ success: true, deleted: true });
+    }
+    const an = memAnalyses.get(analysisId);
+    if (!an || an.deletedAt || (an.userId && an.userId !== req.user.id)) return res.status(404).json({ error: 'Analysis not found.' });
+    an.deletedAt = new Date().toISOString();
+    res.json({ success: true, deleted: true });
   } catch (e) { next(e); }
 });
 

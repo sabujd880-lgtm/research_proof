@@ -54,3 +54,4 @@
 ## 4. Frontend Build Verification
 - Client TypeScript verification (`tsc -b && vite build`): **0 errors**.
 - All UI components and icons bundled cleanly into `dist/`.
+

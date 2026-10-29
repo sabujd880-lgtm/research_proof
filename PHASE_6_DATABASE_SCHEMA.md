@@ -128,3 +128,4 @@ interface IResearchChat {
 - **Raw PDF Buffers**: Kept in ephemeral memory storage (`memDocumentStorage`) and never embedded inside MongoDB documents, preventing BSON 16MB document size limit issues.
 - **Deduplication**: Enforced via SHA-256 checksums on `checksum` field. Uploading an identical PDF reuses the existing `ResearchDocument` and `DocumentChunk` records.
 - **Soft Deletion**: Implemented with `deletedAt` timestamps across all models to ensure non-destructive archival and easy restoration.
+
