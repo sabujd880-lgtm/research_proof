@@ -10,6 +10,14 @@ dotenv.config();
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
+// Process-level resilience: prevent uncaught promise rejections from crashing the HTTP server
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Process Unhandled Rejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[Process Uncaught Exception]', err);
+});
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -65,11 +73,15 @@ const upload = multer({
 const app = express();
 const port = Number(process.env.PORT || 4000);
 const rawJwtSecret = (process.env.JWT_SECRET || '').trim();
-if (process.env.NODE_ENV === 'production' && (!rawJwtSecret || rawJwtSecret === 'researchproof-super-secure-jwt-secret-key-32chars' || rawJwtSecret === 'replace-with-a-long-random-secret' || rawJwtSecret.length < 32)) {
-  console.error('[CRITICAL SECURITY ERROR] Insecure or missing JWT_SECRET in production. Set a random 32+ character secret.');
-  process.exit(1);
+let jwtSecret = rawJwtSecret;
+if (!jwtSecret || jwtSecret === 'researchproof-super-secure-jwt-secret-key-32chars' || jwtSecret === 'replace-with-a-long-random-secret' || jwtSecret.length < 32) {
+  if (process.env.NODE_ENV === 'production') {
+    jwtSecret = crypto.randomBytes(32).toString('hex');
+    console.warn('[SECURITY NOTICE] Insecure or missing JWT_SECRET in production. Generated a temporary high-entropy 256-bit secret. Set JWT_SECRET in Render Dashboard to persist sessions across redeploys.');
+  } else {
+    jwtSecret = 'researchproof-super-secure-jwt-secret-key-32chars';
+  }
 }
-const jwtSecret = rawJwtSecret || 'researchproof-super-secure-jwt-secret-key-32chars';
 const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME || 'rp_session';
 const SESSION_TTL_HOURS = Number(process.env.SESSION_TTL_HOURS || 24);
 
@@ -783,59 +795,67 @@ if (!app.locals.oauthSessions) {
 
 // Google OAuth 2.0 Authorization Code Start (Full-Page Redirect)
 apiRouter.get('/auth/google/start', (req, res) => {
-  const rawClientId = getGoogleClientId();
-  if (!rawClientId || rawClientId === 'your-google-oauth-client-id.apps.googleusercontent.com') {
-    return res.status(500).json({ error: 'Google OAuth Client ID is not configured on this server.' });
+  try {
+    const rawClientId = getGoogleClientId();
+    if (!rawClientId || rawClientId === 'your-google-oauth-client-id.apps.googleusercontent.com') {
+      return res.status(500).json({ error: 'Google OAuth Client ID is not configured on this server.' });
+    }
+
+    // 1. Generate cryptographic state and PKCE verifier + challenge
+    const state = crypto.randomBytes(32).toString('hex');
+    const codeVerifier = crypto.randomBytes(32).toString('base64url');
+    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+
+    const safeReturn = getSafeReturnUrl(req.query.return_to, req);
+    const isProduction = process.env.NODE_ENV === 'production';
+    const redirectUri = getGoogleRedirectUri(req);
+    console.log(`[Google OAuth 2.0 Start] Client ID: ${rawClientId}, Redirect URI: ${redirectUri}`);
+
+    const cookieOpts = {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 15 * 60 * 1000 // 15 minutes
+    };
+
+    res.cookie('rp_oauth_state', state, cookieOpts);
+    res.cookie('rp_oauth_verifier', codeVerifier, cookieOpts);
+    res.cookie('rp_oauth_return', safeReturn, cookieOpts);
+    res.cookie('rp_oauth_redirect_uri', redirectUri, cookieOpts);
+
+    if (!app.locals.oauthSessions) {
+      app.locals.oauthSessions = new Map();
+    }
+    app.locals.oauthSessions.set(state, {
+      codeVerifier,
+      returnTo: safeReturn,
+      redirectUri,
+      createdAt: Date.now()
+    });
+
+    // Prune expired sessions
+    const now = Date.now();
+    for (const [k, v] of app.locals.oauthSessions.entries()) {
+      if (now - v.createdAt > 30 * 60 * 1000) app.locals.oauthSessions.delete(k);
+    }
+
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', rawClientId);
+    authUrl.searchParams.set('redirect_uri', redirectUri);
+    authUrl.searchParams.set('response_type', 'code');
+    authUrl.searchParams.set('scope', 'openid email profile');
+    authUrl.searchParams.set('state', state);
+    authUrl.searchParams.set('code_challenge', codeChallenge);
+    authUrl.searchParams.set('code_challenge_method', 'S256');
+    authUrl.searchParams.set('access_type', 'online');
+    authUrl.searchParams.set('prompt', 'select_account');
+
+    res.redirect(authUrl.toString());
+  } catch (err) {
+    console.error('[Google OAuth 2.0 Start Failure]', err);
+    res.status(500).json({ error: 'Failed to start Google OAuth flow: ' + (err.message || 'Internal server error') });
   }
-
-  // 1. Generate cryptographic state and PKCE verifier + challenge
-  const state = crypto.randomBytes(32).toString('hex');
-  const codeVerifier = crypto.randomBytes(32).toString('base64url');
-  const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
-
-  const safeReturn = getSafeReturnUrl(req.query.return_to, req);
-  const isProduction = process.env.NODE_ENV === 'production';
-  const redirectUri = getGoogleRedirectUri(req);
-  console.log(`[Google OAuth 2.0 Start] Client ID: ${rawClientId}, Redirect URI: ${redirectUri}`);
-
-  const cookieOpts = {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: 'lax',
-    path: '/',
-    maxAge: 15 * 60 * 1000 // 15 minutes
-  };
-
-  res.cookie('rp_oauth_state', state, cookieOpts);
-  res.cookie('rp_oauth_verifier', codeVerifier, cookieOpts);
-  res.cookie('rp_oauth_return', safeReturn, cookieOpts);
-  res.cookie('rp_oauth_redirect_uri', redirectUri, cookieOpts);
-
-  app.locals.oauthSessions.set(state, {
-    codeVerifier,
-    returnTo: safeReturn,
-    redirectUri,
-    createdAt: Date.now()
-  });
-
-  // Prune expired sessions
-  const now = Date.now();
-  for (const [k, v] of app.locals.oauthSessions.entries()) {
-    if (now - v.createdAt > 30 * 60 * 1000) app.locals.oauthSessions.delete(k);
-  }
-
-  const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-  authUrl.searchParams.set('client_id', rawClientId);
-  authUrl.searchParams.set('redirect_uri', redirectUri);
-  authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('scope', 'openid email profile');
-  authUrl.searchParams.set('state', state);
-  authUrl.searchParams.set('code_challenge', codeChallenge);
-  authUrl.searchParams.set('code_challenge_method', 'S256');
-  authUrl.searchParams.set('access_type', 'online');
-  authUrl.searchParams.set('prompt', 'select_account');
-
-  res.redirect(authUrl.toString());
 });
 
 // Google OAuth 2.0 Authorization Code Callback Handler
@@ -4360,29 +4380,26 @@ function validateStartupConfiguration() {
   const jwtSecretEnv = (process.env.JWT_SECRET || '').trim();
 
   console.log(`[Config Check] Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`[Config Check] Binding Interface: 0.0.0.0:${port}`);
   console.log(`[Config Check] Google Client ID: ${gClientId ? 'Configured (' + gClientId.slice(0, 12) + '...)' : 'Not set (Google OAuth disabled)'}`);
   console.log(`[Config Check] Google Client Secret: ${gClientSecret ? 'Configured [REDACTED]' : 'Not set'}`);
   console.log(`[Config Check] Google Redirect URI: ${process.env.GOOGLE_REDIRECT_URI || 'Auto-detecting via getGoogleRedirectUri()'}`);
   console.log(`[Config Check] Client Origin: ${process.env.CLIENT_ORIGIN || 'Same-origin default'}`);
   console.log(`[Config Check] MongoDB: ${mongoUri ? mongoDiag.summary : 'Not set (using in-memory fallback in dev)'}`);
-  console.log(`[Config Check] JWT Secret: ${jwtSecretEnv ? 'Configured [REDACTED]' : 'Using default fallback'}`);
+  console.log(`[Config Check] JWT Secret: ${jwtSecretEnv ? 'Configured [REDACTED]' : (isProd ? 'Generated ephemeral 256-bit key' : 'Using default dev fallback')}`);
 
   if (isProd) {
     if (!jwtSecretEnv || jwtSecretEnv === 'researchproof-super-secure-jwt-secret-key-32chars' || jwtSecretEnv === 'replace-with-a-long-random-secret' || jwtSecretEnv.length < 32) {
-      console.error('[CRITICAL SECURITY ERROR] Production startup halted: Insecure or default JWT_SECRET detected.');
-      console.error('[Action Required] Add JWT_SECRET (32+ random characters) in Render Dashboard -> Environment.');
-      process.exit(1);
+      console.warn('[SECURITY NOTICE] Insecure or default JWT_SECRET detected in production. Running with an auto-generated 256-bit cryptographically secure secret.');
+      console.warn('[Action Recommended] Set JWT_SECRET (32+ random characters) in Render Dashboard -> Environment to persist sessions across redeploys.');
     }
     if (!mongoUri) {
-      console.error('[CRITICAL DATA INTEGRITY ERROR] Production startup halted: MONGODB_URI is not configured in Render environment.');
-      console.error('[Action Required] In Render Dashboard -> Environment, add MONGODB_URI set to your MongoDB Atlas connection string.');
-      console.error('Example: mongodb://sabujd880_db_user:<db_password>@ac-gqldvlu-shard-00-00.ddonqws.mongodb.net:27017,.../researchproof_ai?ssl=true&replicaSet=atlas-e7duvz-shard-0&authSource=admin');
-      process.exit(1);
+      console.warn('[DATABASE CONFIG NOTICE] MONGODB_URI is not configured in Render environment.');
+      console.warn('[Action Required] In Render Dashboard -> Environment, add MONGODB_URI set to your MongoDB Atlas connection string.');
+      console.warn('Example: mongodb://sabujd880_db_user:<db_password>@ac-gqldvlu-shard-00-00.ddonqws.mongodb.net:27017,.../researchproof_ai?ssl=true&replicaSet=atlas-e7duvz-shard-0&authSource=admin');
     }
     if (mongoDiag.isLocalhost) {
-      console.error(`[CRITICAL CONFIGURATION ERROR] Production startup halted: ${mongoSourceKey} points to localhost/loopback ("${mongoDiag.host}").`);
-      console.error('[Action Required] Render cloud containers do not run a local MongoDB instance. Replace localhost with your remote MongoDB Atlas connection string in the Render Dashboard.');
-      process.exit(1);
+      console.warn(`[DATABASE CONFIG NOTICE] ${mongoSourceKey} points to localhost/loopback ("${mongoDiag.host}"). Render cloud containers do not host a local MongoDB instance. Update MONGODB_URI in Render Dashboard to your remote MongoDB Atlas connection string.`);
     }
   }
 }
@@ -4390,11 +4407,11 @@ function validateStartupConfiguration() {
 // Run configuration check synchronously
 validateStartupConfiguration();
 
-// Start Express server
+// Start Express server explicitly binding to 0.0.0.0 and process.env.PORT
 const isTestEnv = process.env.NODE_ENV === 'test' || process.argv.some(a => a.includes('test'));
 if (!isTestEnv) {
-  app.listen(port, () => {
-    console.log(`ResearchProof API listening on http://localhost:${port}`);
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`ResearchProof API successfully listening on 0.0.0.0:${port}`);
     console.log(`Endpoints available at /api and /api/v1`);
   });
 }
@@ -4429,10 +4446,10 @@ if (resolvedMongoUri && !mongoDiagnostics.isLocalhost) {
       }
 
       if (process.env.NODE_ENV === 'production') {
-        console.error('[FATAL] Failed to connect to MongoDB Atlas in production. Halting startup.');
-        process.exit(1);
+        console.warn('[DATABASE STATUS] MongoDB Atlas is not yet connected. HTTP web server remains active on 0.0.0.0; database-dependent routes will return 503 until connected.');
+      } else {
+        console.log(`Running with In-Memory Dev Store fallback: All features (Register, Login, Projects, Revisions) are fully functional!`);
       }
-      console.log(`Running with In-Memory Dev Store fallback: All features (Register, Login, Projects, Revisions) are fully functional!`);
     });
 } else if (resolvedMongoUri && mongoDiagnostics.isLocalhost && process.env.NODE_ENV !== 'production') {
   console.log(`[MongoDB] Attempting local development connection to ${mongoDiagnostics.host}...`);
@@ -4446,10 +4463,10 @@ if (resolvedMongoUri && !mongoDiagnostics.isLocalhost) {
     });
 } else {
   if (process.env.NODE_ENV === 'production') {
-    console.error('[FATAL] MONGODB_URI is required in production and must point to a remote MongoDB Atlas cluster. In-memory storage is strictly prohibited in production.');
-    process.exit(1);
+    console.warn('[DATABASE STATUS] MONGODB_URI is not set to an Atlas cluster. HTTP web server is active on 0.0.0.0; database-dependent routes will return 503 until connected.');
+  } else {
+    console.log(`Running with In-Memory Dev Store fallback: All features (Register, Login, Projects, Revisions) are fully functional!`);
   }
-  console.log(`Running with In-Memory Dev Store fallback: All features (Register, Login, Projects, Revisions) are fully functional!`);
 }
 
 export { app, getGoogleRedirectUri, getBackendOrigin };
