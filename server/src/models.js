@@ -322,28 +322,118 @@ const analysisSchema = new mongoose.Schema({
 }, { timestamps: true });
 analysisSchema.index({ projectId: 1, datasetId: 1, createdAt: -1 });
 
-// PDF Research Chat Model
+// PDF Research Chat Model (Phase 6 Extended)
 const researchChatSchema = new mongoose.Schema({
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   title: { type: String, default: 'PDF Research Conversation' },
   documentName: { type: String, default: '' },
+  selectedDocumentIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'ResearchDocument' }],
+  mode: { type: String, default: 'general' },
   documentChunks: [{
     pageNumber: { type: Number, required: true },
-    content: { type: String, required: true }
+    content: { type: String, required: true },
+    documentId: { type: String, default: '' },
+    documentTitle: { type: String, default: '' }
   }],
   messages: [{
     role: { type: String, enum: ['user', 'assistant', 'system'], required: true },
     content: { type: String, required: true },
     citations: [{
+      documentId: { type: String, default: '' },
+      documentTitle: { type: String, default: '' },
       page: { type: Number },
       passage: { type: String },
-      score: { type: Number }
+      score: { type: Number },
+      evidenceId: { type: String, default: '' }
     }],
+    retrievalStatus: { type: String, default: 'grounded' },
+    modelMetadata: { type: mongoose.Schema.Types.Mixed, default: {} },
     timestamp: { type: Date, default: Date.now }
-  }]
+  }],
+  deletedAt: { type: Date, default: null }
 }, { timestamps: true });
 researchChatSchema.index({ projectId: 1, updatedAt: -1 });
+
+// Phase 6: PDF Research Document & RAG Models
+const researchDocumentSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  referenceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Citation', default: null },
+  filename: { type: String, required: true },
+  originalFilename: { type: String, required: true },
+  mimeType: { type: String, default: 'application/pdf' },
+  fileSize: { type: Number, default: 0 },
+  storageKey: { type: String, required: true },
+  storagePath: { type: String, default: '' },
+  checksum: { type: String, default: '' },
+  pageCount: { type: Number, default: 1 },
+  extractionStatus: { type: String, enum: ['pending', 'processing', 'completed', 'failed'], default: 'pending', index: true },
+  indexingStatus: { type: String, enum: ['pending', 'indexing', 'indexed', 'failed'], default: 'pending', index: true },
+  language: { type: String, default: 'en' },
+  title: { type: String, default: 'Untitled Document' },
+  authors: [{ type: String }],
+  year: { type: String, default: '' },
+  journal: { type: String, default: '' },
+  doi: { type: String, default: '' },
+  metadata: { type: mongoose.Schema.Types.Mixed, default: {} },
+  deletedAt: { type: Date, default: null, index: true }
+}, { timestamps: true });
+researchDocumentSchema.index({ projectId: 1, deletedAt: 1, createdAt: -1 });
+
+const documentChunkSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'ResearchDocument', required: true, index: true },
+  documentVersionId: { type: String, default: null },
+  pageNumber: { type: Number, required: true },
+  chunkIndex: { type: Number, required: true },
+  text: { type: String, required: true },
+  textHash: { type: String, default: '' },
+  tokenCount: { type: Number, default: 0 },
+  sectionHeading: { type: String, default: '' },
+  extractionMethod: { type: String, default: 'pdf_stream' },
+  boundingBoxes: { type: mongoose.Schema.Types.Mixed, default: null },
+  embedding: { type: [Number], default: [] },
+  embeddingModel: { type: String, default: 'text-embedding-004' },
+  deletedAt: { type: Date, default: null }
+}, { timestamps: true });
+documentChunkSchema.index({ documentId: 1, pageNumber: 1, chunkIndex: 1 });
+documentChunkSchema.index({ projectId: 1, documentId: 1 });
+
+const documentIndexSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'ResearchDocument', required: true, index: true },
+  termFrequencies: { type: mongoose.Schema.Types.Mixed, default: {} },
+  totalTokens: { type: Number, default: 0 },
+  uniqueTerms: { type: Number, default: 0 },
+  indexedAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+
+const citationEvidenceSchema = new mongoose.Schema({
+  messageId: { type: String, default: '' },
+  chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'ResearchChat', default: null, index: true },
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'ResearchDocument', required: true, index: true },
+  documentVersionId: { type: String, default: null },
+  chunkId: { type: mongoose.Schema.Types.ObjectId, ref: 'DocumentChunk', default: null },
+  pageNumber: { type: Number, required: true },
+  sourceText: { type: String, required: true },
+  boundingBoxes: { type: mongoose.Schema.Types.Mixed, default: null },
+  verificationStatus: { type: String, enum: ['verified', 'unverified', 'rejected'], default: 'verified' }
+}, { timestamps: true });
+
+const documentProcessingJobSchema = new mongoose.Schema({
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'ResearchDocument', required: true, index: true },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  status: { type: String, enum: ['queued', 'processing', 'completed', 'failed', 'cancelled'], default: 'queued', index: true },
+  progress: { type: Number, default: 0 },
+  stage: { type: String, default: 'extraction' },
+  errorMessage: { type: String, default: '' },
+  retries: { type: Number, default: 0 },
+  startedAt: { type: Date },
+  completedAt: { type: Date }
+}, { timestamps: true });
 
 // Systematic Review & Screening Models (PRISMA 2020)
 const systematicReviewSchema = new mongoose.Schema({
@@ -756,6 +846,11 @@ export const SynthesisDraft = mongoose.model('SynthesisDraft', synthesisDraftSch
 export const Dataset = mongoose.model('Dataset', datasetSchema);
 export const Analysis = mongoose.model('Analysis', analysisSchema);
 export const ResearchChat = mongoose.model('ResearchChat', researchChatSchema);
+export const ResearchDocument = mongoose.model('ResearchDocument', researchDocumentSchema);
+export const DocumentChunk = mongoose.model('DocumentChunk', documentChunkSchema);
+export const DocumentIndex = mongoose.model('DocumentIndex', documentIndexSchema);
+export const CitationEvidence = mongoose.model('CitationEvidence', citationEvidenceSchema);
+export const DocumentProcessingJob = mongoose.model('DocumentProcessingJob', documentProcessingJobSchema);
 export const SystematicReview = mongoose.model('SystematicReview', systematicReviewSchema);
 export const StudyRecord = mongoose.model('StudyRecord', studyRecordSchema);
 export const JournalSubmission = mongoose.model('JournalSubmission', journalSubmissionSchema);

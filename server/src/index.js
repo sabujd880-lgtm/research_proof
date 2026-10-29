@@ -60,6 +60,11 @@ import {
   Dataset,
   Analysis,
   ResearchChat,
+  ResearchDocument,
+  DocumentChunk,
+  DocumentIndex,
+  CitationEvidence,
+  DocumentProcessingJob,
   SystematicReview,
   StudyRecord,
   JournalSubmission
@@ -126,7 +131,11 @@ import {
 import {
   extractAndChunkDocument,
   searchDocumentChunks,
-  generateGroundedAnswer
+  generateGroundedAnswer,
+  validatePdfFile,
+  extractPagesFromPdf,
+  chunkDocumentPages,
+  validateMessageCitations
 } from './pdfChatService.js';
 
 const upload = multer({
@@ -345,6 +354,11 @@ const memSynthesisDrafts = new Map();
 const memDatasets = new Map();
 const memAnalyses = new Map();
 const memResearchChats = new Map();
+const memResearchDocuments = new Map();
+const memDocumentChunks = new Map();
+const memCitationEvidences = new Map();
+const memDocumentProcessingJobs = new Map();
+const memDocumentStorage = new Map();
 const memSystematicReviews = new Map();
 const memStudyRecords = new Map();
 const memJournalSubmissions = new Map();
@@ -372,6 +386,11 @@ app.locals.memSynthesisDrafts = memSynthesisDrafts;
 app.locals.memDatasets = memDatasets;
 app.locals.memAnalyses = memAnalyses;
 app.locals.memResearchChats = memResearchChats;
+app.locals.memResearchDocuments = memResearchDocuments;
+app.locals.memDocumentChunks = memDocumentChunks;
+app.locals.memCitationEvidences = memCitationEvidences;
+app.locals.memDocumentProcessingJobs = memDocumentProcessingJobs;
+app.locals.memDocumentStorage = memDocumentStorage;
 app.locals.memSystematicReviews = memSystematicReviews;
 app.locals.memStudyRecords = memStudyRecords;
 app.locals.memJournalSubmissions = memJournalSubmissions;
@@ -4537,94 +4556,172 @@ apiRouter.post('/projects/:id/literature/synthesize', requireAuth, async (req, r
   });
 });
 
-// PDF Grounded Research Chat Endpoints (Module 4)
+// PDF Grounded Research Chat Endpoints (Module 4 & Phase 6 Complete Intelligence)
+
+// Legacy compatibility endpoint: Upload document for a project chat
 apiRouter.post('/projects/:id/pdf-chat/upload', requireAuth, upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Please upload a PDF or text document.' });
 
-    const chunks = extractAndChunkDocument(req.file.buffer, req.file.originalname);
+    const validation = validatePdfFile(req.file.buffer, req.file.originalname);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error || 'Invalid PDF or document file.' });
+    }
+
+    const extracted = extractPagesFromPdf(req.file.buffer, req.file.originalname);
+    const docId = new mongoose.Types.ObjectId().toString();
+    const chunks = chunkDocumentPages(extracted, docId);
     const chatTitle = `Research Chat: ${req.file.originalname}`;
 
+    // Store raw file buffer in memory storage
+    memDocumentStorage.set(docId, req.file.buffer);
+
+    // Register ResearchDocument record
+    const docRecord = {
+      _id: isDbConnected() ? new mongoose.Types.ObjectId(docId) : docId,
+      projectId: req.params.id,
+      ownerId: req.user.id,
+      userId: req.user.id,
+      filename: req.file.originalname,
+      title: extracted.metadata?.title || req.file.originalname.replace(/\.[^/.]+$/, ''),
+      fileSize: req.file.size,
+      mimeType: req.file.mimetype || 'application/pdf',
+      checksum: validation.checksum,
+      pageCount: extracted.pageCount,
+      chunkCount: chunks.length,
+      status: 'indexed',
+      metadata: {
+        authors: extracted.metadata?.authors || [],
+        year: extracted.metadata?.year || null,
+        journal: extracted.metadata?.journal || '',
+        doi: extracted.metadata?.doi || '',
+        abstract: extracted.metadata?.abstract || (extracted.pages?.[0]?.text?.slice(0, 300) || extracted[0]?.text?.slice(0, 300) || '')
+      },
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
     if (isDbConnected()) {
+      await ResearchDocument.create(docRecord);
+      for (const chunk of chunks) {
+        await DocumentChunk.create(chunk);
+      }
       const chat = await ResearchChat.create({
         projectId: req.params.id,
         userId: req.user.id,
+        ownerId: req.user.id,
         title: chatTitle,
         documentName: req.file.originalname,
         documentChunks: chunks,
+        selectedDocumentIds: [docId],
+        mode: 'default',
         messages: [{
           role: 'system',
-          content: `Document "${req.file.originalname}" loaded with ${chunks.length} page/section chunks. Ask any grounded question regarding its methodology, findings, or data.`
+          content: `Document "${req.file.originalname}" loaded with ${chunks.length} page/section chunks across ${extracted.pageCount} page(s). Ask any grounded question regarding its methodology, findings, or data.`
         }]
       });
-      return res.status(201).json({ chatId: chat._id, title: chat.title, chunkCount: chunks.length });
+      return res.status(201).json({ chatId: chat._id, title: chat.title, chunkCount: chunks.length, documentId: docId });
+    }
+
+    memResearchDocuments.set(docId, docRecord);
+    for (const chunk of chunks) {
+      memDocumentChunks.set(chunk.chunkId || `${docId}_${chunk.chunkIndex}`, chunk);
     }
 
     const chatId = new mongoose.Types.ObjectId().toString();
     const newChat = {
       _id: chatId,
+      id: chatId,
       projectId: req.params.id,
       userId: req.user.id,
+      ownerId: req.user.id,
       title: chatTitle,
       documentName: req.file.originalname,
       documentChunks: chunks,
+      selectedDocumentIds: [docId],
+      mode: 'default',
       messages: [{
         role: 'system',
-        content: `Document "${req.file.originalname}" loaded with ${chunks.length} chunks.`
+        content: `Document "${req.file.originalname}" loaded with ${chunks.length} page/section chunks across ${extracted.pageCount} page(s).`
       }],
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
     memResearchChats.set(chatId, newChat);
-    res.status(201).json({ chatId, title: chatTitle, chunkCount: chunks.length });
+    res.status(201).json({ chatId, title: chatTitle, chunkCount: chunks.length, documentId: docId });
   } catch (e) { next(e); }
 });
 
+// Legacy compatibility endpoint: List chats for a project
 apiRouter.get('/projects/:id/pdf-chat', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
-      const chats = await ResearchChat.find({ projectId: req.params.id }).select('title documentName updatedAt messages').lean();
+      const chats = await ResearchChat.find({ projectId: req.params.id, deletedAt: null })
+        .select('title documentName selectedDocumentIds updatedAt messages')
+        .sort({ updatedAt: -1 })
+        .lean();
       return res.json(chats);
     }
-    const chats = [...memResearchChats.values()].filter(c => c.projectId === req.params.id);
+    const chats = [...memResearchChats.values()]
+      .filter(c => c.projectId === req.params.id && !c.deletedAt)
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt));
     res.json(chats);
   } catch (e) { next(e); }
 });
 
+// Legacy compatibility endpoint: Get single chat
 apiRouter.get('/projects/:id/pdf-chat/:chatId', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
-      const chat = await ResearchChat.findOne({ _id: req.params.chatId, projectId: req.params.id }).lean();
+      const chat = await ResearchChat.findOne({ _id: req.params.chatId, projectId: req.params.id, deletedAt: null }).lean();
       if (!chat) return res.status(404).json({ error: 'Chat not found.' });
       return res.json(chat);
     }
     const chat = memResearchChats.get(req.params.chatId);
-    if (!chat) return res.status(404).json({ error: 'Chat not found.' });
+    if (!chat || chat.deletedAt || (chat.projectId && chat.projectId !== req.params.id)) {
+      return res.status(404).json({ error: 'Chat not found.' });
+    }
     res.json(chat);
   } catch (e) { next(e); }
 });
 
+// Legacy compatibility endpoint: Send message in chat
 apiRouter.post('/projects/:id/pdf-chat/:chatId/message', requireAuth, async (req, res, next) => {
   try {
-    const { query } = req.body || {};
+    const { query, mode } = req.body || {};
     if (!query || !query.trim()) return res.status(400).json({ error: 'Question query is required.' });
 
     let chat = null;
     if (isDbConnected()) {
-      chat = await ResearchChat.findOne({ _id: req.params.chatId, projectId: req.params.id });
+      chat = await ResearchChat.findOne({ _id: req.params.chatId, projectId: req.params.id, deletedAt: null });
     } else {
       chat = memResearchChats.get(req.params.chatId);
     }
-    if (!chat) return res.status(404).json({ error: 'Research chat not found.' });
+    if (!chat || chat.deletedAt) return res.status(404).json({ error: 'Research chat not found.' });
 
-    // Grounded retrieval across chunks
-    const retrieved = searchDocumentChunks(chat.documentChunks, query, 3);
-    const { answer, citations } = generateGroundedAnswer(query, retrieved);
+    // Gather chunks: check if chat has selected documents or documentChunks
+    let chunks = [];
+    if (chat.selectedDocumentIds && chat.selectedDocumentIds.length > 0) {
+      if (isDbConnected()) {
+        chunks = await DocumentChunk.find({ documentId: { $in: chat.selectedDocumentIds } }).lean();
+      } else {
+        chunks = [...memDocumentChunks.values()].filter(c => chat.selectedDocumentIds.includes(c.documentId?.toString()));
+      }
+    }
+    if (chunks.length === 0 && Array.isArray(chat.documentChunks) && chat.documentChunks.length > 0) {
+      chunks = chat.documentChunks;
+    }
+
+    const effectiveMode = mode || chat.mode || 'default';
+    const retrieved = searchDocumentChunks(chunks, query, 5, { mode: effectiveMode });
+    const { answer, citations } = generateGroundedAnswer(query, retrieved, { mode: effectiveMode });
 
     const userMsg = { role: 'user', content: query, timestamp: new Date() };
     const assistantMsg = { role: 'assistant', content: answer, citations, timestamp: new Date() };
 
     chat.messages.push(userMsg);
     chat.messages.push(assistantMsg);
+    chat.updatedAt = new Date();
 
     if (isDbConnected()) {
       await chat.save();
@@ -4632,7 +4729,813 @@ apiRouter.post('/projects/:id/pdf-chat/:chatId/message', requireAuth, async (req
       memResearchChats.set(req.params.chatId, chat);
     }
 
-    res.json({ message: assistantMsg });
+    res.json({ message: assistantMsg, citations });
+  } catch (e) { next(e); }
+});
+
+// ==========================================
+// Phase 6 Enterprise PDF Intelligence Routes
+// ==========================================
+
+// POST /pdf-chat/documents/upload - Upload single or multiple PDFs with deduplication & indexing
+apiRouter.post('/pdf-chat/documents/upload', requireAuth, upload.any(), async (req, res, next) => {
+  try {
+    const files = req.files || [];
+    if (files.length === 0 && req.file) files.push(req.file);
+    if (files.length === 0) {
+      return res.status(400).json({ error: 'Please upload at least one PDF or document file.' });
+    }
+
+    const projectId = req.body.projectId || req.query.projectId || 'default-project';
+    const forceReindex = req.body.force === 'true' || req.body.force === true;
+    const results = [];
+
+    for (const file of files) {
+      const validation = validatePdfFile(file.buffer, file.originalname);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.error || `File "${file.originalname}" is invalid.` });
+      }
+
+      const checksum = validation.checksum;
+      let existingDoc = null;
+
+      if (isDbConnected()) {
+        existingDoc = await ResearchDocument.findOne({ projectId, checksum, deletedAt: null }).lean();
+      } else {
+        existingDoc = [...memResearchDocuments.values()].find(
+          d => (d.projectId === projectId || projectId === 'all') && d.checksum === checksum && !d.deletedAt
+        );
+      }
+
+      if (existingDoc && !forceReindex) {
+        results.push({
+          id: (existingDoc._id || existingDoc.id).toString(),
+          _id: (existingDoc._id || existingDoc.id).toString(),
+          title: existingDoc.title,
+          filename: existingDoc.filename,
+          pageCount: existingDoc.pageCount,
+          chunkCount: existingDoc.chunkCount,
+          checksum: existingDoc.checksum,
+          status: existingDoc.status,
+          isDuplicate: true
+        });
+        continue;
+      }
+
+      const extracted = extractPagesFromPdf(file.buffer, file.originalname);
+      const docId = new mongoose.Types.ObjectId().toString();
+      const chunks = chunkDocumentPages(extracted, docId);
+
+      // Store binary buffer
+      memDocumentStorage.set(docId, file.buffer);
+
+      const docRecord = {
+        _id: isDbConnected() ? new mongoose.Types.ObjectId(docId) : docId,
+        id: docId,
+        projectId,
+        ownerId: req.user.id,
+        userId: req.user.id,
+        filename: file.originalname,
+        title: extracted.metadata?.title || file.originalname.replace(/\.[^/.]+$/, ''),
+        fileSize: file.size,
+        mimeType: file.mimetype || 'application/pdf',
+        checksum,
+        pageCount: extracted.pageCount,
+        chunkCount: chunks.length,
+        status: 'indexed',
+        metadata: {
+          authors: extracted.metadata?.authors || [],
+          year: extracted.metadata?.year || null,
+          journal: extracted.metadata?.journal || '',
+          doi: extracted.metadata?.doi || '',
+          abstract: extracted.metadata?.abstract || (extracted.pages?.[0]?.text?.slice(0, 300) || extracted[0]?.text?.slice(0, 300) || '')
+        },
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+
+      if (isDbConnected()) {
+        await ResearchDocument.create(docRecord);
+        for (const chunk of chunks) {
+          await DocumentChunk.create(chunk);
+        }
+        await DocumentIndex.create({
+          documentId: docRecord._id,
+          projectId,
+          totalChunks: chunks.length,
+          totalTokens: chunks.reduce((acc, c) => acc + (c.tokenCount || 0), 0),
+          lastIndexedAt: new Date()
+        });
+      } else {
+        memResearchDocuments.set(docId, docRecord);
+        for (const chunk of chunks) {
+          memDocumentChunks.set(chunk.chunkId || `${docId}_${chunk.chunkIndex}`, chunk);
+        }
+      }
+
+      results.push({
+        id: docId,
+        _id: docId,
+        title: docRecord.title,
+        filename: docRecord.filename,
+        pageCount: docRecord.pageCount,
+        chunkCount: docRecord.chunkCount,
+        checksum: docRecord.checksum,
+        status: docRecord.status,
+        isDuplicate: false
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      count: results.length,
+      documents: results,
+      document: results[0]
+    });
+  } catch (e) { next(e); }
+});
+
+// GET /pdf-chat/documents - List documents with search and pagination
+apiRouter.get('/pdf-chat/documents', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId, search, page = 1, limit = 50 } = req.query;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10) || 50));
+
+    if (isDbConnected()) {
+      const filter = { deletedAt: null };
+      if (projectId && projectId !== 'all') filter.projectId = projectId;
+      if (search && search.trim()) {
+        const regex = new RegExp(search.trim(), 'i');
+        filter.$or = [{ filename: regex }, { title: regex }, { 'metadata.abstract': regex }];
+      }
+
+      const total = await ResearchDocument.countDocuments(filter);
+      const docs = await ResearchDocument.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum)
+        .lean();
+
+      return res.json({
+        documents: docs.map(d => ({ ...d, id: d._id.toString() })),
+        pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) }
+      });
+    }
+
+    let docs = [...memResearchDocuments.values()].filter(d => {
+      if (d.deletedAt) return false;
+      if (projectId && projectId !== 'all' && d.projectId !== projectId) return false;
+      if (search && search.trim()) {
+        const term = search.trim().toLowerCase();
+        const matchesName = d.filename?.toLowerCase().includes(term);
+        const matchesTitle = d.title?.toLowerCase().includes(term);
+        const matchesAbstract = d.metadata?.abstract?.toLowerCase().includes(term);
+        if (!matchesName && !matchesTitle && !matchesAbstract) return false;
+      }
+      return true;
+    }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    const total = docs.length;
+    const paginated = docs.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+
+    res.json({
+      documents: paginated.map(d => ({ ...d, id: (d._id || d.id).toString() })),
+      pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) }
+    });
+  } catch (e) { next(e); }
+});
+
+// GET /pdf-chat/documents/:documentId - Get single document details & chunk count
+apiRouter.get('/pdf-chat/documents/:documentId', requireAuth, async (req, res, next) => {
+  try {
+    const { documentId } = req.params;
+    let doc = null;
+
+    if (isDbConnected()) {
+      doc = await ResearchDocument.findOne({ _id: documentId, deletedAt: null }).lean();
+    } else {
+      doc = memResearchDocuments.get(documentId);
+      if (doc && doc.deletedAt) doc = null;
+    }
+
+    if (!doc) return res.status(404).json({ error: 'Document not found.' });
+
+    let chunkCount = doc.chunkCount || 0;
+    if (!chunkCount) {
+      if (isDbConnected()) {
+        chunkCount = await DocumentChunk.countDocuments({ documentId });
+      } else {
+        chunkCount = [...memDocumentChunks.values()].filter(c => c.documentId?.toString() === documentId).length;
+      }
+    }
+
+    res.json({
+      ...doc,
+      id: (doc._id || doc.id).toString(),
+      chunkCount
+    });
+  } catch (e) { next(e); }
+});
+
+// GET /pdf-chat/documents/:documentId/status - Get indexing progress status
+apiRouter.get('/pdf-chat/documents/:documentId/status', requireAuth, async (req, res, next) => {
+  try {
+    const { documentId } = req.params;
+    let doc = null;
+    if (isDbConnected()) {
+      doc = await ResearchDocument.findOne({ _id: documentId, deletedAt: null }).select('status pageCount chunkCount updatedAt').lean();
+    } else {
+      doc = memResearchDocuments.get(documentId);
+    }
+    if (!doc || doc.deletedAt) return res.status(404).json({ error: 'Document not found.' });
+
+    res.json({
+      status: doc.status || 'indexed',
+      progress: 100,
+      pageCount: doc.pageCount || 1,
+      chunkCount: doc.chunkCount || 0,
+      updatedAt: doc.updatedAt
+    });
+  } catch (e) { next(e); }
+});
+
+// POST /pdf-chat/documents/:documentId/reindex - Trigger document reindexing
+apiRouter.post('/pdf-chat/documents/:documentId/reindex', requireAuth, async (req, res, next) => {
+  try {
+    const { documentId } = req.params;
+    let doc = null;
+    if (isDbConnected()) {
+      doc = await ResearchDocument.findOne({ _id: documentId, deletedAt: null });
+    } else {
+      doc = memResearchDocuments.get(documentId);
+    }
+    if (!doc || doc.deletedAt) return res.status(404).json({ error: 'Document not found.' });
+
+    const buffer = memDocumentStorage.get(documentId);
+    if (!buffer) {
+      return res.status(400).json({ error: 'Document source binary not found for reindexing.' });
+    }
+
+    const extracted = extractPagesFromPdf(buffer, doc.filename);
+    const chunks = chunkDocumentPages(extracted, documentId);
+
+    if (isDbConnected()) {
+      await DocumentChunk.deleteMany({ documentId });
+      for (const chunk of chunks) {
+        await DocumentChunk.create(chunk);
+      }
+      doc.chunkCount = chunks.length;
+      doc.pageCount = extracted.pageCount;
+      doc.status = 'indexed';
+      doc.updatedAt = new Date();
+      await doc.save();
+    } else {
+      // Remove old chunks
+      for (const [key, c] of memDocumentChunks.entries()) {
+        if (c.documentId?.toString() === documentId) memDocumentChunks.delete(key);
+      }
+      for (const chunk of chunks) {
+        memDocumentChunks.set(chunk.chunkId || `${documentId}_${chunk.chunkIndex}`, chunk);
+      }
+      doc.chunkCount = chunks.length;
+      doc.pageCount = extracted.pageCount;
+      doc.status = 'indexed';
+      doc.updatedAt = new Date().toISOString();
+      memResearchDocuments.set(documentId, doc);
+    }
+
+    res.json({ success: true, message: 'Document reindexed successfully.', chunkCount: chunks.length });
+  } catch (e) { next(e); }
+});
+
+// DELETE /pdf-chat/documents/:documentId - Soft delete document
+apiRouter.delete('/pdf-chat/documents/:documentId', requireAuth, async (req, res, next) => {
+  try {
+    const { documentId } = req.params;
+    if (isDbConnected()) {
+      const doc = await ResearchDocument.findOne({ _id: documentId });
+      if (!doc) return res.status(404).json({ error: 'Document not found.' });
+      doc.deletedAt = new Date();
+      await doc.save();
+      return res.json({ success: true, deleted: true });
+    }
+
+    const doc = memResearchDocuments.get(documentId);
+    if (!doc) return res.status(404).json({ error: 'Document not found.' });
+    doc.deletedAt = new Date().toISOString();
+    res.json({ success: true, deleted: true });
+  } catch (e) { next(e); }
+});
+
+// GET /pdf-chat/documents/:documentId/content - Stream PDF binary or return extracted pages
+apiRouter.get('/pdf-chat/documents/:documentId/content', requireAuth, async (req, res, next) => {
+  try {
+    const { documentId } = req.params;
+    const format = req.query.format || 'text';
+
+    let doc = null;
+    if (isDbConnected()) {
+      doc = await ResearchDocument.findOne({ _id: documentId, deletedAt: null }).lean();
+    } else {
+      doc = memResearchDocuments.get(documentId);
+    }
+    if (!doc || doc.deletedAt) return res.status(404).json({ error: 'Document not found.' });
+
+    const buffer = memDocumentStorage.get(documentId);
+
+    if (format === 'raw' && buffer) {
+      res.setHeader('Content-Type', doc.mimeType || 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${doc.filename}"`);
+      return res.send(buffer);
+    }
+
+    // Return chunks / page texts
+    let chunks = [];
+    if (isDbConnected()) {
+      chunks = await DocumentChunk.find({ documentId }).sort({ pageNumber: 1, chunkIndex: 1 }).lean();
+    } else {
+      chunks = [...memDocumentChunks.values()]
+        .filter(c => c.documentId?.toString() === documentId)
+        .sort((a, b) => (a.pageNumber || 1) - (b.pageNumber || 1) || a.chunkIndex - b.chunkIndex);
+    }
+
+    res.json({
+      documentId,
+      filename: doc.filename,
+      pageCount: doc.pageCount,
+      chunks: chunks.map(c => ({
+        chunkId: c.chunkId,
+        pageNumber: c.pageNumber,
+        sectionTitle: c.sectionTitle,
+        text: c.text
+      }))
+    });
+  } catch (e) { next(e); }
+});
+
+// GET /pdf-chat/conversations - List conversations
+apiRouter.get('/pdf-chat/conversations', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId } = req.query;
+    if (isDbConnected()) {
+      const filter = { deletedAt: null };
+      if (projectId && projectId !== 'all') filter.projectId = projectId;
+      const chats = await ResearchChat.find(filter)
+        .select('title documentName selectedDocumentIds mode updatedAt createdAt messages')
+        .sort({ updatedAt: -1 })
+        .lean();
+
+      return res.json(chats.map(c => ({
+        id: c._id.toString(),
+        _id: c._id.toString(),
+        title: c.title,
+        documentName: c.documentName,
+        selectedDocumentIds: c.selectedDocumentIds || [],
+        mode: c.mode || 'default',
+        messageCount: c.messages?.length || 0,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt
+      })));
+    }
+
+    const chats = [...memResearchChats.values()]
+      .filter(c => {
+        if (c.deletedAt) return false;
+        if (projectId && projectId !== 'all' && c.projectId !== projectId) return false;
+        return true;
+      })
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt))
+      .map(c => ({
+        id: (c._id || c.id).toString(),
+        _id: (c._id || c.id).toString(),
+        title: c.title,
+        documentName: c.documentName,
+        selectedDocumentIds: c.selectedDocumentIds || [],
+        mode: c.mode || 'default',
+        messageCount: c.messages?.length || 0,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt
+      }));
+
+    res.json(chats);
+  } catch (e) { next(e); }
+});
+
+// POST /pdf-chat/conversations - Create a new research conversation
+apiRouter.post('/pdf-chat/conversations', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId, title, documentIds, mode = 'default' } = req.body || {};
+    const effectiveProjectId = projectId || 'default-project';
+    const effectiveTitle = title && title.trim() ? title.trim() : 'New Research Conversation';
+    const selectedDocIds = Array.isArray(documentIds) ? documentIds : [];
+
+    // Lookup document names if any selected
+    let documentName = 'Multi-Document Research';
+    if (selectedDocIds.length === 1) {
+      const singleDoc = isDbConnected()
+        ? await ResearchDocument.findById(selectedDocIds[0]).lean()
+        : memResearchDocuments.get(selectedDocIds[0]);
+      if (singleDoc) documentName = singleDoc.filename || singleDoc.title;
+    }
+
+    const initialMessage = {
+      role: 'system',
+      content: selectedDocIds.length > 0
+        ? `Conversation initialized with ${selectedDocIds.length} document(s) in "${mode}" mode. Ask any question to retrieve grounded evidence.`
+        : `Conversation initialized in "${mode}" mode. Upload or select documents to ask grounded questions.`
+    };
+
+    if (isDbConnected()) {
+      const chat = await ResearchChat.create({
+        projectId: effectiveProjectId,
+        userId: req.user.id,
+        ownerId: req.user.id,
+        title: effectiveTitle,
+        documentName,
+        selectedDocumentIds: selectedDocIds,
+        mode,
+        messages: [initialMessage]
+      });
+      return res.status(201).json({
+        id: chat._id.toString(),
+        _id: chat._id.toString(),
+        title: chat.title,
+        documentName: chat.documentName,
+        selectedDocumentIds: chat.selectedDocumentIds,
+        mode: chat.mode,
+        messages: chat.messages
+      });
+    }
+
+    const chatId = new mongoose.Types.ObjectId().toString();
+    const newChat = {
+      _id: chatId,
+      id: chatId,
+      projectId: effectiveProjectId,
+      userId: req.user.id,
+      ownerId: req.user.id,
+      title: effectiveTitle,
+      documentName,
+      selectedDocumentIds: selectedDocIds,
+      mode,
+      messages: [initialMessage],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    memResearchChats.set(chatId, newChat);
+
+    res.status(201).json({
+      id: chatId,
+      _id: chatId,
+      title: newChat.title,
+      documentName: newChat.documentName,
+      selectedDocumentIds: newChat.selectedDocumentIds,
+      mode: newChat.mode,
+      messages: newChat.messages
+    });
+  } catch (e) { next(e); }
+});
+
+// GET /pdf-chat/conversations/:chatId - Get conversation details and message history
+apiRouter.get('/pdf-chat/conversations/:chatId', requireAuth, async (req, res, next) => {
+  try {
+    const { chatId } = req.params;
+    let chat = null;
+
+    if (isDbConnected()) {
+      chat = await ResearchChat.findOne({ _id: chatId, deletedAt: null }).lean();
+    } else {
+      chat = memResearchChats.get(chatId);
+      if (chat && chat.deletedAt) chat = null;
+    }
+
+    if (!chat) return res.status(404).json({ error: 'Conversation not found.' });
+
+    res.json({
+      ...chat,
+      id: (chat._id || chat.id).toString()
+    });
+  } catch (e) { next(e); }
+});
+
+// PATCH /pdf-chat/conversations/:chatId - Update title, selected documents, mode
+apiRouter.patch('/pdf-chat/conversations/:chatId', requireAuth, async (req, res, next) => {
+  try {
+    const { chatId } = req.params;
+    const { title, documentIds, mode } = req.body || {};
+
+    let chat = null;
+    if (isDbConnected()) {
+      chat = await ResearchChat.findOne({ _id: chatId, deletedAt: null });
+    } else {
+      chat = memResearchChats.get(chatId);
+    }
+    if (!chat || chat.deletedAt) return res.status(404).json({ error: 'Conversation not found.' });
+
+    if (title && title.trim()) chat.title = title.trim();
+    if (Array.isArray(documentIds)) chat.selectedDocumentIds = documentIds;
+    if (mode) chat.mode = mode;
+    chat.updatedAt = new Date();
+
+    if (isDbConnected()) {
+      await chat.save();
+    } else {
+      memResearchChats.set(chatId, chat);
+    }
+
+    res.json({
+      success: true,
+      chat: {
+        id: (chat._id || chat.id).toString(),
+        title: chat.title,
+        selectedDocumentIds: chat.selectedDocumentIds,
+        mode: chat.mode,
+        updatedAt: chat.updatedAt
+      }
+    });
+  } catch (e) { next(e); }
+});
+
+// DELETE /pdf-chat/conversations/:chatId - Soft delete conversation
+apiRouter.delete('/pdf-chat/conversations/:chatId', requireAuth, async (req, res, next) => {
+  try {
+    const { chatId } = req.params;
+    if (isDbConnected()) {
+      const chat = await ResearchChat.findOne({ _id: chatId });
+      if (!chat) return res.status(404).json({ error: 'Conversation not found.' });
+      chat.deletedAt = new Date();
+      await chat.save();
+      return res.json({ success: true, deleted: true });
+    }
+
+    const chat = memResearchChats.get(chatId);
+    if (!chat) return res.status(404).json({ error: 'Conversation not found.' });
+    chat.deletedAt = new Date().toISOString();
+    res.json({ success: true, deleted: true });
+  } catch (e) { next(e); }
+});
+
+// POST /pdf-chat/conversations/:chatId/messages - Grounded RAG query synthesis
+apiRouter.post('/pdf-chat/conversations/:chatId/messages', requireAuth, async (req, res, next) => {
+  try {
+    const { chatId } = req.params;
+    const { query, mode, selectedDocumentIds } = req.body || {};
+
+    if (!query || !query.trim()) {
+      return res.status(400).json({ error: 'Question query is required.' });
+    }
+
+    let chat = null;
+    if (isDbConnected()) {
+      chat = await ResearchChat.findOne({ _id: chatId, deletedAt: null });
+    } else {
+      chat = memResearchChats.get(chatId);
+    }
+    if (!chat || chat.deletedAt) return res.status(404).json({ error: 'Conversation not found.' });
+
+    // Determine target documents: request body overrides conversation's selection
+    const docIds = (Array.isArray(selectedDocumentIds) && selectedDocumentIds.length > 0)
+      ? selectedDocumentIds
+      : (chat.selectedDocumentIds && chat.selectedDocumentIds.length > 0 ? chat.selectedDocumentIds : []);
+
+    let chunks = [];
+    if (docIds.length > 0) {
+      if (isDbConnected()) {
+        chunks = await DocumentChunk.find({ documentId: { $in: docIds } }).lean();
+      } else {
+        chunks = [...memDocumentChunks.values()].filter(c => docIds.includes(c.documentId?.toString()));
+      }
+    } else if (chat.projectId) {
+      // Fallback: load all chunks in the project
+      if (isDbConnected()) {
+        const projectDocs = await ResearchDocument.find({ projectId: chat.projectId, deletedAt: null }).select('_id').lean();
+        const pDocIds = projectDocs.map(d => d._id);
+        chunks = await DocumentChunk.find({ documentId: { $in: pDocIds } }).lean();
+      } else {
+        const pDocIds = [...memResearchDocuments.values()]
+          .filter(d => d.projectId === chat.projectId && !d.deletedAt)
+          .map(d => (d._id || d.id).toString());
+        chunks = [...memDocumentChunks.values()].filter(c => pDocIds.includes(c.documentId?.toString()));
+      }
+    }
+
+    // Also include legacy chat.documentChunks if present
+    if (chunks.length === 0 && Array.isArray(chat.documentChunks) && chat.documentChunks.length > 0) {
+      chunks = chat.documentChunks;
+    }
+
+    const effectiveMode = mode || chat.mode || 'default';
+    const retrieved = searchDocumentChunks(chunks, query, 5, { mode: effectiveMode });
+    const { answer, citations, confidence } = generateGroundedAnswer(query, retrieved, { mode: effectiveMode });
+    const validation = validateMessageCitations(answer, retrieved);
+
+    const messageId = new mongoose.Types.ObjectId().toString();
+
+    // Persist CitationEvidence records
+    const evidenceRecords = [];
+    for (const cit of citations) {
+      const matchedChunk = retrieved.find(r => r.chunkId === cit.evidenceId) || retrieved[0];
+      const evId = new mongoose.Types.ObjectId().toString();
+      const evData = {
+        _id: isDbConnected() ? new mongoose.Types.ObjectId(evId) : evId,
+        id: evId,
+        messageId,
+        chatId,
+        documentId: cit.documentId || matchedChunk?.documentId,
+        documentTitle: cit.documentTitle || matchedChunk?.documentTitle,
+        pageNumber: cit.page || matchedChunk?.pageNumber || 1,
+        sourceExcerpt: cit.excerpt || cit.passage || matchedChunk?.passage || matchedChunk?.text?.slice(0, 300) || matchedChunk?.content?.slice(0, 300) || '',
+        score: cit.score || 0.85,
+        claim: query,
+        verified: true,
+        createdAt: new Date()
+      };
+      if (isDbConnected()) {
+        await CitationEvidence.create(evData);
+      } else {
+        memCitationEvidences.set(evId, evData);
+      }
+      evidenceRecords.push(evData);
+    }
+
+    const userMsg = {
+      _id: new mongoose.Types.ObjectId().toString(),
+      role: 'user',
+      content: query,
+      timestamp: new Date()
+    };
+    const assistantMsg = {
+      _id: messageId,
+      role: 'assistant',
+      content: answer,
+      citations,
+      retrievalStatus: retrieved.length > 0 ? 'grounded' : 'empty',
+      timestamp: new Date()
+    };
+
+    chat.messages.push(userMsg);
+    chat.messages.push(assistantMsg);
+    chat.updatedAt = new Date();
+
+    if (isDbConnected()) {
+      await chat.save();
+    } else {
+      memResearchChats.set(chatId, chat);
+    }
+
+    res.json({
+      message: assistantMsg,
+      citations,
+      confidence,
+      validation,
+      retrievedChunks: retrieved.length
+    });
+  } catch (e) { next(e); }
+});
+
+// GET /pdf-chat/messages/:messageId/evidence - Retrieve verified citation provenance
+apiRouter.get('/pdf-chat/messages/:messageId/evidence', requireAuth, async (req, res, next) => {
+  try {
+    const { messageId } = req.params;
+    let evidences = [];
+
+    if (isDbConnected()) {
+      evidences = await CitationEvidence.find({ messageId }).lean();
+    } else {
+      evidences = [...memCitationEvidences.values()].filter(e => e.messageId === messageId);
+    }
+
+    res.json({
+      messageId,
+      count: evidences.length,
+      evidences: evidences.map(e => ({
+        id: (e._id || e.id).toString(),
+        documentTitle: e.documentTitle,
+        documentId: e.documentId,
+        pageNumber: e.pageNumber,
+        sourceExcerpt: e.sourceExcerpt,
+        score: e.score,
+        verified: e.verified
+      }))
+    });
+  } catch (e) { next(e); }
+});
+
+// POST /pdf-chat/documents/:documentId/send-to-literature - Export document directly to Literature Matrix
+apiRouter.post('/pdf-chat/documents/:documentId/send-to-literature', requireAuth, async (req, res, next) => {
+  try {
+    const { documentId } = req.params;
+    let doc = null;
+
+    if (isDbConnected()) {
+      doc = await ResearchDocument.findOne({ _id: documentId, deletedAt: null }).lean();
+    } else {
+      doc = memResearchDocuments.get(documentId);
+    }
+    if (!doc || doc.deletedAt) return res.status(404).json({ error: 'Document not found.' });
+
+    // Look for extracted chunks to populate methodology and findings
+    let chunks = [];
+    if (isDbConnected()) {
+      chunks = await DocumentChunk.find({ documentId }).limit(10).lean();
+    } else {
+      chunks = [...memDocumentChunks.values()].filter(c => c.documentId?.toString() === documentId).slice(0, 10);
+    }
+
+    const methodologyChunk = chunks.find(c => /method|design|experiment|procedure|protocol/i.test(c.text)) || chunks[1] || chunks[0];
+    const findingsChunk = chunks.find(c => /result|finding|showed|demonstrated|conclude/i.test(c.text)) || chunks[2] || chunks[0];
+
+    const entryId = new mongoose.Types.ObjectId().toString();
+    const entryData = {
+      _id: isDbConnected() ? new mongoose.Types.ObjectId(entryId) : entryId,
+      id: entryId,
+      projectId: doc.projectId || 'default-project',
+      userId: req.user.id,
+      title: doc.title || doc.filename,
+      authors: Array.isArray(doc.metadata?.authors) && doc.metadata.authors.length > 0
+        ? doc.metadata.authors
+        : [{ name: 'Extracted Author' }],
+      year: doc.metadata?.year || new Date().getFullYear(),
+      journal: doc.metadata?.journal || 'Imported Document',
+      doi: doc.metadata?.doi || '',
+      abstract: doc.metadata?.abstract || (chunks[0]?.text?.slice(0, 400) || ''),
+      studyDesign: 'Empirical Investigation',
+      sampleSize: 'See source publication',
+      keyFindings: findingsChunk ? findingsChunk.text.slice(0, 300) : 'Extracted findings from PDF analysis.',
+      methodology: methodologyChunk ? methodologyChunk.text.slice(0, 300) : 'Extracted methodology from PDF analysis.',
+      tags: ['pdf-import', 'evidence-grounded'],
+      qualityScore: 9,
+      status: 'included',
+      notes: `Imported directly from PDF document: ${doc.filename}`,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    if (isDbConnected()) {
+      await LiteratureEntry.create(entryData);
+    } else {
+      memLiterature.set(entryId, entryData);
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Document successfully converted and added to Literature Review Matrix.',
+      entry: entryData
+    });
+  } catch (e) { next(e); }
+});
+
+// POST /pdf-chat/documents/:documentId/link-reference - Link or create Reference record
+apiRouter.post('/pdf-chat/documents/:documentId/link-reference', requireAuth, async (req, res, next) => {
+  try {
+    const { documentId } = req.params;
+    let doc = null;
+
+    if (isDbConnected()) {
+      doc = await ResearchDocument.findOne({ _id: documentId, deletedAt: null });
+    } else {
+      doc = memResearchDocuments.get(documentId);
+    }
+    if (!doc || doc.deletedAt) return res.status(404).json({ error: 'Document not found.' });
+
+    const refId = new mongoose.Types.ObjectId().toString();
+    const authorList = Array.isArray(doc.metadata?.authors) && doc.metadata.authors.length > 0
+      ? doc.metadata.authors
+      : [{ family: 'Author', given: 'Research' }];
+
+    const refData = {
+      _id: isDbConnected() ? new mongoose.Types.ObjectId(refId) : refId,
+      id: refId,
+      projectId: doc.projectId || 'default-project',
+      userId: req.user.id,
+      title: doc.title || doc.filename,
+      authors: authorList,
+      year: doc.metadata?.year || new Date().getFullYear(),
+      journal: doc.metadata?.journal || 'Scholarly Publication',
+      doi: doc.metadata?.doi || '',
+      abstract: doc.metadata?.abstract || '',
+      entryType: 'article',
+      tags: ['pdf-source'],
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    if (isDbConnected()) {
+      await Reference.create(refData);
+      doc.referenceId = refData._id;
+      await doc.save();
+    } else {
+      memCitations.set(refId, refData);
+      doc.referenceId = refId;
+      memResearchDocuments.set(documentId, doc);
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Reference linked successfully.',
+      reference: refData
+    });
   } catch (e) { next(e); }
 });
 
