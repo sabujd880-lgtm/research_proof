@@ -106,27 +106,189 @@ const documentVersionSchema = new mongoose.Schema({
 }, { timestamps: true });
 documentVersionSchema.index({ documentId: 1, versionNumber: -1 });
 
-// Literature Review Model
+// Literature Review Studio Models (Phase 5)
 const literatureEntrySchema = new mongoose.Schema({
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  referenceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Citation', default: null, index: true },
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null },
   title: { type: String, required: true, trim: true },
   authors: [{ type: String, trim: true }],
   year: { type: String, default: '' },
   journal: { type: String, default: '' },
   doi: { type: String, default: '', trim: true },
+  normalizedDoi: { type: String, default: '', trim: true },
+  url: { type: String, default: '' },
   abstract: { type: String, default: '' },
+
+  // Structured Evidence Fields
+  researchQuestion: { type: String, default: '' },
+  studyObjectives: { type: String, default: '' },
+  studyDesign: { type: String, default: 'Observational' },
+  methodology: { type: String, default: '' },
+  population: { type: String, default: '' },
+  sampleSize: { type: String, default: '' },
+  samplingMethod: { type: String, default: '' },
+  participantCharacteristics: { type: String, default: '' },
+  geographicSetting: { type: String, default: '' },
+  measures: { type: String, default: '' },
+  variables: { type: String, default: '' },
+  interventionOrExposure: { type: String, default: '' },
+  comparisonGroup: { type: String, default: '' },
+  statisticalMethods: { type: String, default: '' },
+  keyFindings: { type: String, default: '' },
+  effectEstimates: { type: String, default: '' },
+  limitations: { type: String, default: '' },
+  futureDirections: { type: String, default: '' },
+  qualityNotes: { type: String, default: '' },
+
+  // Matrix data overrides / quick access
   matrixData: {
+    country: { type: String, default: '' },
     methodology: { type: String, default: '' },
     sampleSize: { type: String, default: '' },
     instruments: { type: String, default: '' },
     findings: { type: String, default: '' },
-    limitations: { type: String, default: '' }
+    limitations: { type: String, default: '' },
+    gapNotes: { type: String, default: '' }
   },
+
   thematicTags: [{ type: String, trim: true }],
-  status: { type: String, enum: ['identified', 'screened', 'included', 'excluded'], default: 'identified' }
+  keywords: [{ type: String, trim: true }],
+  tags: [{ type: String, trim: true }],
+
+  extractionStatus: {
+    type: String,
+    enum: ['unextracted', 'extracting', 'extracted', 'reviewed', 'verified'],
+    default: 'unextracted',
+    index: true
+  },
+  status: {
+    type: String,
+    enum: ['identified', 'screened', 'included', 'excluded'],
+    default: 'identified',
+    index: true
+  },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  deletedAt: { type: Date, default: null, index: true }
 }, { timestamps: true });
-literatureEntrySchema.index({ projectId: 1, createdAt: -1 });
+literatureEntrySchema.index({ projectId: 1, deletedAt: 1, createdAt: -1 });
+
+const evidenceExtractSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  literatureEntryId: { type: mongoose.Schema.Types.ObjectId, ref: 'LiteratureEntry', required: true, index: true },
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null },
+  pageNumber: { type: Number, default: null },
+  section: { type: String, default: 'Abstract' },
+  sourceText: { type: String, required: true },
+  extractedField: { type: String, required: true },
+  extractedValue: { type: String, required: true },
+  extractionMethod: { type: String, enum: ['automatic', 'manual'], default: 'automatic' },
+  confidenceOrReviewStatus: { type: String, enum: ['pending_review', 'verified', 'rejected'], default: 'pending_review' },
+  verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  verifiedAt: { type: Date, default: null }
+}, { timestamps: true });
+evidenceExtractSchema.index({ literatureEntryId: 1, extractedField: 1 });
+
+const literatureMatrixSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  name: { type: String, default: 'Default Literature Matrix' },
+  description: { type: String, default: '' },
+  columns: [{
+    key: { type: String, required: true },
+    label: { type: String, required: true },
+    visible: { type: Boolean, default: true },
+    order: { type: Number, default: 0 },
+    width: { type: Number, default: 150 },
+    type: { type: String, default: 'text' }
+  }],
+  sortConfig: {
+    key: { type: String, default: 'year' },
+    order: { type: String, enum: ['asc', 'desc'], default: 'desc' }
+  },
+  savedFilters: { type: mongoose.Schema.Types.Mixed, default: {} }
+}, { timestamps: true });
+
+const literatureThemeSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  name: { type: String, required: true, trim: true },
+  description: { type: String, default: '' },
+  color: { type: String, default: '#5e6ad2' },
+  studyIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'LiteratureEntry' }],
+  notes: { type: String, default: '' },
+  summary: { type: String, default: '' }
+}, { timestamps: true });
+
+const studyComparisonSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  title: { type: String, required: true, default: 'Comparative Study Matrix' },
+  studyIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'LiteratureEntry' }],
+  dimensions: [{ type: String }],
+  comparisonMatrix: { type: mongoose.Schema.Types.Mixed, default: {} },
+  summary: { type: String, default: '' }
+}, { timestamps: true });
+
+const researchGapCandidateSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  title: { type: String, required: true, trim: true },
+  description: { type: String, required: true },
+  category: {
+    type: String,
+    enum: [
+      'population',
+      'methodological',
+      'measurement',
+      'geographic',
+      'theoretical',
+      'inconsistent_findings',
+      'understudied_variables',
+      'longitudinal'
+    ],
+    default: 'methodological'
+  },
+  supportingStudyIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'LiteratureEntry' }],
+  contradictoryStudyIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'LiteratureEntry' }],
+  evidenceBasis: { type: String, default: '' },
+  limitationsOfLiterature: { type: String, default: '' },
+  suggestedResearchQuestions: [{ type: String, trim: true }],
+  status: { type: String, enum: ['candidate', 'accepted', 'dismissed'], default: 'candidate' }
+}, { timestamps: true });
+
+const synthesisDraftSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  title: { type: String, required: true, default: 'Literature Review Synthesis' },
+  type: {
+    type: String,
+    enum: ['narrative', 'thematic', 'chronological', 'methodological', 'comparative'],
+    default: 'thematic'
+  },
+  studyIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'LiteratureEntry' }],
+  themeIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'LiteratureTheme' }],
+  sections: [{
+    title: { type: String, required: true },
+    theme: { type: String, default: '' },
+    studyCount: { type: Number, default: 0 },
+    synthesisText: { type: String, default: '' },
+    citations: [{ type: String }]
+  }],
+  fullDraft: { type: String, default: '' },
+  evidenceLinks: [{
+    claimText: { type: String },
+    evidenceExtractId: { type: mongoose.Schema.Types.ObjectId, ref: 'EvidenceExtract' },
+    studyId: { type: mongoose.Schema.Types.ObjectId, ref: 'LiteratureEntry' }
+  }],
+  version: { type: Number, default: 1 },
+  versions: [{
+    versionNumber: { type: Number },
+    fullDraft: { type: String },
+    createdAt: { type: Date, default: Date.now }
+  }]
+}, { timestamps: true });
 
 // Dataset and Analysis Models (Statistical Analysis Studio)
 const datasetSchema = new mongoose.Schema({
@@ -585,6 +747,12 @@ export const DataDeletionJob = mongoose.model('DataDeletionJob', dataDeletionJob
 export const LatexJob = mongoose.model('LatexJob', latexJobSchema);
 export const TextGuardScan = mongoose.model('TextGuardScan', textGuardScanSchema);
 export const LiteratureEntry = mongoose.model('LiteratureEntry', literatureEntrySchema);
+export const EvidenceExtract = mongoose.model('EvidenceExtract', evidenceExtractSchema);
+export const LiteratureMatrix = mongoose.model('LiteratureMatrix', literatureMatrixSchema);
+export const LiteratureTheme = mongoose.model('LiteratureTheme', literatureThemeSchema);
+export const StudyComparison = mongoose.model('StudyComparison', studyComparisonSchema);
+export const ResearchGapCandidate = mongoose.model('ResearchGapCandidate', researchGapCandidateSchema);
+export const SynthesisDraft = mongoose.model('SynthesisDraft', synthesisDraftSchema);
 export const Dataset = mongoose.model('Dataset', datasetSchema);
 export const Analysis = mongoose.model('Analysis', analysisSchema);
 export const ResearchChat = mongoose.model('ResearchChat', researchChatSchema);

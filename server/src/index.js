@@ -51,6 +51,12 @@ import {
   LatexJob,
   TextGuardScan,
   LiteratureEntry,
+  EvidenceExtract,
+  LiteratureMatrix,
+  LiteratureTheme,
+  StudyComparison,
+  ResearchGapCandidate,
+  SynthesisDraft,
   Dataset,
   Analysis,
   ResearchChat,
@@ -66,6 +72,14 @@ import {
   generateBibliography,
   normalizeAuthorObject
 } from './referenceService.js';
+import {
+  searchScholarlyPapers,
+  extractStructuredEvidence,
+  compareStudies,
+  identifyResearchGaps,
+  generateEvidenceLinkedSynthesis,
+  generateMatrixCsv
+} from './literatureService.js';
 import { requireAuth, requireAdmin } from './middleware.js';
 import { assessWriting, findRepeatedPhrases, assessOriginality, checkCitations, humanizeWithAI, ACADEMIC_REWRITE_MODES, assessAiAuthorship, assessPlagiarismAndSimilarity } from './services.js';
 import { auditMeaningPreservation, validateEmpiricalFacts, compareManuscriptVersions } from './meaningChecker.js';
@@ -322,6 +336,12 @@ const memLatexJobs = new Map();
 const latexArtifactCache = new Map();
 const memTextGuardScans = new Map();
 const memLiterature = new Map();
+const memEvidenceExtracts = new Map();
+const memLiteratureMatrices = new Map();
+const memLiteratureThemes = new Map();
+const memStudyComparisons = new Map();
+const memResearchGaps = new Map();
+const memSynthesisDrafts = new Map();
 const memDatasets = new Map();
 const memAnalyses = new Map();
 const memResearchChats = new Map();
@@ -343,6 +363,12 @@ app.locals.memJobs = memJobs;
 app.locals.memAuditEvents = memAuditEvents;
 app.locals.memLatexJobs = memLatexJobs;
 app.locals.memLiterature = memLiterature;
+app.locals.memEvidenceExtracts = memEvidenceExtracts;
+app.locals.memLiteratureMatrices = memLiteratureMatrices;
+app.locals.memLiteratureThemes = memLiteratureThemes;
+app.locals.memStudyComparisons = memStudyComparisons;
+app.locals.memResearchGaps = memResearchGaps;
+app.locals.memSynthesisDrafts = memSynthesisDrafts;
 app.locals.memDatasets = memDatasets;
 app.locals.memAnalyses = memAnalyses;
 app.locals.memResearchChats = memResearchChats;
@@ -3632,122 +3658,883 @@ apiRouter.delete('/reference-collections/:id', requireAuth, async (req, res, nex
   } catch (e) { next(e); }
 });
 
-// Literature Review Studio Endpoints (Module 3)
-apiRouter.get('/projects/:id/literature', requireAuth, async (req, res, next) => {
+// ============================================================================
+// Phase 5: Literature Review Studio API Suite
+// ============================================================================
+
+// 1. Query Literature Entries (Filtered, Searchable, Paginated)
+apiRouter.get('/literature', requireAuth, async (req, res, next) => {
   try {
+    const {
+      projectId,
+      status,
+      extractionStatus,
+      thematicTag,
+      tag,
+      search,
+      q,
+      sort = 'createdAt',
+      order = 'desc',
+      page = 1,
+      limit = 50,
+      paginated
+    } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    const searchQuery = (q || search || '').trim().toLowerCase();
+    const targetTag = thematicTag || tag;
+
     if (isDbConnected()) {
-      const entries = await LiteratureEntry.find({ projectId: req.params.id }).sort({ createdAt: -1 }).lean();
-      return res.json(entries);
+      const filter = { deletedAt: null };
+      if (projectId && projectId !== 'all') {
+        filter.projectId = projectId;
+      } else {
+        filter.userId = req.user.id;
+      }
+      if (status && status !== 'all') filter.status = status;
+      if (extractionStatus && extractionStatus !== 'all') filter.extractionStatus = extractionStatus;
+      if (targetTag && targetTag !== 'all') filter.thematicTags = targetTag;
+
+      if (searchQuery) {
+        filter.$or = [
+          { title: { $regex: searchQuery, $options: 'i' } },
+          { abstract: { $regex: searchQuery, $options: 'i' } },
+          { journal: { $regex: searchQuery, $options: 'i' } },
+          { keyFindings: { $regex: searchQuery, $options: 'i' } },
+          { methodology: { $regex: searchQuery, $options: 'i' } },
+          { authors: { $regex: searchQuery, $options: 'i' } }
+        ];
+      }
+
+      const sortObj = {};
+      sortObj[sort] = order === 'asc' ? 1 : -1;
+
+      const [totalCount, entries] = await Promise.all([
+        LiteratureEntry.countDocuments(filter),
+        LiteratureEntry.find(filter)
+          .sort(sortObj)
+          .skip((pageNum - 1) * limitNum)
+          .limit(limitNum)
+          .lean()
+      ]);
+
+      const totalPages = Math.ceil(totalCount / limitNum) || 1;
+      res.setHeader('X-Total-Count', totalCount);
+      res.setHeader('X-Page', pageNum);
+      res.setHeader('X-Total-Pages', totalPages);
+
+      const mapped = entries.map(e => ({ ...e, id: e._id.toString() }));
+      if (paginated === 'false') {
+        return res.json(mapped);
+      }
+      return res.json({ entries: mapped, pagination: { page: pageNum, limit: limitNum, totalCount, totalPages } });
     }
-    const entries = [...memLiterature.values()].filter(l => l.projectId === req.params.id);
-    res.json(entries);
+
+    // In-memory fallback
+    let list = [...memLiterature.values()].filter(e => {
+      if (e.deletedAt) return false;
+      if (projectId && projectId !== 'all' && e.projectId !== projectId) return false;
+      if (!projectId && e.userId !== req.user.id) return false;
+      if (status && status !== 'all' && e.status !== status) return false;
+      if (extractionStatus && extractionStatus !== 'all' && e.extractionStatus !== extractionStatus) return false;
+      if (targetTag && targetTag !== 'all' && (!e.thematicTags || !e.thematicTags.includes(targetTag))) return false;
+      if (searchQuery) {
+        const textToSearch = `${e.title || ''} ${e.abstract || ''} ${e.journal || ''} ${e.keyFindings || ''} ${(e.authors || []).join(' ')}`.toLowerCase();
+        if (!textToSearch.includes(searchQuery)) return false;
+      }
+      return true;
+    });
+
+    list.sort((a, b) => {
+      let cmp = 0;
+      if (sort === 'year') cmp = (a.year || '').localeCompare(b.year || '');
+      else if (sort === 'title') cmp = (a.title || '').localeCompare(b.title || '');
+      else {
+        const dateA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const dateB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        cmp = dateA - dateB;
+      }
+      return order === 'asc' ? cmp : -cmp;
+    });
+
+    const totalCount = list.length;
+    const totalPages = Math.ceil(totalCount / limitNum) || 1;
+    const paginatedItems = list.slice((pageNum - 1) * limitNum, pageNum * limitNum).map(e => ({ ...e, id: (e._id || e.id).toString() }));
+
+    res.setHeader('X-Total-Count', totalCount);
+    res.setHeader('X-Page', pageNum);
+    res.setHeader('X-Total-Pages', totalPages);
+
+    if (paginated === 'false') {
+      return res.json(paginatedItems);
+    }
+    res.json({ entries: paginatedItems, pagination: { page: pageNum, limit: limitNum, totalCount, totalPages } });
   } catch (e) { next(e); }
 });
 
-apiRouter.post('/projects/:id/literature', requireAuth, async (req, res, next) => {
+// 2. Discover Scholarly Papers (Crossref & OpenAlex)
+apiRouter.get('/literature/search', requireAuth, async (req, res, next) => {
+  try {
+    const { q, query, provider = 'crossref', yearMin, yearMax, journal, openAccessOnly, limit = 15 } = req.query;
+    const searchQuery = (q || query || '').trim();
+    if (!searchQuery) return res.status(400).json({ error: 'Search query is required.' });
+
+    const results = await searchScholarlyPapers(searchQuery, {
+      provider,
+      yearMin,
+      yearMax,
+      journal,
+      openAccessOnly: openAccessOnly === 'true',
+      limit: parseInt(limit, 10) || 15
+    });
+
+    res.json({ query: searchQuery, total: results.length, results });
+  } catch (e) { next(e); }
+});
+
+// 3. Import Papers into Literature Review
+apiRouter.post('/literature/import', requireAuth, async (req, res, next) => {
   try {
     const body = req.body || {};
-    if (!body.title || !body.title.trim()) return res.status(400).json({ error: 'Paper title is required.' });
+    const { projectId, source = 'reference', referenceId, referenceIds = [], paperData, doi } = body;
+    if (!projectId) return res.status(400).json({ error: 'projectId is required.' });
 
-    const entryData = {
-      projectId: req.params.id,
+    const imported = [];
+    const paperObj = paperData || (body.title ? body : null);
+
+    // Case A: Import from Reference Manager (single or multiple)
+    const targetRefIds = referenceId ? [referenceId] : (Array.isArray(referenceIds) ? referenceIds : []);
+    if (targetRefIds.length > 0) {
+      for (const rId of targetRefIds) {
+        let refDoc = null;
+        if (isDbConnected()) {
+          refDoc = await Citation.findOne({ _id: rId, ownerId: req.user.id, deletedAt: null }).lean();
+        } else {
+          refDoc = memCitations.get(rId);
+        }
+
+        if (!refDoc) continue;
+
+        const entryPayload = {
+          projectId,
+          userId: req.user.id,
+          referenceId: refDoc._id,
+          title: refDoc.title,
+          authors: (refDoc.authors || []).map(a => a.name || `${a.given || ''} ${a.family || ''}`.trim()),
+          year: refDoc.publicationYear || refDoc.year || '',
+          journal: refDoc.journalTitle || refDoc.journal || '',
+          doi: refDoc.doi || '',
+          normalizedDoi: refDoc.normalizedDoi || refDoc.doi || '',
+          url: refDoc.url || '',
+          abstract: refDoc.abstract || '',
+          thematicTags: refDoc.tags || [],
+          status: 'screened',
+          extractionStatus: refDoc.abstract ? 'unextracted' : 'unextracted'
+        };
+
+        if (isDbConnected()) {
+          const created = await LiteratureEntry.create(entryPayload);
+          imported.push({ ...created.toObject(), id: created._id.toString() });
+        } else {
+          const newId = new mongoose.Types.ObjectId().toString();
+          const memItem = { _id: newId, id: newId, ...entryPayload, createdAt: new Date().toISOString() };
+          memLiterature.set(newId, memItem);
+          imported.push(memItem);
+        }
+      }
+    } else if (paperObj && paperObj.title) {
+      // Case B: Direct paper data import from scholarly search or raw form
+      const entryPayload = {
+        projectId,
+        userId: req.user.id,
+        title: paperObj.title.trim(),
+        authors: Array.isArray(paperObj.authors) ? paperObj.authors : [paperObj.authors || 'Unknown Author'],
+        year: paperObj.year || paperObj.publicationYear || '',
+        journal: paperObj.journal || paperObj.journalTitle || '',
+        doi: normalizeDoi(paperObj.doi || ''),
+        url: paperObj.url || '',
+        abstract: paperObj.abstract || '',
+        studyDesign: paperObj.studyDesign || 'Observational',
+        thematicTags: Array.isArray(paperObj.tags || paperObj.thematicTags) ? (paperObj.tags || paperObj.thematicTags) : [],
+        status: paperObj.status || 'identified',
+        extractionStatus: paperObj.extractionStatus || 'pending'
+      };
+
+      if (isDbConnected()) {
+        const created = await LiteratureEntry.create(entryPayload);
+        imported.push({ ...created.toObject(), id: created._id.toString() });
+      } else {
+        const newId = new mongoose.Types.ObjectId().toString();
+        const memItem = { _id: newId, id: newId, ...entryPayload, createdAt: new Date().toISOString() };
+        memLiterature.set(newId, memItem);
+        imported.push(memItem);
+      }
+    }
+
+    res.status(201).json({ success: true, importedCount: imported.length, imported, entry: imported[0] || null });
+  } catch (e) { next(e); }
+});
+
+// 4. Extract Structured Evidence
+apiRouter.post('/literature/extract', requireAuth, async (req, res, next) => {
+  try {
+    const { entryId, sourceText, options = {} } = req.body || {};
+    if (!entryId) return res.status(400).json({ error: 'entryId is required.' });
+
+    let entry = null;
+    if (isDbConnected()) {
+      entry = await LiteratureEntry.findOne({ _id: entryId, deletedAt: null });
+    } else {
+      entry = memLiterature.get(entryId);
+    }
+
+    if (!entry) return res.status(404).json({ error: 'Literature entry not found.' });
+
+    const textToAnalyze = (sourceText || entry.abstract || `${entry.title}. ${entry.abstract || ''}`).trim();
+    if (!textToAnalyze) return res.status(400).json({ error: 'No abstract or source text available to extract evidence.' });
+
+    const rawExtracts = extractStructuredEvidence(textToAnalyze, entry);
+    const savedExtracts = [];
+
+    // Update study fields from extracts
+    const updates = { extractionStatus: 'extracted' };
+    const matrixUpdates = entry.matrixData || {};
+
+    for (const ext of rawExtracts) {
+      if (ext.extractedField === 'studyObjectives') updates.studyObjectives = ext.extractedValue;
+      if (ext.extractedField === 'sampleSize') {
+        updates.sampleSize = ext.extractedValue;
+        matrixUpdates.sampleSize = ext.extractedValue;
+      }
+      if (ext.extractedField === 'methodology') {
+        updates.methodology = ext.extractedValue;
+        matrixUpdates.methodology = ext.extractedValue;
+      }
+      if (ext.extractedField === 'statisticalMethods') updates.statisticalMethods = ext.extractedValue;
+      if (ext.extractedField === 'keyFindings') {
+        updates.keyFindings = ext.extractedValue;
+        matrixUpdates.findings = ext.extractedValue;
+      }
+      if (ext.extractedField === 'effectEstimates') updates.effectEstimates = ext.extractedValue;
+      if (ext.extractedField === 'limitations') {
+        updates.limitations = ext.extractedValue;
+        matrixUpdates.limitations = ext.extractedValue;
+      }
+
+      const extractRecord = {
+        projectId: entry.projectId,
+        literatureEntryId: entry._id || entry.id,
+        documentId: entry.documentId || null,
+        section: ext.section || 'Abstract',
+        sourceText: ext.sourceText,
+        extractedField: ext.extractedField,
+        extractedValue: ext.extractedValue,
+        extractionMethod: 'automatic',
+        confidenceOrReviewStatus: 'pending_review'
+      };
+
+      if (isDbConnected()) {
+        const saved = await EvidenceExtract.create(extractRecord);
+        savedExtracts.push({ ...saved.toObject(), id: saved._id.toString() });
+      } else {
+        const extId = new mongoose.Types.ObjectId().toString();
+        const memExt = { _id: extId, id: extId, ...extractRecord, createdAt: new Date().toISOString() };
+        memEvidenceExtracts.set(extId, memExt);
+        savedExtracts.push(memExt);
+      }
+    }
+
+    updates.matrixData = matrixUpdates;
+
+    if (isDbConnected()) {
+      await LiteratureEntry.findByIdAndUpdate(entryId, { $set: updates });
+    } else {
+      Object.assign(entry, updates, { updatedAt: new Date().toISOString() });
+    }
+
+    const finalEntry = isDbConnected() ? await LiteratureEntry.findById(entryId).lean() : entry;
+    res.json({
+      success: true,
+      entryId,
+      extractionStatus: 'extracted',
+      extractedCount: savedExtracts.length,
+      extracts: savedExtracts,
+      studyUpdates: updates,
+      evidence: updates,
+      entry: finalEntry
+    });
+  } catch (e) { next(e); }
+});
+
+// 5. Literature Matrix (Get Configuration & Data)
+apiRouter.get('/literature/matrix', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId } = req.query;
+    if (!projectId) return res.status(400).json({ error: 'projectId is required.' });
+
+    let matrixConfig = null;
+    let entries = [];
+
+    if (isDbConnected()) {
+      matrixConfig = await LiteratureMatrix.findOne({ projectId }).lean();
+      entries = await LiteratureEntry.find({ projectId, deletedAt: null }).sort({ createdAt: -1 }).lean();
+    } else {
+      matrixConfig = [...memLiteratureMatrices.values()].find(m => m.projectId === projectId);
+      entries = [...memLiterature.values()].filter(e => e.projectId === projectId && !e.deletedAt);
+    }
+
+    const defaultColumns = [
+      { key: 'title', label: 'Study Title', visible: true, width: 220, order: 0 },
+      { key: 'authors', label: 'Authors', visible: true, width: 160, order: 1 },
+      { key: 'year', label: 'Year', visible: true, width: 80, order: 2 },
+      { key: 'journal', label: 'Journal / Source', visible: true, width: 160, order: 3 },
+      { key: 'studyDesign', label: 'Study Design', visible: true, width: 140, order: 4 },
+      { key: 'sampleSize', label: 'Sample (N)', visible: true, width: 110, order: 5 },
+      { key: 'samplingMethod', label: 'Sampling Method', visible: true, width: 130, order: 6 },
+      { key: 'statisticalMethods', label: 'Statistical Methods', visible: true, width: 150, order: 7 },
+      { key: 'keyFindings', label: 'Key Findings', visible: true, width: 240, order: 8 },
+      { key: 'effectEstimates', label: 'Effect Estimates', visible: true, width: 120, order: 9 },
+      { key: 'limitations', label: 'Limitations', visible: true, width: 200, order: 10 },
+      { key: 'extractionStatus', label: 'Status', visible: true, width: 100, order: 11 }
+    ];
+
+    res.json({
+      success: true,
+      projectId,
+      matrix: matrixConfig || { title: 'Literature Review Matrix', columns: defaultColumns },
+      columns: matrixConfig?.columns || defaultColumns,
+      sortConfig: matrixConfig?.sortConfig || { key: 'year', order: 'desc' },
+      rows: entries.map(e => ({ ...e, id: (e._id || e.id).toString() }))
+    });
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/literature/matrix', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId, title, columns, sortConfig, filters, groupByTheme } = req.body || {};
+    if (!projectId) return res.status(400).json({ error: 'projectId is required.' });
+
+    const matrixData = {
+      projectId,
+      title: title || 'Literature Review Matrix',
+      columns: Array.isArray(columns) ? columns : [],
+      sortConfig: sortConfig || { key: 'year', order: 'desc' },
+      filters: filters || {},
+      groupByTheme: Boolean(groupByTheme)
+    };
+
+    if (isDbConnected()) {
+      const matrix = await LiteratureMatrix.findOneAndUpdate(
+        { projectId },
+        { $set: matrixData },
+        { new: true, upsert: true }
+      ).lean();
+      return res.status(201).json({ success: true, matrix: { ...matrix, id: matrix._id.toString() } });
+    }
+
+    let existing = [...memLiteratureMatrices.values()].find(m => m.projectId === projectId);
+    if (existing) {
+      Object.assign(existing, matrixData, { updatedAt: new Date().toISOString() });
+      return res.status(201).json({ success: true, matrix: existing });
+    }
+
+    const id = new mongoose.Types.ObjectId().toString();
+    const newMatrix = { _id: id, id, ...matrixData, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    memLiteratureMatrices.set(id, newMatrix);
+    res.status(201).json({ success: true, matrix: newMatrix });
+  } catch (e) { next(e); }
+});
+
+// 6. Inline Cell Matrix Update
+apiRouter.patch('/literature/matrix/:entryId', requireAuth, async (req, res, next) => {
+  try {
+    const { field, value, matrixData } = req.body || {};
+    const { entryId } = req.params;
+
+    const updates = {};
+    if (field) {
+      updates[field] = value;
+      // also mirror into matrixData
+      if (['methodology', 'sampleSize', 'instruments', 'findings', 'limitations', 'country', 'gapNotes'].includes(field)) {
+        updates[`matrixData.${field}`] = value;
+      }
+    }
+    if (matrixData && typeof matrixData === 'object') {
+      updates.matrixData = matrixData;
+    }
+
+    if (isDbConnected()) {
+      const updated = await LiteratureEntry.findByIdAndUpdate(entryId, { $set: updates }, { new: true }).lean();
+      if (!updated) return res.status(404).json({ error: 'Literature entry not found.' });
+      return res.json({ success: true, entry: { ...updated, id: updated._id.toString() } });
+    }
+
+    const entry = memLiterature.get(entryId);
+    if (!entry) return res.status(404).json({ error: 'Literature entry not found.' });
+    if (field) entry[field] = value;
+    if (matrixData) entry.matrixData = Object.assign(entry.matrixData || {}, matrixData);
+    entry.updatedAt = new Date().toISOString();
+
+    res.json({ success: true, entry: { ...entry, id: (entry._id || entry.id).toString() } });
+  } catch (e) { next(e); }
+});
+
+// 7. Multi-Study Comparison
+apiRouter.post('/literature/compare', requireAuth, async (req, res, next) => {
+  try {
+    const studyIds = (req.body && (req.body.studyIds || req.body.entryIds)) || [];
+    const dimensions = (req.body && req.body.dimensions) || [];
+    if (!Array.isArray(studyIds) || studyIds.length < 2) {
+      return res.status(400).json({ error: 'Please select at least 2 studies to perform comparison.' });
+    }
+
+    let studies = [];
+    if (isDbConnected()) {
+      studies = await LiteratureEntry.find({ _id: { $in: studyIds }, deletedAt: null }).lean();
+    } else {
+      studies = [...memLiterature.values()].filter(e => studyIds.includes((e._id || e.id).toString()) && !e.deletedAt);
+    }
+
+    if (studies.length < 2) {
+      return res.status(400).json({ error: 'Could not find at least 2 matching active studies.' });
+    }
+
+    const comparison = compareStudies(studies, dimensions);
+    res.json({ success: true, ...comparison });
+  } catch (e) { next(e); }
+});
+
+// 8. Thematic Grouping (Get & Create/Update)
+apiRouter.get('/literature/themes', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId } = req.query;
+    if (!projectId) return res.status(400).json({ error: 'projectId is required.' });
+
+    if (isDbConnected()) {
+      const themes = await LiteratureTheme.find({ projectId }).sort({ createdAt: -1 }).lean();
+      return res.json(themes.map(t => ({ ...t, id: t._id.toString() })));
+    }
+
+    const themes = [...memLiteratureThemes.values()].filter(t => t.projectId === projectId).map(t => ({ ...t, id: (t._id || t.id).toString() }));
+    res.json(themes);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/literature/themes', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId, name, description = '', color = '#5e6ad2', notes = '' } = req.body || {};
+    const studyIds = (req.body && (req.body.studyIds || req.body.entryIds)) || [];
+    if (!projectId || !name || !name.trim()) {
+      return res.status(400).json({ error: 'projectId and theme name are required.' });
+    }
+
+    const themeData = {
+      projectId,
       userId: req.user.id,
+      name: name.trim(),
+      description: description.trim(),
+      color,
+      studyIds,
+      notes
+    };
+
+    if (isDbConnected()) {
+      const created = await LiteratureTheme.create(themeData);
+      return res.status(201).json({ success: true, theme: { ...created.toObject(), id: created._id.toString() } });
+    }
+
+    const themeId = new mongoose.Types.ObjectId().toString();
+    const memTheme = { _id: themeId, id: themeId, ...themeData, createdAt: new Date().toISOString() };
+    memLiteratureThemes.set(themeId, memTheme);
+    res.status(201).json({ success: true, theme: memTheme });
+  } catch (e) { next(e); }
+});
+
+// 9. Candidate Research Gap Identification
+apiRouter.post('/literature/gaps', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId } = req.body || {};
+    const studyIds = (req.body && (req.body.studyIds || req.body.entryIds)) || [];
+    if (!projectId) return res.status(400).json({ error: 'projectId is required.' });
+
+    let studies = [];
+    if (isDbConnected()) {
+      const filter = { projectId, deletedAt: null };
+      if (Array.isArray(studyIds) && studyIds.length > 0) filter._id = { $in: studyIds };
+      studies = await LiteratureEntry.find(filter).lean();
+    } else {
+      studies = [...memLiterature.values()].filter(e => {
+        if (e.projectId !== projectId || e.deletedAt) return false;
+        if (Array.isArray(studyIds) && studyIds.length > 0) return studyIds.includes((e._id || e.id).toString());
+        return true;
+      });
+    }
+
+    if (studies.length === 0) {
+      return res.status(400).json({ error: 'No studies available to identify research gaps.' });
+    }
+
+    const gaps = identifyResearchGaps(studies);
+    res.json({
+      success: true,
+      projectId,
+      totalGaps: gaps.length,
+      candidateGaps: gaps,
+      gaps
+    });
+  } catch (e) { next(e); }
+});
+
+// 10. Evidence-Linked Literature Synthesis
+apiRouter.post('/literature/synthesis', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId, type = 'thematic', title, citationStyle = 'apa7' } = req.body || {};
+    const studyIds = (req.body && (req.body.studyIds || req.body.entryIds)) || [];
+    if (!projectId) return res.status(400).json({ error: 'projectId is required.' });
+
+    let studies = [];
+    let themes = [];
+
+    if (isDbConnected()) {
+      const filter = { projectId, deletedAt: null };
+      if (Array.isArray(studyIds) && studyIds.length > 0) filter._id = { $in: studyIds };
+      studies = await LiteratureEntry.find(filter).lean();
+      themes = await LiteratureTheme.find({ projectId }).lean();
+    } else {
+      studies = [...memLiterature.values()].filter(e => {
+        if (e.projectId !== projectId || e.deletedAt) return false;
+        if (Array.isArray(studyIds) && studyIds.length > 0) return studyIds.includes((e._id || e.id).toString());
+        return true;
+      });
+      themes = [...memLiteratureThemes.values()].filter(t => t.projectId === projectId);
+    }
+
+    if (studies.length === 0) {
+      return res.status(400).json({ error: 'No studies found to synthesize.' });
+    }
+
+    const synthesis = generateEvidenceLinkedSynthesis(studies, themes, {
+      type,
+      title: title || 'Systematic Literature Review Synthesis',
+      citationStyle
+    });
+
+    // Save as synthesis draft record
+    const draftPayload = {
+      projectId,
+      userId: req.user.id,
+      title: synthesis.title,
+      type: synthesis.type,
+      studyIds: studies.map(s => s._id || s.id),
+      sections: synthesis.sections,
+      fullDraft: synthesis.fullDraft,
+      evidenceLinks: synthesis.evidenceLinks,
+      version: 1,
+      versions: [{ versionNumber: 1, fullDraft: synthesis.fullDraft, createdAt: new Date() }]
+    };
+
+    let draftId = '';
+    if (isDbConnected()) {
+      const draft = await SynthesisDraft.create(draftPayload);
+      draftId = draft._id.toString();
+    } else {
+      draftId = new mongoose.Types.ObjectId().toString();
+      memSynthesisDrafts.set(draftId, { _id: draftId, id: draftId, ...draftPayload, createdAt: new Date().toISOString() });
+    }
+
+    res.json({
+      success: true,
+      draftId,
+      synthesis,
+      ...synthesis
+    });
+  } catch (e) { next(e); }
+});
+
+// 11. Multi-Format Literature Matrix & Synthesis Export
+apiRouter.get('/literature/export', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId, format = 'csv' } = req.query;
+    if (!projectId) return res.status(400).json({ error: 'projectId is required.' });
+
+    let entries = [];
+    if (isDbConnected()) {
+      entries = await LiteratureEntry.find({ projectId, deletedAt: null }).sort({ createdAt: -1 }).lean();
+    } else {
+      entries = [...memLiterature.values()].filter(e => e.projectId === projectId && !e.deletedAt);
+    }
+
+    if (format === 'csv') {
+      const csv = generateMatrixCsv(entries);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="literature_matrix_${Date.now()}.csv"`);
+      return res.send(csv);
+    }
+
+    if (format === 'bibtex') {
+      const bib = entries.map(e => `@article{${(e.authors?.[0] || 'study').replace(/[^a-zA-Z]/g, '')}${e.year || '2024'},
+  title = {${e.title}},
+  author = {${(e.authors || []).join(' and ')}},
+  year = {${e.year || ''}},
+  journal = {${e.journal || ''}},
+  doi = {${e.doi || ''}}
+}`).join('\n\n');
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="literature_${Date.now()}.bib"`);
+      return res.send(bib);
+    }
+
+    res.json({ total: entries.length, entries });
+  } catch (e) { next(e); }
+});
+
+// 12. Create Literature Entry
+apiRouter.post('/literature', requireAuth, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    if (!body.title || !body.title.trim()) return res.status(400).json({ error: 'Study title is required.' });
+
+    const cleanDoi = normalizeDoi(body.doi || '');
+    const entryData = {
+      projectId: body.projectId || null,
+      userId: req.user.id,
+      referenceId: body.referenceId || null,
+      documentId: body.documentId || null,
       title: body.title.trim(),
-      authors: Array.isArray(body.authors) ? body.authors : (body.authors ? [body.authors] : []),
-      year: body.year || '',
-      journal: body.journal || '',
-      doi: normalizeDoi(body.doi || ''),
+      authors: Array.isArray(body.authors) ? body.authors : (body.authors ? [body.authors] : ['Unknown Author']),
+      year: body.year || body.publicationYear || '',
+      journal: body.journal || body.journalTitle || '',
+      doi: cleanDoi,
+      normalizedDoi: cleanDoi,
+      url: body.url || (cleanDoi ? `https://doi.org/${cleanDoi}` : ''),
       abstract: body.abstract || '',
-      matrixData: {
+      studyDesign: body.studyDesign || 'Observational',
+      researchQuestion: body.researchQuestion || '',
+      studyObjectives: body.studyObjectives || '',
+      methodology: body.methodology || '',
+      population: body.population || '',
+      sampleSize: body.sampleSize || '',
+      samplingMethod: body.samplingMethod || '',
+      participantCharacteristics: body.participantCharacteristics || '',
+      geographicSetting: body.geographicSetting || '',
+      measures: body.measures || '',
+      variables: body.variables || '',
+      statisticalMethods: body.statisticalMethods || '',
+      keyFindings: body.keyFindings || '',
+      effectEstimates: body.effectEstimates || '',
+      limitations: body.limitations || '',
+      futureDirections: body.futureDirections || '',
+      qualityNotes: body.qualityNotes || '',
+      matrixData: Object.assign({
         methodology: body.methodology || '',
         sampleSize: body.sampleSize || '',
-        instruments: body.instruments || '',
-        findings: body.findings || '',
-        limitations: body.limitations || ''
-      },
-      thematicTags: Array.isArray(body.thematicTags) ? body.thematicTags : (body.thematicTags ? [body.thematicTags] : []),
-      status: body.status || 'identified'
+        instruments: body.measures || '',
+        findings: body.keyFindings || '',
+        limitations: body.limitations || '',
+        country: body.geographicSetting || ''
+      }, body.matrixData || {}),
+      thematicTags: Array.isArray(body.thematicTags) ? body.thematicTags : [],
+      keywords: Array.isArray(body.keywords) ? body.keywords : [],
+      tags: Array.isArray(body.tags) ? body.tags : [],
+      extractionStatus: body.extractionStatus || 'unextracted',
+      status: body.status || 'identified',
+      createdBy: req.user.id,
+      deletedAt: null
     };
 
     if (isDbConnected()) {
       const entry = await LiteratureEntry.create(entryData);
-      return res.status(201).json(entry);
+      const payload = { ...entry.toObject(), id: entry._id.toString() };
+      return res.status(201).json({ success: true, ...payload, entry: payload });
     }
 
     const id = new mongoose.Types.ObjectId().toString();
-    const newEntry = { _id: id, ...entryData, createdAt: new Date().toISOString() };
+    const newEntry = { _id: id, id, ...entryData, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     memLiterature.set(id, newEntry);
-    res.status(201).json(newEntry);
+    res.status(201).json({ success: true, ...newEntry, entry: newEntry });
   } catch (e) { next(e); }
+});
+
+// 13. Single Literature Entry CRUD
+apiRouter.get('/literature/:entryId', requireAuth, async (req, res, next) => {
+  try {
+    const { entryId } = req.params;
+    let entry = null;
+    let extracts = [];
+
+    if (isDbConnected()) {
+      entry = await LiteratureEntry.findOne({ _id: entryId, userId: req.user.id, deletedAt: null }).lean();
+      if (!entry) return res.status(404).json({ error: 'Literature entry not found.' });
+      extracts = await EvidenceExtract.find({ literatureEntryId: entryId }).lean();
+      const payload = { ...entry, id: entry._id.toString(), extracts };
+      return res.json({ ...payload, entry: payload });
+    }
+
+    entry = memLiterature.get(entryId);
+    if (!entry || entry.deletedAt || (entry.userId && entry.userId !== req.user.id)) {
+      return res.status(404).json({ error: 'Literature entry not found.' });
+    }
+    extracts = [...memEvidenceExtracts.values()].filter(ex => ex.literatureEntryId === entryId);
+    const payload = { ...entry, id: (entry._id || entry.id).toString(), extracts };
+    res.json({ ...payload, entry: payload });
+  } catch (e) { next(e); }
+});
+
+apiRouter.patch('/literature/:entryId', requireAuth, async (req, res, next) => {
+  try {
+    const { entryId } = req.params;
+    const updates = { ...req.body };
+    delete updates._id;
+    delete updates.userId;
+    delete updates.projectId;
+
+    if (isDbConnected()) {
+      const updated = await LiteratureEntry.findOneAndUpdate(
+        { _id: entryId, userId: req.user.id, deletedAt: null },
+        { $set: updates },
+        { new: true }
+      ).lean();
+      if (!updated) return res.status(404).json({ error: 'Literature entry not found.' });
+      const payload = { ...updated, id: updated._id.toString() };
+      return res.json({ ...payload, entry: payload });
+    }
+
+    const entry = memLiterature.get(entryId);
+    if (!entry || entry.deletedAt || (entry.userId && entry.userId !== req.user.id)) {
+      return res.status(404).json({ error: 'Literature entry not found.' });
+    }
+    Object.assign(entry, updates, { updatedAt: new Date().toISOString() });
+    const payload = { ...entry, id: (entry._id || entry.id).toString() };
+    res.json({ ...payload, entry: payload });
+  } catch (e) { next(e); }
+});
+
+apiRouter.delete('/literature/:entryId', requireAuth, async (req, res, next) => {
+  try {
+    const { entryId } = req.params;
+    if (isDbConnected()) {
+      const deleted = await LiteratureEntry.findOneAndUpdate(
+        { _id: entryId, userId: req.user.id, deletedAt: null },
+        { $set: { deletedAt: new Date() } }
+      );
+      if (!deleted) return res.status(404).json({ error: 'Literature entry not found.' });
+      return res.json({ deleted: true, success: true, id: entryId });
+    }
+
+    const entry = memLiterature.get(entryId);
+    if (!entry || entry.deletedAt || (entry.userId && entry.userId !== req.user.id)) {
+      return res.status(404).json({ error: 'Literature entry not found.' });
+    }
+    entry.deletedAt = new Date().toISOString();
+    res.json({ deleted: true, success: true, id: entryId });
+  } catch (e) { next(e); }
+});
+
+// Backward-Compatibility Aliases for /projects/:id/literature
+apiRouter.get('/projects/:id/literature', requireAuth, async (req, res, next) => {
+  req.query.projectId = req.params.id;
+  if (isDbConnected()) {
+    const entries = await LiteratureEntry.find({ projectId: req.params.id, deletedAt: null }).sort({ createdAt: -1 }).lean();
+    return res.json(entries.map(e => ({ ...e, id: e._id.toString() })));
+  }
+  const entries = [...memLiterature.values()].filter(l => l.projectId === req.params.id && !l.deletedAt).map(e => ({ ...e, id: (e._id || e.id).toString() }));
+  res.json(entries);
+});
+
+apiRouter.post('/projects/:id/literature', requireAuth, async (req, res, next) => {
+  req.body.projectId = req.params.id;
+  const body = req.body || {};
+  if (!body.title || !body.title.trim()) return res.status(400).json({ error: 'Paper title is required.' });
+
+  const cleanDoi = normalizeDoi(body.doi || '');
+  const entryData = {
+    projectId: req.params.id,
+    userId: req.user.id,
+    title: body.title.trim(),
+    authors: Array.isArray(body.authors) ? body.authors : (body.authors ? [body.authors] : ['Unknown Author']),
+    year: body.year || '',
+    journal: body.journal || '',
+    doi: cleanDoi,
+    normalizedDoi: cleanDoi,
+    abstract: body.abstract || '',
+    matrixData: {
+      methodology: body.methodology || '',
+      sampleSize: body.sampleSize || '',
+      instruments: body.instruments || '',
+      findings: body.findings || '',
+      limitations: body.limitations || ''
+    },
+    thematicTags: Array.isArray(body.thematicTags) ? body.thematicTags : [],
+    status: body.status || 'identified',
+    extractionStatus: 'unextracted',
+    deletedAt: null
+  };
+
+  if (isDbConnected()) {
+    const created = await LiteratureEntry.create(entryData);
+    const payload = { ...created.toObject(), id: created._id.toString() };
+    return res.status(201).json(payload);
+  }
+
+  const id = new mongoose.Types.ObjectId().toString();
+  const newEntry = { _id: id, id, ...entryData, createdAt: new Date().toISOString() };
+  memLiterature.set(id, newEntry);
+  res.status(201).json(newEntry);
 });
 
 apiRouter.patch('/projects/:id/literature/:entryId', requireAuth, async (req, res, next) => {
-  try {
-    if (isDbConnected()) {
-      const entry = await LiteratureEntry.findOneAndUpdate(
-        { _id: req.params.entryId, projectId: req.params.id },
-        { $set: req.body },
-        { new: true }
-      );
-      if (!entry) return res.status(404).json({ error: 'Literature entry not found.' });
-      return res.json(entry);
-    }
-    const entry = memLiterature.get(req.params.entryId);
+  if (isDbConnected()) {
+    const entry = await LiteratureEntry.findOneAndUpdate(
+      { _id: req.params.entryId, projectId: req.params.id, deletedAt: null },
+      { $set: req.body },
+      { new: true }
+    );
     if (!entry) return res.status(404).json({ error: 'Literature entry not found.' });
-    Object.assign(entry, req.body, { updatedAt: new Date().toISOString() });
-    res.json(entry);
-  } catch (e) { next(e); }
+    return res.json({ ...entry.toObject(), id: entry._id.toString() });
+  }
+  const entry = memLiterature.get(req.params.entryId);
+  if (!entry || entry.deletedAt) return res.status(404).json({ error: 'Literature entry not found.' });
+  Object.assign(entry, req.body, { updatedAt: new Date().toISOString() });
+  res.json({ ...entry, id: (entry._id || entry.id).toString() });
 });
 
 apiRouter.delete('/projects/:id/literature/:entryId', requireAuth, async (req, res, next) => {
-  try {
-    if (isDbConnected()) {
-      await LiteratureEntry.findOneAndDelete({ _id: req.params.entryId, projectId: req.params.id });
-      return res.json({ deleted: true });
-    }
-    memLiterature.delete(req.params.entryId);
-    res.json({ deleted: true });
-  } catch (e) { next(e); }
+  if (isDbConnected()) {
+    await LiteratureEntry.findOneAndUpdate({ _id: req.params.entryId, projectId: req.params.id }, { $set: { deletedAt: new Date() } });
+    return res.json({ deleted: true, success: true });
+  }
+  const entry = memLiterature.get(req.params.entryId);
+  if (entry) entry.deletedAt = new Date().toISOString();
+  res.json({ deleted: true, success: true });
 });
 
 apiRouter.post('/projects/:id/literature/synthesize', requireAuth, async (req, res, next) => {
-  try {
-    let entries = [];
-    if (isDbConnected()) {
-      entries = await LiteratureEntry.find({ projectId: req.params.id }).lean();
-    } else {
-      entries = [...memLiterature.values()].filter(l => l.projectId === req.params.id);
-    }
+  req.body.projectId = req.params.id;
+  let entries = [];
+  let themes = [];
 
-    if (entries.length === 0) return res.status(400).json({ error: 'No literature entries found to synthesize.' });
+  if (isDbConnected()) {
+    entries = await LiteratureEntry.find({ projectId: req.params.id, deletedAt: null }).lean();
+    themes = await LiteratureTheme.find({ projectId: req.params.id }).lean();
+  } else {
+    entries = [...memLiterature.values()].filter(l => l.projectId === req.params.id && !l.deletedAt);
+    themes = [...memLiteratureThemes.values()].filter(t => t.projectId === req.params.id);
+  }
 
-    // Group entries by thematic tags or methodology
-    const themes = {};
-    for (const e of entries) {
-      const tags = (e.thematicTags && e.thematicTags.length > 0) ? e.thematicTags : ['General Empirical Findings'];
-      for (const t of tags) {
-        if (!themes[t]) themes[t] = [];
-        themes[t].push(e);
-      }
-    }
+  if (entries.length === 0) return res.status(400).json({ error: 'No literature entries found to synthesize.' });
 
-    const sections = Object.entries(themes).map(([theme, items]) => {
-      const citations = items.map(i => {
-        const lead = i.authors?.[0] || 'Author';
-        return lead ? `(${lead}, ${i.year || 'n.d.'})` : '';
-      }).filter(Boolean).join(', ');
+  const result = generateEvidenceLinkedSynthesis(entries, themes, {
+    projectId: req.params.id,
+    type: req.body.type || 'thematic'
+  });
 
-      const synthesisParagraph = `In the thematic area of "${theme}", evidence from ${items.length} study(ies) ${citations} indicates consistent patterns. Specifically, ${items.map(i => i.matrixData?.findings || i.abstract?.slice(0, 150) || i.title).join(' Furthermore, ')}.`;
-      return { theme, studyCount: items.length, synthesis: synthesisParagraph, citations };
-    });
-
-    res.json({
-      themeCount: Object.keys(themes).length,
-      studyCount: entries.length,
-      sections,
-      fullDraft: sections.map(s => `### ${s.theme}\n\n${s.synthesis}`).join('\n\n')
-    });
-  } catch (e) { next(e); }
+  res.json({
+    themeCount: result.sections.length,
+    studyCount: entries.length,
+    sections: result.sections,
+    fullDraft: result.fullDraft
+  });
 });
 
 // PDF Grounded Research Chat Endpoints (Module 4)
