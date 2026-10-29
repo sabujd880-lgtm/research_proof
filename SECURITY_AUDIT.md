@@ -51,3 +51,4 @@
   `mongodb://user:***@cluster.mongodb.net`
 - All diagnostic errors classify connection types without exposing credentials or internal host topologies.
 - Git push protection verified: Commit history is clean of live secrets and tokens.
+

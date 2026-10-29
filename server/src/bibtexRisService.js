@@ -297,3 +297,4 @@ export function checkRetractionStatus(doi, title) {
     warning: isRetracted ? 'Caution: This article has been flagged as RETRACTED by the issuing journal.' : null
   };
 }
+

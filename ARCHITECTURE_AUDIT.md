@@ -142,3 +142,4 @@ To support the 8 unified research modules, the following schemas are scheduled f
    - Implement project-scoped data modeling (`ProjectMember`, `Task`, shared project switcher).
    - Refactor navigation to reflect the canonical ResearchProof AI 1.0 sidebar structure.
 3. Advance through Phases C through H in structured, test-verified increments.
+

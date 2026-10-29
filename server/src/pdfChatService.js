@@ -168,3 +168,4 @@ export function generateGroundedAnswer(query, citations) {
     }))
   };
 }
+

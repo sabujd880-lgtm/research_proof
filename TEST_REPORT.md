@@ -68,3 +68,4 @@ As each of the 8 core modules is built, corresponding automated tests will be ap
 6. **Module 06 (Systematic Reviews)**: Dual-reviewer screening isolation, conflict detection, PRISMA count consistency.
 7. **Module 07 (Journal Studio)**: Journal requirement compliance verification, package ZIP manifest completeness.
 8. **Module 08 (Collaboration)**: Cross-user permission boundaries, invitation acceptance/revocation, document edit concurrency.
+

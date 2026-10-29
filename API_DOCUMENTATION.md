@@ -156,3 +156,4 @@ Validates manuscript against verified journal requirements (word limits, citatio
 
 ### `POST /api/v1/journal-submission/generate-package`
 Generates submission-ready ZIP bundle containing manuscript, cover letter, declarations, and checklist.
+
