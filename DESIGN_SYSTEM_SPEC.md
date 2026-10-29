@@ -165,3 +165,4 @@ ResearchProof AI 1.0 is an academic command center for scientists, researchers, 
 - Centered floating window (`width: 560px`, `max-height: 420px`, border `1px solid var(--rp-border)`, radius `10px`).
 - Search Input: `44px` height, 14px font, auto-focus.
 - Results List: Grouped by Navigation, Recent Projects, Actions. Keyboard navigable via Arrow keys + Enter.
+

@@ -6,7 +6,9 @@ import {
   LayoutDashboard, LogOut, Menu, Moon, PanelLeft, Plus, RefreshCw, ScanText, Settings2,
   ShieldAlert, ShieldCheck, Sliders, Sparkles, Sun, Trash2, Upload, WandSparkles, X,
   AlertTriangle, AlertCircle, ExternalLink, Printer, Eye, Edit3, GitCompare, Search,
-  Users, Send, FileSpreadsheet, Layers, Share2, Table
+  Users, Send, FileSpreadsheet, Layers, Share2, Table,
+  Archive, RotateCcw, Calendar, CheckSquare, Square, Filter, Grid, List, Tag, Target,
+  CheckCircle2, MoreVertical
 } from 'lucide-react';
 
 import LiteratureReview from './modules/LiteratureReview';
@@ -66,13 +68,22 @@ type Revision = {
 type Project = {
   _id: string;
   title: string;
-  description: string;
+  description?: string;
   discipline?: string;
+  researchType?: string;
+  objectives?: string[];
+  keywords?: string[];
   documentType?: string;
   workflowStage?: string;
   completionPercentage?: number;
+  progress?: number;
   tags?: string[];
   status?: string;
+  startDate?: string;
+  targetDate?: string;
+  visibility?: string;
+  archivedAt?: string;
+  createdAt?: string;
   updatedAt: string;
 };
 
@@ -783,6 +794,26 @@ export default function App() {
   useEffect(() => {
     if (user) refreshData();
   }, [user]);
+
+  async function handleCreateProject(projectData: any) {
+    setBusy(true);
+    try {
+      const created = await request('/projects', token, projectData, 'POST');
+      setShowProjectForm(false);
+      await refreshData();
+      if (created && created._id) {
+        setActiveProject(created);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('rp_active_project_id', created._id);
+        }
+      }
+      setMessage(`Project "${projectData.title}" created successfully.`);
+    } catch (e: any) {
+      setError(e.message || 'Failed to create project');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   function selectDocument(doc: DocumentItem) {
     setActiveDoc(doc);
@@ -3353,11 +3384,14 @@ export default function App() {
               usage={usage}
               projects={projects}
               activeProject={activeProject}
+              setActiveProject={setActiveProject}
               revisions={revisions}
               documents={documents}
               citationsList={citationsList}
               setSection={setSection}
               setShowProjectForm={setShowProjectForm}
+              token={token}
+              refreshData={refreshData}
             />
           )}
 
@@ -3640,16 +3674,19 @@ export default function App() {
             </section>
           )}
 
-          {/* PROJECTS VIEW */}
+                    {/* PROJECTS VIEW */}
           {(section === 'My Research Projects' || section === 'Projects') && (
             <Projects
               projects={projects}
+              activeProject={activeProject}
+              setActiveProject={setActiveProject}
               showForm={showProjectForm}
               setShowForm={setShowProjectForm}
-              title={projectTitle}
-              setTitle={setProjectTitle}
               token={token}
               documents={documents}
+              citationsList={citationsList}
+              revisions={revisions}
+              setSection={setSection}
               onOpenInStudio={(doc: any) => {
                 selectDocument(doc);
                 setSection('Writing Studio');
@@ -3658,23 +3695,7 @@ export default function App() {
               setMessage={setMessage}
               setError={setError}
               refreshData={refreshData}
-              createProject={async (e: any) => {
-                e.preventDefault();
-                try {
-                  await request('/projects', token, { title: projectTitle });
-                  setProjectTitle('');
-                  setShowProjectForm(false);
-                  await refreshData();
-                  setMessage('Project created.');
-                } catch (e: any) { setError(e.message); }
-              }}
-              deleteProject={async (id: string) => {
-                if (!confirm('Delete this project?')) return;
-                try {
-                  await request(`/projects/${id}`, token, undefined, 'DELETE');
-                  await refreshData();
-                } catch (e: any) { setError(e.message); }
-              }}
+              onCreateProjectClick={() => setShowProjectForm(true)}
             />
           )}
 
@@ -3772,6 +3793,13 @@ export default function App() {
         </div>
 
       </main>
+
+      <ProjectCreationModal
+        isOpen={showProjectForm}
+        onClose={() => setShowProjectForm(false)}
+        onSubmit={handleCreateProject}
+        isSubmitting={busy}
+      />
 
       <CommandPaletteModal
         isOpen={showCmdPalette}
@@ -3985,7 +4013,500 @@ function CommandPaletteModal({
   );
 }
 
-function Dashboard({ user, usage, projects, activeProject, revisions, documents, citationsList, setSection, setShowProjectForm }: any) {
+function formatRelativeTime(dateStr?: string | Date): string {
+  if (!dateStr) return 'Recently';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return 'Recently';
+  const now = new Date();
+  const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000);
+  if (diffSec < 60) return 'Just now';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHours = Math.floor(diffMin / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function ProjectCreationModal({
+  isOpen,
+  onClose,
+  onSubmit,
+  isSubmitting
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onSubmit: (data: any) => Promise<void>;
+  isSubmitting: boolean;
+}) {
+  const [title, setTitle] = useState('');
+  const [discipline, setDiscipline] = useState('Computer Science');
+  const [researchType, setResearchType] = useState('Quantitative');
+  const [description, setDescription] = useState('');
+  const [objectives, setObjectives] = useState('');
+  const [keywords, setKeywords] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [targetDate, setTargetDate] = useState('');
+  const [visibility, setVisibility] = useState('private');
+  const [validationError, setValidationError] = useState('');
+
+  const DISCIPLINES = [
+    'Computer Science',
+    'Medicine & Health',
+    'Social Sciences',
+    'Physical Sciences',
+    'Life Sciences',
+    'Humanities',
+    'Engineering',
+    'Economics & Business',
+    'Interdisciplinary'
+  ];
+
+  const RESEARCH_TYPES = [
+    'Quantitative',
+    'Qualitative',
+    'Mixed Methods',
+    'Systematic Review',
+    'Meta-Analysis',
+    'Experimental',
+    'Observational',
+    'Computational',
+    'Theoretical'
+  ];
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim() || title.trim().length < 3) {
+      setValidationError('Project title must be at least 3 characters.');
+      return;
+    }
+    if (title.trim().length > 160) {
+      setValidationError('Project title cannot exceed 160 characters.');
+      return;
+    }
+    if (startDate && targetDate && new Date(targetDate) < new Date(startDate)) {
+      setValidationError('Target completion date cannot precede the start date.');
+      return;
+    }
+    setValidationError('');
+
+    const parsedObjectives = objectives
+      .split('\n')
+      .map(o => o.trim())
+      .filter(Boolean);
+    const parsedKeywords = keywords
+      .split(',')
+      .map(k => k.trim())
+      .filter(Boolean);
+
+    await onSubmit({
+      title: title.trim(),
+      discipline,
+      researchType,
+      description: description.trim(),
+      objectives: parsedObjectives,
+      keywords: parsedKeywords,
+      startDate: startDate || undefined,
+      targetDate: targetDate || undefined,
+      visibility
+    });
+  };
+
+  return (
+    <div
+      className="rp-cmd-backdrop"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Create Research Project"
+      style={{ zIndex: 1200 }}
+    >
+      <div
+        className="rp-cmd-dialog"
+        onClick={e => e.stopPropagation()}
+        style={{ maxWidth: '640px', width: '92%', maxHeight: '90vh', overflowY: 'auto' }}
+      >
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          padding: '16px 20px',
+          borderBottom: '1px solid var(--rp-border-subtle)'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{
+              width: '32px',
+              height: '32px',
+              borderRadius: 'var(--rp-radius-md)',
+              background: 'var(--rp-accent-subtle)',
+              color: 'var(--rp-accent)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}>
+              <FolderKanban size={18} />
+            </div>
+            <div>
+              <h2 style={{ fontSize: '15px', fontWeight: 700, margin: 0, color: 'var(--rp-text)' }}>
+                New Research Project
+              </h2>
+              <p style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)', margin: '2px 0 0' }}>
+                Define your research scope, methodology, and target milestones.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            aria-label="Close dialog"
+            style={{ color: 'var(--rp-text-muted)' }}
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} style={{ padding: '20px' }}>
+          {validationError && (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '10px 12px',
+              background: '#fef2f2',
+              color: '#991b1b',
+              border: '1px solid #fecaca',
+              borderRadius: 'var(--rp-radius-sm)',
+              fontSize: '12px',
+              marginBottom: '16px'
+            }}>
+              <AlertCircle size={14} style={{ flexShrink: 0 }} />
+              <span>{validationError}</span>
+            </div>
+          )}
+
+          <div style={{ marginBottom: '14px' }}>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--rp-text)', marginBottom: '5px' }}>
+              Project Title <span style={{ color: '#ef4444' }}>*</span>
+            </label>
+            <input
+              type="text"
+              required
+              minLength={3}
+              maxLength={160}
+              placeholder="e.g. Empirical Evaluation of Latency in Distributed Consensus"
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '9px 12px',
+                borderRadius: 'var(--rp-radius-sm)',
+                border: '1px solid var(--rp-border)',
+                background: 'var(--rp-surface)',
+                color: 'var(--rp-text)',
+                fontSize: '13px'
+              }}
+            />
+            <small style={{ fontSize: '10.5px', color: 'var(--rp-text-muted)', display: 'block', marginTop: '3px' }}>
+              3 to 160 characters. Clearly identifies your research initiative.
+            </small>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--rp-text)', marginBottom: '5px' }}>
+                Discipline <span style={{ color: '#ef4444' }}>*</span>
+              </label>
+              <select
+                value={discipline}
+                onChange={e => setDiscipline(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '9px 12px',
+                  borderRadius: 'var(--rp-radius-sm)',
+                  border: '1px solid var(--rp-border)',
+                  background: 'var(--rp-surface)',
+                  color: 'var(--rp-text)',
+                  fontSize: '12.5px'
+                }}
+              >
+                {DISCIPLINES.map(d => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--rp-text)', marginBottom: '5px' }}>
+                Research Type <span style={{ color: '#ef4444' }}>*</span>
+              </label>
+              <select
+                value={researchType}
+                onChange={e => setResearchType(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '9px 12px',
+                  borderRadius: 'var(--rp-radius-sm)',
+                  border: '1px solid var(--rp-border)',
+                  background: 'var(--rp-surface)',
+                  color: 'var(--rp-text)',
+                  fontSize: '12.5px'
+                }}
+              >
+                {RESEARCH_TYPES.map(rt => (
+                  <option key={rt} value={rt}>{rt}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '14px' }}>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--rp-text)', marginBottom: '5px' }}>
+              Description & Problem Statement
+            </label>
+            <textarea
+              rows={3}
+              maxLength={1000}
+              placeholder="Describe the research questions, theoretical context, and hypotheses..."
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '9px 12px',
+                borderRadius: 'var(--rp-radius-sm)',
+                border: '1px solid var(--rp-border)',
+                background: 'var(--rp-surface)',
+                color: 'var(--rp-text)',
+                fontSize: '12.5px',
+                resize: 'vertical'
+              }}
+            />
+          </div>
+
+          <div style={{ marginBottom: '14px' }}>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--rp-text)', marginBottom: '5px' }}>
+              Research Objectives (one per line)
+            </label>
+            <textarea
+              rows={3}
+              placeholder="e.g.&#10;Synthesize literature on Byzantine fault tolerance&#10;Construct testbed with 100 heterogeneous nodes&#10;Conduct two-way ANOVA on throughput variance"
+              value={objectives}
+              onChange={e => setObjectives(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '9px 12px',
+                borderRadius: 'var(--rp-radius-sm)',
+                border: '1px solid var(--rp-border)',
+                background: 'var(--rp-surface)',
+                color: 'var(--rp-text)',
+                fontSize: '12.5px',
+                resize: 'vertical'
+              }}
+            />
+          </div>
+
+          <div style={{ marginBottom: '14px' }}>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--rp-text)', marginBottom: '5px' }}>
+              Keywords (comma-separated)
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. consensus, distributed systems, latency, fault tolerance"
+              value={keywords}
+              onChange={e => setKeywords(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '9px 12px',
+                borderRadius: 'var(--rp-radius-sm)',
+                border: '1px solid var(--rp-border)',
+                background: 'var(--rp-surface)',
+                color: 'var(--rp-text)',
+                fontSize: '12.5px'
+              }}
+            />
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--rp-text)', marginBottom: '5px' }}>
+                Start Date
+              </label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={e => setStartDate(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '9px 12px',
+                  borderRadius: 'var(--rp-radius-sm)',
+                  border: '1px solid var(--rp-border)',
+                  background: 'var(--rp-surface)',
+                  color: 'var(--rp-text)',
+                  fontSize: '12px'
+                }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--rp-text)', marginBottom: '5px' }}>
+                Target Completion Date
+              </label>
+              <input
+                type="date"
+                value={targetDate}
+                onChange={e => setTargetDate(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '9px 12px',
+                  borderRadius: 'var(--rp-radius-sm)',
+                  border: '1px solid var(--rp-border)',
+                  background: 'var(--rp-surface)',
+                  color: 'var(--rp-text)',
+                  fontSize: '12px'
+                }}
+              />
+            </div>
+          </div>
+
+          <div style={{
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: '10px',
+            paddingTop: '16px',
+            borderTop: '1px solid var(--rp-border-subtle)'
+          }}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={onClose}
+              disabled={isSubmitting}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={isSubmitting || !title.trim()}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+            >
+              {isSubmitting ? (
+                <>
+                  <RefreshCw size={13} className="spin" /> Creating Project...
+                </>
+              ) : (
+                <>
+                  <Plus size={14} /> Create Research Project
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({
+  user,
+  usage,
+  projects = [],
+  activeProject,
+  setActiveProject,
+  revisions = [],
+  documents = [],
+  citationsList = [],
+  setSection,
+  setShowProjectForm,
+  token,
+  refreshData
+}: any) {
+  const [overview, setOverview] = useState<any>(null);
+  const [loadingOverview, setLoadingOverview] = useState<boolean>(true);
+  const [overviewError, setOverviewError] = useState<string>('');
+  const [taskToggling, setTaskToggling] = useState<string | null>(null);
+  const [quickTaskTitle, setQuickTaskTitle] = useState<string>('');
+  const [addingTask, setAddingTask] = useState<boolean>(false);
+
+  const fetchOverview = async () => {
+    if (!token) {
+      setLoadingOverview(false);
+      return;
+    }
+    setLoadingOverview(true);
+    setOverviewError('');
+    try {
+      const data = await request('/dashboard/overview', token, undefined, 'GET');
+      setOverview(data);
+    } catch (e: any) {
+      setOverviewError(e.message || 'Failed to load live overview metrics.');
+    } finally {
+      setLoadingOverview(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchOverview();
+  }, [token, activeProject?._id]);
+
+  const handleToggleTask = async (task: any) => {
+    if (taskToggling) return;
+    setTaskToggling(task._id);
+    const newStatus = task.status === 'done' ? 'todo' : 'done';
+    try {
+      await request(`/projects/${task.projectId}/tasks/${task._id}`, token, { status: newStatus }, 'PATCH');
+      await fetchOverview();
+      if (refreshData) await refreshData();
+    } catch (e: any) {
+      console.error('Failed to toggle task:', e);
+    } finally {
+      setTaskToggling(null);
+    }
+  };
+
+  const handleAddQuickTask = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickTaskTitle.trim() || !activeProject) return;
+    setAddingTask(true);
+    try {
+      await request(`/projects/${activeProject._id}/tasks`, token, {
+        title: quickTaskTitle.trim(),
+        priority: 'medium',
+        stage: 'general'
+      }, 'POST');
+      setQuickTaskTitle('');
+      await fetchOverview();
+      if (refreshData) await refreshData();
+    } catch (e: any) {
+      console.error('Failed to add quick task:', e);
+    } finally {
+      setAddingTask(false);
+    }
+  };
+
+  // Derive metrics with fallbacks
+  const totalProjects = overview?.metrics?.totalProjects ?? projects.length;
+  const activeProjectsCount = overview?.metrics?.activeProjects ?? projects.filter((p: any) => p.status === 'active' || !p.status).length;
+  const draftProjectsCount = overview?.metrics?.draftProjects ?? projects.filter((p: any) => p.status === 'draft').length;
+  const totalDocuments = overview?.metrics?.totalDocuments ?? documents.length;
+  const totalWords = overview?.metrics?.totalWords ?? documents.reduce((acc: number, d: any) => acc + (d.wordCount || 0), 0);
+  const totalCitations = overview?.metrics?.totalCitations ?? citationsList.length;
+  const verifiedDois = overview?.metrics?.verifiedDois ?? citationsList.filter((c: any) => !!c.doi).length;
+  const taskRate = overview?.metrics?.tasks?.completionRate ?? (activeProject?.progress || activeProject?.completionPercentage || 0);
+  const tasksCompleted = overview?.metrics?.tasks?.completed ?? 0;
+  const tasksTotal = overview?.metrics?.tasks?.total ?? 0;
+  const upcomingDeadlines = overview?.metrics?.upcomingDeadlines ?? 0;
+
+  const currentHour = new Date().getHours();
+  const timeGreeting = currentHour < 12 ? 'Good morning' : currentHour < 17 ? 'Good afternoon' : 'Good evening';
+  const userName = user?.displayName || user?.email?.split('@')[0] || 'Researcher';
+
+  const upcomingTasksList = overview?.upcomingTasks || [];
+  const recentActivityList = overview?.recentActivity || [];
+  const recentProjectsList = overview?.recentProjects || projects.slice(0, 4);
+
   const workflowStages = [
     { id: 'literature', label: '1. Literature', section: 'Literature Review', icon: BookOpen },
     { id: 'statistics', label: '2. Statistics', section: 'Statistical Analysis', icon: Activity },
@@ -3996,102 +4517,215 @@ function Dashboard({ user, usage, projects, activeProject, revisions, documents,
 
   return (
     <section className="dashboard">
-      <div className="welcome-row">
+      {/* GREETING & RESEARCH COMMAND CENTER HEADER */}
+      <div className="welcome-row" style={{ alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px' }}>
         <div>
-          <p className="eyebrow">RESEARCH COMMAND CENTER · RIGOR & REPRODUCIBILITY</p>
-          <h1>Good science starts with <span>rigor & clarity.</span></h1>
-          <p className="muted">An interconnected operating system uniting literature review, statistical analysis, PDF research chat, and academic writing.</p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+            <span className="eyebrow" style={{ margin: 0 }}>ENTERPRISE RESEARCH COMMAND CENTER</span>
+            <span className="rp-badge rp-badge-accent" style={{ fontSize: '10px' }}>v1.0 Production</span>
+          </div>
+          <h1 style={{ margin: '4px 0 6px', fontSize: '24px', fontWeight: 700, letterSpacing: '-0.3px' }}>
+            {timeGreeting}, <span style={{ color: 'var(--rp-accent)' }}>{userName}</span>
+          </h1>
+          <p className="muted" style={{ margin: 0, fontSize: '12.5px', maxWidth: '650px' }}>
+            {activeProject
+              ? `Active Workspace: ${activeProject.title} (${activeProject.discipline || 'General Academic'}) · ${activeProject.progress || 0}% Milestones Completed`
+              : 'Empowering reproducible scientific inquiry with automated literature review, exact statistics, and manuscript integrity.'}
+          </p>
         </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button className="btn-secondary" onClick={() => setSection('My Research Projects')}>
-            <FolderKanban size={14} /> All Projects
+
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <button className="btn-secondary" onClick={() => setShowProjectForm(true)}>
+            <Plus size={14} /> New Project
           </button>
           <button className="btn-primary" onClick={() => setSection('Writing Studio')}>
-            <Plus size={14} /> Open Writing Studio
+            <WandSparkles size={14} /> Open Writing Studio
           </button>
         </div>
       </div>
 
-      {/* Active Project Banner & Linear Workflow Stage */}
-      {activeProject && (
+      {/* ERROR BANNER IF OVERVIEW FAILS */}
+      {overviewError && (
         <div style={{
-          background: 'var(--rp-surface)',
-          border: '1px solid var(--rp-border)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '12px 16px',
+          background: '#fef2f2',
+          color: '#991b1b',
+          border: '1px solid #fecaca',
           borderRadius: 'var(--rp-radius-md)',
-          padding: '16px 18px',
-          margin: '18px 0 22px',
-          boxShadow: 'var(--rp-shadow-xs)'
+          margin: '16px 0',
+          fontSize: '12.5px'
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '12px' }}>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                <span style={{ fontSize: '10.5px', textTransform: 'uppercase', letterSpacing: '0.8px', color: 'var(--rp-accent)', fontWeight: 700 }}>
-                  Active Project
-                </span>
-                <span className="rp-badge rp-badge-accent">
-                  {activeProject.workflowStage || 'literature'} stage
-                </span>
-              </div>
-              <h2 style={{ fontSize: '16px', fontWeight: 700, margin: '2px 0 4px', color: 'var(--rp-text)' }}>{activeProject.title}</h2>
-              <small style={{ color: 'var(--rp-text-muted)', fontSize: '11px' }}>{activeProject.discipline || 'General Academic'} · {activeProject.documentType || 'Manuscript'}</small>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: '10.5px', color: 'var(--rp-text-muted)', fontWeight: 600 }}>Workflow Progress</div>
-                <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--rp-accent)' }}>{activeProject.completionPercentage || 0}%</div>
-              </div>
-              <button className="btn-secondary btn-sm" onClick={() => setSection('My Research Projects')}>
-                Manage Project ↗
-              </button>
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <AlertCircle size={16} />
+            <span>{overviewError}</span>
           </div>
-
-          {/* Workflow Progress Bar */}
-          <div style={{ height: '4px', background: 'var(--rp-surface-subtle)', borderRadius: '2px', overflow: 'hidden', marginBottom: '14px' }}>
-            <div style={{
-              height: '100%',
-              width: `${Math.max(activeProject.completionPercentage || 0, 8)}%`,
-              background: 'var(--rp-accent)',
-              transition: 'width 0.25s ease'
-            }} />
-          </div>
-
-          {/* Linear Workflow Step Badges */}
-          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', paddingTop: '10px', borderTop: '1px solid var(--rp-border-subtle)' }}>
-            <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--rp-text-muted)', alignSelf: 'center', marginRight: '4px' }}>Stage:</span>
-            {workflowStages.map(st => {
-              const isActive = (activeProject.workflowStage || 'literature').toLowerCase().includes(st.id);
-              const StepIcon = st.icon;
-              return (
-                <button
-                  key={st.id}
-                  onClick={() => setSection(st.section)}
-                  className={`btn-secondary btn-sm ${isActive ? 'btn-primary' : ''}`}
-                  style={{ gap: '5px' }}
-                >
-                  <StepIcon size={12} />
-                  <span>{st.label}</span>
-                </button>
-              );
-            })}
-          </div>
+          <button
+            className="btn-secondary btn-sm"
+            onClick={fetchOverview}
+            style={{ fontSize: '11px', height: '28px' }}
+          >
+            <RefreshCw size={12} /> Retry
+          </button>
         </div>
       )}
 
-      {/* 4 Linear Metric Cards */}
+      {/* ACTIVE PROJECT BANNER & WORKFLOW STEPPER */}
+      <div style={{
+        background: 'var(--rp-surface)',
+        border: '1px solid var(--rp-border)',
+        borderRadius: 'var(--rp-radius-md)',
+        padding: '16px 20px',
+        margin: '18px 0 22px',
+        boxShadow: 'var(--rp-shadow-xs)'
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', marginBottom: '14px' }}>
+          <div style={{ flex: 1, minWidth: '280px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+              <span style={{ fontSize: '10.5px', textTransform: 'uppercase', letterSpacing: '0.8px', color: 'var(--rp-accent)', fontWeight: 700 }}>
+                Active Research Workspace
+              </span>
+              {activeProject && (
+                <span className="rp-badge rp-badge-accent" style={{ fontSize: '10.5px' }}>
+                  {activeProject.status || 'active'}
+                </span>
+              )}
+            </div>
+
+            {projects.length > 0 ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <select
+                  value={activeProject?._id || ''}
+                  onChange={(e) => {
+                    const found = projects.find((p: any) => p._id === e.target.value);
+                    if (found) {
+                      setActiveProject(found);
+                      if (typeof window !== 'undefined') {
+                        localStorage.setItem('rp_active_project_id', found._id);
+                      }
+                    }
+                  }}
+                  style={{
+                    fontSize: '14px',
+                    fontWeight: 600,
+                    padding: '6px 10px',
+                    borderRadius: 'var(--rp-radius-sm)',
+                    border: '1px solid var(--rp-border)',
+                    background: 'var(--rp-surface-subtle)',
+                    color: 'var(--rp-text)',
+                    maxWidth: '460px'
+                  }}
+                >
+                  {projects.map((p: any) => (
+                    <option key={p._id} value={p._id}>
+                      {p.title} ({p.discipline || 'General'})
+                    </option>
+                  ))}
+                </select>
+                {activeProject && (
+                  <span style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)' }}>
+                    {activeProject.researchType || 'Quantitative'} · {activeProject.discipline || 'Academic'}
+                  </span>
+                )}
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '13px', color: 'var(--rp-text-muted)' }}>No research project created yet.</span>
+                <button className="btn-secondary btn-sm" onClick={() => setShowProjectForm(true)}>
+                  <Plus size={12} /> Create First Project
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: '10.5px', color: 'var(--rp-text-muted)', fontWeight: 600 }}>Deterministic Progress</div>
+              <div style={{ fontSize: '20px', fontWeight: 700, color: 'var(--rp-accent)' }}>
+                {activeProject ? (activeProject.progress ?? activeProject.completionPercentage ?? 0) : 0}%
+              </div>
+            </div>
+            <button className="btn-secondary btn-sm" onClick={() => setSection('My Research Projects')}>
+              Manage All Projects ↗
+            </button>
+          </div>
+        </div>
+
+        {/* Progress Bar */}
+        <div style={{ height: '5px', background: 'var(--rp-surface-subtle)', borderRadius: '3px', overflow: 'hidden', marginBottom: '14px' }}>
+          <div style={{
+            height: '100%',
+            width: `${Math.min(100, Math.max(activeProject?.progress ?? activeProject?.completionPercentage ?? 0, 4))}%`,
+            background: 'var(--rp-accent)',
+            transition: 'width 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
+          }} />
+        </div>
+
+        {/* Linear Workflow Step Badges */}
+        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', paddingTop: '10px', borderTop: '1px solid var(--rp-border-subtle)' }}>
+          <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--rp-text-muted)', alignSelf: 'center', marginRight: '4px' }}>
+            Stage Modules:
+          </span>
+          {workflowStages.map(st => {
+            const isActive = (activeProject?.workflowStage || 'literature').toLowerCase().includes(st.id);
+            const StepIcon = st.icon;
+            return (
+              <button
+                key={st.id}
+                onClick={() => setSection(st.section)}
+                className={`btn-secondary btn-sm ${isActive ? 'btn-primary' : ''}`}
+                style={{ gap: '5px', fontSize: '11px' }}
+              >
+                <StepIcon size={12} />
+                <span>{st.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 6 CORE METRIC CARDS */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
         gap: '12px',
         margin: '18px 0 24px'
       }}>
-        <Stat icon={<FolderKanban size={16} />} label="Research Projects" value={projects?.length || 0} note="Organised research workspaces" />
-        <Stat icon={<FileText size={16} />} label="Studio Documents" value={documents?.length || 0} note="Active drafts & manuscripts" />
-        <Stat icon={<BookOpenCheck size={16} />} label="Citations & DOIs" value={citationsList?.length || 0} note="Grounded reference items" />
+        <Stat
+          icon={<FolderKanban size={16} />}
+          label="Research Projects"
+          value={loadingOverview ? '—' : totalProjects}
+          note={`${activeProjectsCount} active · ${draftProjectsCount} drafts`}
+        />
+        <Stat
+          icon={<FileText size={16} />}
+          label="Manuscripts & Drafts"
+          value={loadingOverview ? '—' : totalDocuments}
+          note={`${totalWords.toLocaleString()} total words`}
+        />
+        <Stat
+          icon={<BookOpenCheck size={16} />}
+          label="Scholarly References"
+          value={loadingOverview ? '—' : totalCitations}
+          note={`${verifiedDois} Crossref verified DOIs`}
+        />
+        <Stat
+          icon={<CheckCircle2 size={16} />}
+          label="Milestones & Tasks"
+          value={loadingOverview ? '—' : `${taskRate}%`}
+          note={`${tasksCompleted}/${tasksTotal} completed milestones`}
+        />
+        <Stat
+          icon={<Calendar size={16} />}
+          label="Pending Deadlines"
+          value={loadingOverview ? '—' : upcomingDeadlines}
+          note="Upcoming within 30 days"
+        />
         <Stat
           icon={<Activity size={16} />}
-          label="AI Quota & Engine"
+          label="Engine & AI Quota"
           value={
             usage?.rewrite?.isUnlimited || usage?.rewrite?.limit === 'Unlimited'
               ? 'Unlimited'
@@ -4099,16 +4733,326 @@ function Dashboard({ user, usage, projects, activeProject, revisions, documents,
                 ? `${usage.rewrite?.remaining}/${usage.rewrite?.limit}`
                 : 'Unlimited'
           }
-          note={
-            usage?.rewrite?.isUnlimited || usage?.rewrite?.limit === 'Unlimited'
-              ? 'Full unlimited mode enabled'
-              : usage?.aiAvailable
-                ? 'Revisions remaining today'
-                : 'Deterministic engine active'
-          }
+          note="Deterministic validation active"
         />
       </div>
 
+      {/* TWO-COLUMN WORKSPACE: UPCOMING TASKS + RECENT ACTIVITY */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))',
+        gap: '16px',
+        marginBottom: '24px'
+      }}>
+        {/* LEFT COLUMN: UPCOMING TASKS & MILESTONES */}
+        <div className="panel" style={{ padding: '18px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{
+                width: '26px',
+                height: '26px',
+                borderRadius: 'var(--rp-radius-sm)',
+                background: 'var(--rp-accent-subtle)',
+                color: 'var(--rp-accent)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}>
+                <CheckSquare size={14} />
+              </div>
+              <h3 style={{ fontSize: '13.5px', fontWeight: 700, margin: 0 }}>Upcoming Tasks & Milestones</h3>
+            </div>
+            {activeProject && (
+              <span className="rp-badge rp-badge-muted" style={{ fontSize: '10.5px' }}>
+                {activeProject.title.slice(0, 20)}...
+              </span>
+            )}
+          </div>
+
+          {/* Quick Add Task Input */}
+          {activeProject ? (
+            <form onSubmit={handleAddQuickTask} style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+              <input
+                type="text"
+                placeholder="Add milestone to active project..."
+                value={quickTaskTitle}
+                onChange={e => setQuickTaskTitle(e.target.value)}
+                style={{
+                  flex: 1,
+                  padding: '7px 10px',
+                  borderRadius: 'var(--rp-radius-sm)',
+                  border: '1px solid var(--rp-border)',
+                  background: 'var(--rp-surface-subtle)',
+                  color: 'var(--rp-text)',
+                  fontSize: '12px'
+                }}
+              />
+              <button
+                type="submit"
+                className="btn-secondary btn-sm"
+                disabled={addingTask || !quickTaskTitle.trim()}
+                style={{ fontSize: '11.5px', whiteSpace: 'nowrap' }}
+              >
+                {addingTask ? <RefreshCw size={12} className="spin" /> : <Plus size={12} />} Add
+              </button>
+            </form>
+          ) : (
+            <p style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)', marginBottom: '12px' }}>
+              Select an active project above to track milestones.
+            </p>
+          )}
+
+          {/* Tasks List */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', minHeight: '160px' }}>
+            {upcomingTasksList.length > 0 ? (
+              upcomingTasksList.slice(0, 5).map((t: any) => {
+                const isDone = t.status === 'done';
+                const isToggling = taskToggling === t._id;
+                return (
+                  <div
+                    key={t._id}
+                    onClick={() => handleToggleTask(t)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '8px 10px',
+                      background: 'var(--rp-surface-subtle)',
+                      borderRadius: 'var(--rp-radius-sm)',
+                      border: '1px solid var(--rp-border-subtle)',
+                      cursor: 'pointer',
+                      transition: 'background 0.15s ease'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, overflow: 'hidden' }}>
+                      <button
+                        type="button"
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: isDone ? 'var(--rp-accent)' : 'var(--rp-text-muted)',
+                          padding: 0,
+                          cursor: 'pointer',
+                          display: 'flex'
+                        }}
+                      >
+                        {isToggling ? (
+                          <RefreshCw size={14} className="spin" />
+                        ) : isDone ? (
+                          <CheckSquare size={14} />
+                        ) : (
+                          <Square size={14} />
+                        )}
+                      </button>
+                      <span style={{
+                        fontSize: '12px',
+                        color: isDone ? 'var(--rp-text-muted)' : 'var(--rp-text)',
+                        textDecoration: isDone ? 'line-through' : 'none',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }}>
+                        {t.title}
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                      {t.priority && (
+                        <span style={{
+                          fontSize: '9.5px',
+                          textTransform: 'uppercase',
+                          fontWeight: 700,
+                          padding: '2px 5px',
+                          borderRadius: '3px',
+                          background: t.priority === 'high' ? '#fef2f2' : t.priority === 'low' ? 'var(--rp-surface)' : 'var(--rp-surface-hover)',
+                          color: t.priority === 'high' ? '#b91c1c' : 'var(--rp-text-muted)'
+                        }}>
+                          {t.priority}
+                        </span>
+                      )}
+                      {t.dueDate && (
+                        <span style={{ fontSize: '10px', color: 'var(--rp-text-muted)' }}>
+                          {new Date(t.dueDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div style={{
+                textAlign: 'center',
+                padding: '30px 10px',
+                color: 'var(--rp-text-muted)',
+                fontSize: '12px'
+              }}>
+                <CheckCircle2 size={24} style={{ margin: '0 auto 8px', color: 'var(--rp-accent)', opacity: 0.6 }} />
+                <p style={{ margin: 0, fontWeight: 600 }}>All milestones complete!</p>
+                <small style={{ fontSize: '10.5px' }}>Add next steps using the input above.</small>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* RIGHT COLUMN: RECENT ACTIVITY TIMELINE */}
+        <div className="panel" style={{ padding: '18px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{
+                width: '26px',
+                height: '26px',
+                borderRadius: 'var(--rp-radius-sm)',
+                background: 'var(--rp-accent-subtle)',
+                color: 'var(--rp-accent)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}>
+                <Clock3 size={14} />
+              </div>
+              <h3 style={{ fontSize: '13.5px', fontWeight: 700, margin: 0 }}>Recent Activity Timeline</h3>
+            </div>
+            <span style={{ fontSize: '11px', color: 'var(--rp-text-muted)' }}>Live audit stream</span>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', minHeight: '160px' }}>
+            {recentActivityList.length > 0 ? (
+              recentActivityList.slice(0, 5).map((act: any, idx: number) => {
+                const iconMap: Record<string, any> = {
+                  document: FileText,
+                  revision: Edit3,
+                  task: CheckSquare,
+                  project: FolderKanban,
+                  audit: ShieldCheck
+                };
+                const ActIcon = iconMap[act.type] || Activity;
+                return (
+                  <div
+                    key={act._id || idx}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: '10px',
+                      padding: '8px 10px',
+                      borderRadius: 'var(--rp-radius-sm)',
+                      background: 'var(--rp-surface-subtle)',
+                      border: '1px solid var(--rp-border-subtle)'
+                    }}
+                  >
+                    <div style={{
+                      width: '22px',
+                      height: '22px',
+                      borderRadius: '50%',
+                      background: 'var(--rp-surface)',
+                      border: '1px solid var(--rp-border)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: 'var(--rp-accent)',
+                      marginTop: '2px',
+                      flexShrink: 0
+                    }}>
+                      <ActIcon size={11} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--rp-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {act.title || act.action || 'Activity recorded'}
+                      </div>
+                      <div style={{ fontSize: '10.5px', color: 'var(--rp-text-muted)', display: 'flex', justifyContent: 'space-between', marginTop: '2px' }}>
+                        <span>{act.metadata?.title || act.projectTitle || act.type || 'Event'}</span>
+                        <span>{formatRelativeTime(act.date || act.createdAt)}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div style={{
+                textAlign: 'center',
+                padding: '30px 10px',
+                color: 'var(--rp-text-muted)',
+                fontSize: '12px'
+              }}>
+                <Clock3 size={24} style={{ margin: '0 auto 8px', color: 'var(--rp-text-muted)', opacity: 0.5 }} />
+                <p style={{ margin: 0 }}>No recent activities logged.</p>
+                <small style={{ fontSize: '10.5px' }}>Document edits and tasks will appear here automatically.</small>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* RECENT PROJECTS HIGHLIGHT */}
+      {recentProjectsList.length > 0 && (
+        <div style={{ marginBottom: '24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <h3 style={{ fontSize: '14px', fontWeight: 700, margin: 0 }}>Recent Research Projects</h3>
+            <button className="text-button" onClick={() => setSection('My Research Projects')}>
+              View all {projects.length} projects →
+            </button>
+          </div>
+
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+            gap: '12px'
+          }}>
+            {recentProjectsList.map((p: any) => {
+              const pProgress = p.progress ?? p.completionPercentage ?? 0;
+              return (
+                <div
+                  key={p._id}
+                  className="panel"
+                  style={{
+                    padding: '14px 16px',
+                    cursor: 'pointer',
+                    transition: 'border-color 0.15s ease',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'space-between'
+                  }}
+                  onClick={() => {
+                    setActiveProject(p);
+                    if (typeof window !== 'undefined') {
+                      localStorage.setItem('rp_active_project_id', p._id);
+                    }
+                    setSection('My Research Projects');
+                  }}
+                >
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                      <span className="rp-badge rp-badge-accent" style={{ fontSize: '10px' }}>
+                        {p.discipline || 'Academic'}
+                      </span>
+                      <span style={{ fontSize: '10.5px', color: 'var(--rp-text-muted)' }}>
+                        {p.status || 'active'}
+                      </span>
+                    </div>
+                    <h4 style={{ fontSize: '13.5px', fontWeight: 700, margin: '0 0 6px', color: 'var(--rp-text)' }}>
+                      {p.title}
+                    </h4>
+                    <p style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)', margin: '0 0 12px', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                      {p.description || 'Structured academic research workspace.'}
+                    </p>
+                  </div>
+
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10.5px', marginBottom: '4px' }}>
+                      <span style={{ color: 'var(--rp-text-muted)' }}>Progress</span>
+                      <strong style={{ color: 'var(--rp-accent)' }}>{pProgress}%</strong>
+                    </div>
+                    <div style={{ height: '4px', background: 'var(--rp-surface-subtle)', borderRadius: '2px', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${Math.max(pProgress, 4)}%`, background: 'var(--rp-accent)' }} />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 8 UNIFIED CORE MODULES */}
       <div className="section-heading" style={{ marginBottom: '12px' }}>
         <div>
           <h2 style={{ fontSize: '15px', fontWeight: 700, margin: '0 0 3px' }}>8 Unified Core Modules</h2>
@@ -4662,25 +5606,50 @@ function AnalysisPage({ title, subtitle, resultsTitle, resultsSubtitle, icon, ru
 }
 
 function Projects({
-  projects,
+  projects = [],
+  activeProject,
+  setActiveProject,
   showForm,
   setShowForm,
-  title,
-  setTitle,
-  createProject,
-  deleteProject,
   token,
   documents = [],
+  citationsList = [],
+  revisions = [],
+  setSection,
   onOpenInStudio,
   setMessage,
   setError,
-  refreshData
+  refreshData,
+  onCreateProjectClick
 }: any) {
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
-  const [projectTab, setProjectTab] = useState<'tree' | 'cross_scan' | 'bibliography'>('tree');
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>(() => {
+    return (typeof window !== 'undefined' && localStorage.getItem('rp_projects_view_mode') as any) || 'grid';
+  });
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [disciplineFilter, setDisciplineFilter] = useState('all');
+  const [sortField, setSortField] = useState<'updatedAt' | 'title' | 'progress' | 'targetDate'>('updatedAt');
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+
+  // Selected project sub-navigation
+  const [projectTab, setProjectTab] = useState<'overview' | 'tree' | 'tasks' | 'activity' | 'bridges' | 'cross_scan' | 'bibliography'>('overview');
+  const [projectTasks, setProjectTasks] = useState<any[]>([]);
+  const [loadingTasks, setLoadingTasks] = useState(false);
+  const [projectActivity, setProjectActivity] = useState<any[]>([]);
+  const [loadingActivity, setLoadingActivity] = useState(false);
+
+  // New task form state
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskPriority, setNewTaskPriority] = useState<'low' | 'medium' | 'high'>('medium');
+  const [newTaskDueDate, setNewTaskDueDate] = useState('');
+  const [addingTask, setAddingTask] = useState(false);
+  const [taskFilter, setTaskFilter] = useState<'all' | 'todo' | 'done'>('all');
+
+  // Thesis tools state
   const [crossScanReport, setCrossScanReport] = useState<any>(null);
   const [bibReport, setBibReport] = useState<any>(null);
-  const [busy, setBusy] = useState<boolean>(false);
+  const [busy, setBusy] = useState(false);
 
   const STANDARD_CHAPTERS = [
     { key: 'front_matter', order: 1, title: 'Front Matter', subtitle: 'Title Page, Abstract, Dedication, Acknowledgments' },
@@ -4692,6 +5661,60 @@ function Projects({
     { key: 'back_matter', order: 7, title: 'Back Matter', subtitle: 'Master References & Supplementary Appendices' }
   ];
 
+  const DISCIPLINES = [
+    'Computer Science',
+    'Medicine & Health',
+    'Social Sciences',
+    'Physical Sciences',
+    'Life Sciences',
+    'Humanities',
+    'Engineering',
+    'Economics & Business',
+    'Interdisciplinary'
+  ];
+
+  // Save view mode preference
+  const handleToggleViewMode = (mode: 'grid' | 'list') => {
+    setViewMode(mode);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rp_projects_view_mode', mode);
+    }
+  };
+
+  // Keep selectedProject in sync when projects prop updates
+  useEffect(() => {
+    if (selectedProject) {
+      const updated = projects.find((p: any) => p._id === selectedProject._id);
+      if (updated) setSelectedProject(updated);
+    }
+  }, [projects]);
+
+  // Load project tasks and activity when a project is selected
+  const loadProjectDetails = async (projectId: string) => {
+    if (!token) return;
+    setLoadingTasks(true);
+    setLoadingActivity(true);
+    try {
+      const [tasks, activity] = await Promise.all([
+        request(`/projects/${projectId}/tasks`, token, undefined, 'GET').catch(() => []),
+        request(`/projects/${projectId}/activity`, token, undefined, 'GET').catch(() => [])
+      ]);
+      setProjectTasks(tasks);
+      setProjectActivity(activity);
+    } catch (e: any) {
+      console.error('Error fetching project details:', e);
+    } finally {
+      setLoadingTasks(false);
+      setLoadingActivity(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedProject?._id) {
+      loadProjectDetails(selectedProject._id);
+    }
+  }, [selectedProject?._id, token]);
+
   const projectDocs = useMemo(() => {
     if (!selectedProject) return [];
     return documents.filter((d: any) => d.projectId === selectedProject._id);
@@ -4701,15 +5724,109 @@ function Projects({
     return projectDocs.reduce((acc: number, d: any) => acc + (d.wordCount || 0), 0);
   }, [projectDocs]);
 
+  // Project Actions
+  const handleArchive = async (id: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    try {
+      await request(`/projects/${id}/archive`, token, undefined, 'POST');
+      if (setMessage) setMessage('Project archived.');
+      if (refreshData) await refreshData();
+    } catch (err: any) {
+      if (setError) setError(err.message || 'Failed to archive project.');
+    }
+  };
+
+  const handleRestore = async (id: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    try {
+      await request(`/projects/${id}/restore`, token, undefined, 'POST');
+      if (setMessage) setMessage('Project restored to active state.');
+      if (refreshData) await refreshData();
+    } catch (err: any) {
+      if (setError) setError(err.message || 'Failed to restore project.');
+    }
+  };
+
+  const handleDelete = async (id: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!confirm('Are you sure you want to delete this project? It will be safely moved to trash.')) return;
+    try {
+      await request(`/projects/${id}`, token, undefined, 'DELETE');
+      if (setMessage) setMessage('Project deleted.');
+      if (selectedProject?._id === id) setSelectedProject(null);
+      if (refreshData) await refreshData();
+    } catch (err: any) {
+      if (setError) setError(err.message || 'Failed to delete project.');
+    }
+  };
+
+  const handleSetActive = (p: Project, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (setActiveProject) {
+      setActiveProject(p);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rp_active_project_id', p._id);
+      }
+      if (setMessage) setMessage(`Active workspace set to "${p.title}".`);
+    }
+  };
+
+  // Task Actions
+  const handleToggleTask = async (task: any) => {
+    if (!selectedProject) return;
+    const newStatus = task.status === 'done' ? 'todo' : 'done';
+    try {
+      await request(`/projects/${selectedProject._id}/tasks/${task._id}`, token, { status: newStatus }, 'PATCH');
+      await loadProjectDetails(selectedProject._id);
+      if (refreshData) await refreshData();
+    } catch (err: any) {
+      if (setError) setError(err.message || 'Failed to update task.');
+    }
+  };
+
+  const handleAddTask = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedProject || !newTaskTitle.trim()) return;
+    setAddingTask(true);
+    try {
+      await request(`/projects/${selectedProject._id}/tasks`, token, {
+        title: newTaskTitle.trim(),
+        priority: newTaskPriority,
+        dueDate: newTaskDueDate || undefined,
+        stage: 'general'
+      }, 'POST');
+      setNewTaskTitle('');
+      setNewTaskDueDate('');
+      await loadProjectDetails(selectedProject._id);
+      if (refreshData) await refreshData();
+    } catch (err: any) {
+      if (setError) setError(err.message || 'Failed to create task.');
+    } finally {
+      setAddingTask(false);
+    }
+  };
+
+  const handleDeleteTask = async (taskId: string) => {
+    if (!selectedProject) return;
+    try {
+      await request(`/projects/${selectedProject._id}/tasks/${taskId}`, token, undefined, 'DELETE');
+      await loadProjectDetails(selectedProject._id);
+      if (refreshData) await refreshData();
+    } catch (err: any) {
+      if (setError) setError(err.message || 'Failed to delete task.');
+    }
+  };
+
+  // Thesis Scaffolding actions
   async function handleInitThesisTree() {
     if (!selectedProject) return;
     setBusy(true);
     try {
       await request(`/projects/${selectedProject._id}/thesis/init`, token, undefined, 'POST');
-      await refreshData();
-      setMessage('Graduate Dissertation chapter scaffolding initialized with all 7 standard chapters!');
+      if (refreshData) await refreshData();
+      if (setMessage) setMessage('Graduate Dissertation chapter scaffolding initialized with all 7 standard chapters!');
     } catch (e: any) {
-      setError(e.message);
+      if (setError) setError(e.message);
     } finally {
       setBusy(false);
     }
@@ -4721,9 +5838,9 @@ function Projects({
     try {
       const res = await request(`/projects/${selectedProject._id}/thesis/cross-scan`, token, undefined, 'POST');
       setCrossScanReport(res);
-      setMessage('Cross-chapter redundancy and consistency scan completed.');
+      if (setMessage) setMessage('Cross-chapter redundancy and consistency scan completed.');
     } catch (e: any) {
-      setError(e.message);
+      if (setError) setError(e.message);
     } finally {
       setBusy(false);
     }
@@ -4735,9 +5852,9 @@ function Projects({
     try {
       const res = await request(`/projects/${selectedProject._id}/thesis/bibliography`, token, undefined, 'GET');
       setBibReport(res);
-      setMessage('Master bibliography synchronized across all chapters.');
+      if (setMessage) setMessage('Master bibliography synchronized across all chapters.');
     } catch (e: any) {
-      setError(e.message);
+      if (setError) setError(e.message);
     } finally {
       setBusy(false);
     }
@@ -4754,128 +5871,643 @@ function Projects({
     URL.revokeObjectURL(url);
   }
 
+  // Filter and Sort Projects
+  const filteredProjects = useMemo(() => {
+    return projects.filter((p: any) => {
+      // Search query filter
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const matchesTitle = p.title?.toLowerCase().includes(q);
+        const matchesDesc = p.description?.toLowerCase().includes(q);
+        const matchesDiscipline = p.discipline?.toLowerCase().includes(q);
+        const matchesKeywords = Array.isArray(p.keywords) && p.keywords.some((k: string) => k.toLowerCase().includes(q));
+        if (!matchesTitle && !matchesDesc && !matchesDiscipline && !matchesKeywords) return false;
+      }
+      // Status filter
+      if (statusFilter !== 'all') {
+        const curStatus = p.status || 'active';
+        if (curStatus !== statusFilter) return false;
+      }
+      // Discipline filter
+      if (disciplineFilter !== 'all') {
+        if (p.discipline !== disciplineFilter) return false;
+      }
+      return true;
+    }).sort((a: any, b: any) => {
+      let cmp = 0;
+      if (sortField === 'title') {
+        cmp = (a.title || '').localeCompare(b.title || '');
+      } else if (sortField === 'progress') {
+        const progA = a.progress ?? a.completionPercentage ?? 0;
+        const progB = b.progress ?? b.completionPercentage ?? 0;
+        cmp = progA - progB;
+      } else if (sortField === 'targetDate') {
+        const dateA = a.targetDate ? new Date(a.targetDate).getTime() : 0;
+        const dateB = b.targetDate ? new Date(b.targetDate).getTime() : 0;
+        cmp = dateA - dateB;
+      } else {
+        const dateA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+        const dateB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+        cmp = dateA - dateB;
+      }
+      return sortOrder === 'asc' ? cmp : -cmp;
+    });
+  }, [projects, searchQuery, statusFilter, disciplineFilter, sortField, sortOrder]);
+
+  const filteredTasks = useMemo(() => {
+    if (taskFilter === 'all') return projectTasks;
+    return projectTasks.filter(t => t.status === taskFilter);
+  }, [projectTasks, taskFilter]);
+
   return (
     <section className="analysis-page">
-      <div className="page-title-row">
+      {/* PAGE HEADER */}
+      <div className="page-title-row" style={{ alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px' }}>
         <div>
-          <p className="eyebrow">GRADUATE DISSERTATION SUITE</p>
-          <h1>{selectedProject ? selectedProject.title : 'Research Projects'}</h1>
-          <p className="muted">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+            <span className="eyebrow" style={{ margin: 0 }}>
+              {selectedProject ? 'UNIFIED RESEARCH PROJECT WORKSPACE' : 'ACADEMIC RESEARCH WORKSPACES'}
+            </span>
+            {selectedProject && (
+              <span className="rp-badge rp-badge-accent" style={{ fontSize: '10px' }}>
+                {selectedProject.status || 'active'}
+              </span>
+            )}
+          </div>
+          <h1 style={{ margin: '4px 0 6px', fontSize: '24px', fontWeight: 700, letterSpacing: '-0.3px' }}>
+            {selectedProject ? selectedProject.title : 'My Research Projects'}
+          </h1>
+          <p className="muted" style={{ margin: 0, fontSize: '12.5px', maxWidth: '700px' }}>
             {selectedProject
-              ? 'Multi-chapter thesis tree hierarchy, cross-chapter redundancy scanner & master bibliography sync.'
-              : 'Group research drafts, citations, and multi-chapter dissertations by project.'}
+              ? `${selectedProject.discipline || 'General Academic'} · ${selectedProject.researchType || 'Quantitative'} · ${projectDocs.length} Chapters/Documents · ${totalProjectWords.toLocaleString()} Words`
+              : 'End-to-end research portfolio. Manage problem formulations, multi-chapter manuscripts, deterministic milestones, and peer-review audits.'}
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
           {selectedProject ? (
-            <button className="secondary" onClick={() => setSelectedProject(null)}>
-              ← Back to All Projects
-            </button>
+            <>
+              {activeProject?._id !== selectedProject._id && (
+                <button className="btn-secondary" onClick={() => handleSetActive(selectedProject)}>
+                  <Target size={14} /> Set as Active Workspace
+                </button>
+              )}
+              <button className="btn-secondary" onClick={() => setSelectedProject(null)}>
+                ← All Projects
+              </button>
+            </>
           ) : (
-            <button className="primary" onClick={() => setShowForm(!showForm)}>
-              <Plus size={16} /> New Project
-            </button>
+            <>
+              {/* View Mode Toggle */}
+              <div style={{ display: 'flex', border: '1px solid var(--rp-border)', borderRadius: 'var(--rp-radius-sm)', overflow: 'hidden' }}>
+                <button
+                  type="button"
+                  onClick={() => handleToggleViewMode('grid')}
+                  style={{
+                    padding: '6px 10px',
+                    background: viewMode === 'grid' ? 'var(--rp-surface-hover)' : 'var(--rp-surface)',
+                    border: 'none',
+                    color: viewMode === 'grid' ? 'var(--rp-accent)' : 'var(--rp-text-muted)',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center'
+                  }}
+                  title="Grid View"
+                >
+                  <Grid size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleToggleViewMode('list')}
+                  style={{
+                    padding: '6px 10px',
+                    background: viewMode === 'list' ? 'var(--rp-surface-hover)' : 'var(--rp-surface)',
+                    border: 'none',
+                    color: viewMode === 'list' ? 'var(--rp-accent)' : 'var(--rp-text-muted)',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center'
+                  }}
+                  title="List View"
+                >
+                  <List size={14} />
+                </button>
+              </div>
+
+              <button
+                className="btn-primary"
+                onClick={() => {
+                  if (onCreateProjectClick) onCreateProjectClick();
+                  else if (setShowForm) setShowForm(true);
+                }}
+              >
+                <Plus size={14} /> New Research Project
+              </button>
+            </>
           )}
         </div>
       </div>
 
-      {/* PROJECT CREATION FORM */}
-      {!selectedProject && showForm && (
-        <form className="panel project-form" onSubmit={createProject}>
-          <label>
-            Project title
+      {/* FILTER & SEARCH TOOLBAR (WHEN VIEWING ALL PROJECTS) */}
+      {!selectedProject && (
+        <div style={{
+          display: 'flex',
+          gap: '10px',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          padding: '12px 16px',
+          background: 'var(--rp-surface)',
+          border: '1px solid var(--rp-border)',
+          borderRadius: 'var(--rp-radius-md)',
+          marginBottom: '20px'
+        }}>
+          {/* Search Input */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: '220px' }}>
+            <Search size={14} style={{ color: 'var(--rp-text-muted)', flexShrink: 0 }} />
             <input
-              value={title}
-              onChange={e => setTitle(e.target.value)}
-              required
-              maxLength={160}
-              placeholder="e.g. Doctoral Dissertation — Neural Plasticity & Memory"
+              type="text"
+              placeholder="Search by title, description, or keyword..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              style={{
+                width: '100%',
+                border: 'none',
+                background: 'transparent',
+                color: 'var(--rp-text)',
+                fontSize: '12.5px',
+                outline: 'none'
+              }}
             />
-          </label>
-          <button className="primary" type="submit">Create Project</button>
-        </form>
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                style={{ background: 'transparent', border: 'none', color: 'var(--rp-text-muted)', cursor: 'pointer', padding: 0 }}
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+
+          <div style={{ height: '20px', width: '1px', background: 'var(--rp-border)' }} />
+
+          {/* Status Filter */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '11px', color: 'var(--rp-text-muted)', fontWeight: 600 }}>Status:</span>
+            <select
+              value={statusFilter}
+              onChange={e => setStatusFilter(e.target.value)}
+              style={{
+                fontSize: '11.5px',
+                padding: '4px 8px',
+                borderRadius: 'var(--rp-radius-sm)',
+                border: '1px solid var(--rp-border)',
+                background: 'var(--rp-surface-subtle)',
+                color: 'var(--rp-text)'
+              }}
+            >
+              <option value="all">All Statuses ({projects.length})</option>
+              <option value="active">Active</option>
+              <option value="draft">Draft</option>
+              <option value="completed">Completed</option>
+              <option value="archived">Archived</option>
+            </select>
+          </div>
+
+          {/* Discipline Filter */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '11px', color: 'var(--rp-text-muted)', fontWeight: 600 }}>Discipline:</span>
+            <select
+              value={disciplineFilter}
+              onChange={e => setDisciplineFilter(e.target.value)}
+              style={{
+                fontSize: '11.5px',
+                padding: '4px 8px',
+                borderRadius: 'var(--rp-radius-sm)',
+                border: '1px solid var(--rp-border)',
+                background: 'var(--rp-surface-subtle)',
+                color: 'var(--rp-text)',
+                maxWidth: '160px'
+              }}
+            >
+              <option value="all">All Disciplines</option>
+              {DISCIPLINES.map(d => (
+                <option key={d} value={d}>{d}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Sort Control */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '11px', color: 'var(--rp-text-muted)', fontWeight: 600 }}>Sort:</span>
+            <select
+              value={sortField}
+              onChange={e => setSortField(e.target.value as any)}
+              style={{
+                fontSize: '11.5px',
+                padding: '4px 8px',
+                borderRadius: 'var(--rp-radius-sm)',
+                border: '1px solid var(--rp-border)',
+                background: 'var(--rp-surface-subtle)',
+                color: 'var(--rp-text)'
+              }}
+            >
+              <option value="updatedAt">Last Updated</option>
+              <option value="title">Title</option>
+              <option value="progress">Progress</option>
+              <option value="targetDate">Target Date</option>
+            </select>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+              style={{ fontSize: '10.5px', padding: '4px 6px', height: '26px' }}
+              title={`Sort ${sortOrder === 'asc' ? 'Descending' : 'Ascending'}`}
+            >
+              {sortOrder === 'asc' ? '↑' : '↓'}
+            </button>
+          </div>
+        </div>
       )}
 
-      {/* ALL PROJECTS GRID */}
+      {/* ALL PROJECTS VIEW: GRID OR LIST */}
       {!selectedProject ? (
-        <div className="project-grid">
-          {projects.map((p: Project) => {
-            const pDocs = documents.filter((d: any) => d.projectId === p._id);
-            const pWords = pDocs.reduce((acc: number, d: any) => acc + (d.wordCount || 0), 0);
-            return (
-              <div
-                className="panel project-card"
-                key={p._id}
-                style={{ cursor: 'pointer' }}
-                onClick={() => setSelectedProject(p)}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div className="project-icon"><FolderKanban size={20} /></div>
-                  <button
-                    className="icon-button danger-button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteProject(p._id);
+        <>
+          {filteredProjects.length === 0 ? (
+            <div className="panel" style={{ padding: '60px 20px', textAlign: 'center' }}>
+              <FolderKanban size={36} style={{ margin: '0 auto 12px', color: 'var(--rp-accent)', opacity: 0.7 }} />
+              <h3 style={{ fontSize: '15px', fontWeight: 700, margin: '0 0 6px' }}>
+                {projects.length === 0 ? 'No Research Projects Created Yet' : 'No Projects Match Filters'}
+              </h3>
+              <p style={{ fontSize: '12px', color: 'var(--rp-text-muted)', maxWidth: '420px', margin: '0 auto 16px' }}>
+                {projects.length === 0
+                  ? 'Start by creating your first academic research project to coordinate literature reviews, statistical analyses, and thesis chapters.'
+                  : 'Try clearing your search query or adjusting your status and discipline filters.'}
+              </p>
+              {projects.length === 0 ? (
+                <button
+                  className="btn-primary"
+                  onClick={() => {
+                    if (onCreateProjectClick) onCreateProjectClick();
+                    else if (setShowForm) setShowForm(true);
+                  }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <Plus size={14} /> Create Your First Project
+                </button>
+              ) : (
+                <button
+                  className="btn-secondary"
+                  onClick={() => {
+                    setSearchQuery('');
+                    setStatusFilter('all');
+                    setDisciplineFilter('all');
+                  }}
+                >
+                  Clear All Filters
+                </button>
+              )}
+            </div>
+          ) : viewMode === 'grid' ? (
+            /* GRID VIEW */
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))',
+              gap: '14px'
+            }}>
+              {filteredProjects.map((p: any) => {
+                const pDocs = documents.filter((d: any) => d.projectId === p._id);
+                const pWords = pDocs.reduce((acc: number, d: any) => acc + (d.wordCount || 0), 0);
+                const pProgress = p.progress ?? p.completionPercentage ?? 0;
+                const isActive = activeProject?._id === p._id;
+
+                return (
+                  <div
+                    key={p._id}
+                    className="panel"
+                    style={{
+                      padding: '16px 18px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                      border: isActive ? '1px solid var(--rp-accent)' : '1px solid var(--rp-border)',
+                      boxShadow: isActive ? '0 0 0 1px var(--rp-accent)' : 'var(--rp-shadow-xs)',
+                      transition: 'border-color 0.15s ease'
                     }}
-                    title="Delete project"
+                    onClick={() => setSelectedProject(p)}
                   >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-                <h3>{p.title}</h3>
-                <p>{p.description || 'Dissertation & Research Project'}</p>
-                <div style={{ marginTop: '10px', display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--muted)' }}>
-                  <span>{pDocs.length} chapter(s) · {pWords} words</span>
-                  <span style={{ color: '#8876ee', fontWeight: 700 }}>Open Thesis ↗</span>
-                </div>
+                    <div>
+                      {/* Top Meta Row */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <span className="rp-badge rp-badge-accent" style={{ fontSize: '10px' }}>
+                            {p.discipline || 'Academic'}
+                          </span>
+                          <span style={{
+                            fontSize: '9.5px',
+                            textTransform: 'uppercase',
+                            fontWeight: 700,
+                            padding: '2px 5px',
+                            borderRadius: '3px',
+                            background: p.status === 'archived' ? 'var(--rp-surface-hover)' : p.status === 'draft' ? '#fef3c7' : 'var(--rp-surface-subtle)',
+                            color: p.status === 'archived' ? 'var(--rp-text-muted)' : p.status === 'draft' ? '#92400e' : 'var(--rp-text)'
+                          }}>
+                            {p.status || 'active'}
+                          </span>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          {p.status === 'archived' ? (
+                            <button
+                              type="button"
+                              className="icon-button"
+                              onClick={(e) => handleRestore(p._id, e)}
+                              title="Restore project"
+                              style={{ color: 'var(--rp-accent)' }}
+                            >
+                              <RotateCcw size={14} />
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="icon-button"
+                              onClick={(e) => handleArchive(p._id, e)}
+                              title="Archive project"
+                              style={{ color: 'var(--rp-text-muted)' }}
+                            >
+                              <Archive size={14} />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="icon-button danger-button"
+                            onClick={(e) => handleDelete(p._id, e)}
+                            title="Delete project"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Title & Description */}
+                      <h3 style={{ fontSize: '14.5px', fontWeight: 700, margin: '0 0 6px', color: 'var(--rp-text)' }}>
+                        {p.title}
+                      </h3>
+                      <p style={{
+                        fontSize: '12px',
+                        color: 'var(--rp-text-muted)',
+                        margin: '0 0 12px',
+                        display: '-webkit-box',
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden'
+                      }}>
+                        {p.description || 'Structured academic research initiative.'}
+                      </p>
+
+                      {/* Keywords Pills */}
+                      {Array.isArray(p.keywords) && p.keywords.length > 0 && (
+                        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', marginBottom: '12px' }}>
+                          {p.keywords.slice(0, 3).map((kw: string) => (
+                            <span key={kw} style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '3px', background: 'var(--rp-surface-subtle)', color: 'var(--rp-text-muted)' }}>
+                              #{kw}
+                            </span>
+                          ))}
+                          {p.keywords.length > 3 && (
+                            <span style={{ fontSize: '10px', color: 'var(--rp-text-muted)' }}>+{p.keywords.length - 3}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Progress & Footer */}
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '4px' }}>
+                        <span style={{ color: 'var(--rp-text-muted)' }}>Progress</span>
+                        <strong style={{ color: 'var(--rp-accent)' }}>{pProgress}%</strong>
+                      </div>
+                      <div style={{ height: '4px', background: 'var(--rp-surface-subtle)', borderRadius: '2px', overflow: 'hidden', marginBottom: '10px' }}>
+                        <div style={{ height: '100%', width: `${Math.max(pProgress, 4)}%`, background: 'var(--rp-accent)' }} />
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', color: 'var(--rp-text-muted)' }}>
+                        <span>{pDocs.length} chapter(s) · {pWords.toLocaleString()} words</span>
+                        <span style={{ color: 'var(--rp-accent)', fontWeight: 600 }}>Open Workspace ↗</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            /* LIST VIEW */
+            <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+              <div className="rp-table-wrap">
+                <table className="rp-table">
+                  <thead>
+                    <tr>
+                      <th>Project Title</th>
+                      <th>Discipline & Type</th>
+                      <th>Status</th>
+                      <th>Progress</th>
+                      <th>Chapters / Words</th>
+                      <th>Target Date</th>
+                      <th style={{ textAlign: 'right' }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredProjects.map((p: any) => {
+                      const pDocs = documents.filter((d: any) => d.projectId === p._id);
+                      const pWords = pDocs.reduce((acc: number, d: any) => acc + (d.wordCount || 0), 0);
+                      const pProgress = p.progress ?? p.completionPercentage ?? 0;
+                      const isActive = activeProject?._id === p._id;
+
+                      return (
+                        <tr
+                          key={p._id}
+                          onClick={() => setSelectedProject(p)}
+                          style={{ cursor: 'pointer', background: isActive ? 'var(--rp-surface-hover)' : undefined }}
+                        >
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <FolderKanban size={15} style={{ color: isActive ? 'var(--rp-accent)' : 'var(--rp-text-muted)', flexShrink: 0 }} />
+                              <div>
+                                <strong style={{ fontSize: '12.5px', color: 'var(--rp-text)' }}>{p.title}</strong>
+                                {p.description && (
+                                  <div style={{ fontSize: '10.5px', color: 'var(--rp-text-muted)', maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {p.description}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <div style={{ fontSize: '11.5px' }}>{p.discipline || 'Academic'}</div>
+                            <small style={{ fontSize: '10px', color: 'var(--rp-text-muted)' }}>{p.researchType || 'Quantitative'}</small>
+                          </td>
+                          <td>
+                            <span className="rp-badge" style={{ fontSize: '10px' }}>
+                              {p.status || 'active'}
+                            </span>
+                          </td>
+                          <td style={{ minWidth: '120px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <div style={{ flex: 1, height: '4px', background: 'var(--rp-surface-subtle)', borderRadius: '2px', overflow: 'hidden' }}>
+                                <div style={{ height: '100%', width: `${Math.max(pProgress, 4)}%`, background: 'var(--rp-accent)' }} />
+                              </div>
+                              <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--rp-accent)' }}>{pProgress}%</span>
+                            </div>
+                          </td>
+                          <td>
+                            <div style={{ fontSize: '11.5px' }}>{pDocs.length} chapters</div>
+                            <small style={{ fontSize: '10px', color: 'var(--rp-text-muted)' }}>{pWords.toLocaleString()} words</small>
+                          </td>
+                          <td>
+                            <div style={{ fontSize: '11px', color: 'var(--rp-text-muted)' }}>
+                              {p.targetDate ? new Date(p.targetDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}
+                            </div>
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                              {activeProject?._id !== p._id && (
+                                <button
+                                  type="button"
+                                  className="btn-secondary btn-sm"
+                                  onClick={(e) => handleSetActive(p, e)}
+                                  title="Set active"
+                                  style={{ fontSize: '10.5px', padding: '3px 7px' }}
+                                >
+                                  Set Active
+                                </button>
+                              )}
+                              {p.status === 'archived' ? (
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  onClick={(e) => handleRestore(p._id, e)}
+                                  title="Restore"
+                                >
+                                  <RotateCcw size={13} />
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="icon-button"
+                                  onClick={(e) => handleArchive(p._id, e)}
+                                  title="Archive"
+                                >
+                                  <Archive size={13} />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="icon-button danger-button"
+                                onClick={(e) => handleDelete(p._id, e)}
+                                title="Delete"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
-            );
-          })}
-          {!projects.length && (
-            <div className="panel empty-projects">
-              <FolderKanban size={30} />
-              <h3>No projects created</h3>
-              <p>Create a project to organise your academic manuscripts and references.</p>
             </div>
           )}
-        </div>
+        </>
       ) : (
-        /* MULTI-CHAPTER THESIS & PROJECT WORKSPACE */
+        /* UNIFIED PROJECT DETAIL WORKSPACE */
         <div className="thesis-workspace">
-          {/* Workspace Hero */}
-          <div className="thesis-hero">
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span className="status-pill active" style={{ fontSize: '10px' }}>Thesis Workspace</span>
-                <span style={{ fontSize: '12px', color: 'var(--muted)' }}>
-                  {projectDocs.length} Chapters · {totalProjectWords} Total Words
+          {/* WORKSPACE HERO CARD */}
+          <div className="thesis-hero" style={{ padding: '18px 20px', marginBottom: '16px' }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                <span className="status-pill active" style={{ fontSize: '10.5px' }}>
+                  {selectedProject.discipline || 'Academic'}
+                </span>
+                <span className="rp-badge rp-badge-accent" style={{ fontSize: '10px' }}>
+                  {selectedProject.researchType || 'Quantitative'}
+                </span>
+                <span style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)' }}>
+                  {projectDocs.length} Chapters · {totalProjectWords.toLocaleString()} Words
                 </span>
               </div>
-              <h2 style={{ margin: '6px 0 0', fontSize: '18px' }}>{selectedProject.title}</h2>
+              <h2 style={{ margin: '4px 0 6px', fontSize: '20px', fontWeight: 700 }}>
+                {selectedProject.title}
+              </h2>
+              {selectedProject.description && (
+                <p style={{ margin: 0, fontSize: '12.5px', color: 'var(--rp-text-muted)', maxWidth: '750px' }}>
+                  {selectedProject.description}
+                </p>
+              )}
             </div>
 
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
               {projectDocs.length < 5 && (
                 <button
-                  className="secondary"
+                  className="btn-secondary btn-sm"
                   onClick={handleInitThesisTree}
                   disabled={busy}
                   style={{ fontSize: '11px' }}
                 >
-                  <Sparkles size={13} /> Initialize 7 Chapters Scaffolding
+                  <Sparkles size={12} /> Init 7 Chapters Scaffolding
+                </button>
+              )}
+              {selectedProject.status === 'archived' ? (
+                <button
+                  className="btn-secondary btn-sm"
+                  onClick={() => handleRestore(selectedProject._id)}
+                  style={{ fontSize: '11px' }}
+                >
+                  <RotateCcw size={12} /> Restore Project
+                </button>
+              ) : (
+                <button
+                  className="btn-secondary btn-sm"
+                  onClick={() => handleArchive(selectedProject._id)}
+                  style={{ fontSize: '11px' }}
+                >
+                  <Archive size={12} /> Archive Project
                 </button>
               )}
             </div>
           </div>
 
-          {/* Navigation Tabs */}
-          <div className="qb-modes" style={{ gap: '8px', paddingBottom: '4px' }}>
+          {/* SUB-NAVIGATION TABS */}
+          <div className="qb-modes" style={{ gap: '6px', paddingBottom: '6px', flexWrap: 'wrap', marginBottom: '16px' }}>
+            <button
+              className={`qb-mode-btn ${projectTab === 'overview' ? 'active' : ''}`}
+              onClick={() => setProjectTab('overview')}
+            >
+              📋 Project Overview
+            </button>
             <button
               className={`qb-mode-btn ${projectTab === 'tree' ? 'active' : ''}`}
               onClick={() => setProjectTab('tree')}
             >
-              📚 Thesis Chapters Tree ({projectDocs.length}/7)
+              📚 Chapters & Documents ({projectDocs.length})
+            </button>
+            <button
+              className={`qb-mode-btn ${projectTab === 'tasks' ? 'active' : ''}`}
+              onClick={() => setProjectTab('tasks')}
+            >
+              ✅ Milestones & Tasks ({projectTasks.filter(t => t.status === 'done').length}/{projectTasks.length})
+            </button>
+            <button
+              className={`qb-mode-btn ${projectTab === 'activity' ? 'active' : ''}`}
+              onClick={() => setProjectTab('activity')}
+            >
+              🕒 Activity Trail ({projectActivity.length})
+            </button>
+            <button
+              className={`qb-mode-btn ${projectTab === 'bridges' ? 'active' : ''}`}
+              onClick={() => setProjectTab('bridges')}
+            >
+              ⚡ Module Launchers
             </button>
             <button
               className={`qb-mode-btn ${projectTab === 'cross_scan' ? 'active' : ''}`}
@@ -4884,7 +6516,7 @@ function Projects({
                 if (!crossScanReport) handleRunCrossScan();
               }}
             >
-              🔍 Cross-Chapter Redundancy & Consistency Scan
+              🔍 Cross-Chapter Audit
             </button>
             <button
               className={`qb-mode-btn ${projectTab === 'bibliography' ? 'active' : ''}`}
@@ -4893,11 +6525,112 @@ function Projects({
                 if (!bibReport) handleSyncBib();
               }}
             >
-              📑 Master Bibliography Synchronization (.bib)
+              📑 Master Bibliography (.bib)
             </button>
           </div>
 
-          {/* TAB 1: THESIS CHAPTERS TREE */}
+          {/* TAB 1: OVERVIEW */}
+          {projectTab === 'overview' && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px' }}>
+              {/* Objectives & Scope */}
+              <div className="panel" style={{ padding: '18px' }}>
+                <h3 style={{ fontSize: '13.5px', fontWeight: 700, margin: '0 0 12px' }}>Research Objectives & Scope</h3>
+                {Array.isArray(selectedProject.objectives) && selectedProject.objectives.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {selectedProject.objectives.map((obj: string, idx: number) => (
+                      <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12px' }}>
+                        <span style={{
+                          width: '18px',
+                          height: '18px',
+                          borderRadius: '50%',
+                          background: 'var(--rp-accent-subtle)',
+                          color: 'var(--rp-accent)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: '10px',
+                          fontWeight: 700,
+                          flexShrink: 0
+                        }}>
+                          {idx + 1}
+                        </span>
+                        <span>{obj}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: '12px', color: 'var(--rp-text-muted)', margin: 0 }}>
+                    No explicit objectives recorded. Add them during project creation.
+                  </p>
+                )}
+
+                {/* Keywords */}
+                <h4 style={{ fontSize: '12px', fontWeight: 700, margin: '16px 0 8px' }}>Research Keywords</h4>
+                {Array.isArray(selectedProject.keywords) && selectedProject.keywords.length > 0 ? (
+                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                    {selectedProject.keywords.map((kw: string) => (
+                      <span key={kw} className="rp-badge rp-badge-muted" style={{ fontSize: '10.5px' }}>
+                        #{kw}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <span style={{ fontSize: '11px', color: 'var(--rp-text-muted)' }}>No keywords assigned.</span>
+                )}
+              </div>
+
+              {/* Timeline & Metadata */}
+              <div className="panel" style={{ padding: '18px' }}>
+                <h3 style={{ fontSize: '13.5px', fontWeight: 700, margin: '0 0 12px' }}>Timeline & Target Milestones</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontSize: '12px', marginBottom: '16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 10px', background: 'var(--rp-surface-subtle)', borderRadius: 'var(--rp-radius-sm)' }}>
+                    <span style={{ color: 'var(--rp-text-muted)' }}>Start Date</span>
+                    <strong>{selectedProject.startDate ? new Date(selectedProject.startDate).toLocaleDateString() : 'Unspecified'}</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 10px', background: 'var(--rp-surface-subtle)', borderRadius: 'var(--rp-radius-sm)' }}>
+                    <span style={{ color: 'var(--rp-text-muted)' }}>Target Completion</span>
+                    <strong style={{ color: 'var(--rp-accent)' }}>
+                      {selectedProject.targetDate ? new Date(selectedProject.targetDate).toLocaleDateString() : 'Unspecified'}
+                    </strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 10px', background: 'var(--rp-surface-subtle)', borderRadius: 'var(--rp-radius-sm)' }}>
+                    <span style={{ color: 'var(--rp-text-muted)' }}>Workflow Progress</span>
+                    <strong>{selectedProject.progress ?? selectedProject.completionPercentage ?? 0}%</strong>
+                  </div>
+                </div>
+
+                <h4 style={{ fontSize: '12px', fontWeight: 700, margin: '0 0 8px' }}>Active Manuscripts</h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {projectDocs.slice(0, 3).map((d: any) => (
+                    <div
+                      key={d._id}
+                      onClick={() => onOpenInStudio(d)}
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: '6px 8px',
+                        borderRadius: 'var(--rp-radius-sm)',
+                        background: 'var(--rp-surface-subtle)',
+                        cursor: 'pointer',
+                        fontSize: '11.5px'
+                      }}
+                    >
+                      <span style={{ fontWeight: 600 }}>{d.title}</span>
+                      <span style={{ color: 'var(--rp-accent)' }}>Open ↗</span>
+                    </div>
+                  ))}
+                  {projectDocs.length === 0 && (
+                    <p style={{ fontSize: '11px', color: 'var(--rp-text-muted)', margin: 0 }}>
+                      No manuscripts created for this project yet.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 2: THESIS CHAPTERS TREE */}
           {projectTab === 'tree' && (
             <div className="thesis-chapter-list">
               {STANDARD_CHAPTERS.map(ch => {
@@ -4919,11 +6652,11 @@ function Projects({
                     <div className="thesis-ch-actions">
                       {doc ? (
                         <>
-                          <span style={{ fontSize: '11px', color: 'var(--muted)', marginRight: '8px' }}>
+                          <span style={{ fontSize: '11px', color: 'var(--rp-text-muted)', marginRight: '8px' }}>
                             {doc.wordCount || 0} words · v{doc.version || 1}
                           </span>
                           <button
-                            className="primary small"
+                            className="btn-primary btn-sm"
                             onClick={() => onOpenInStudio(doc)}
                             style={{ fontSize: '11px' }}
                           >
@@ -4932,10 +6665,10 @@ function Projects({
                         </>
                       ) : (
                         <button
-                          className="secondary small"
+                          className="btn-secondary btn-sm"
                           onClick={handleInitThesisTree}
                           disabled={busy}
-                          style={{ fontSize: '10px' }}
+                          style={{ fontSize: '10.5px' }}
                         >
                           + Scaffolding Needed
                         </button>
@@ -4947,18 +6680,331 @@ function Projects({
             </div>
           )}
 
-          {/* TAB 2: CROSS-CHAPTER SCAN */}
+          {/* TAB 3: TASKS & MILESTONES */}
+          {projectTab === 'tasks' && (
+            <div className="panel" style={{ padding: '18px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' }}>
+                <div>
+                  <h3 style={{ fontSize: '14px', fontWeight: 700, margin: 0 }}>Project Tasks & Milestones</h3>
+                  <p style={{ fontSize: '11px', color: 'var(--rp-text-muted)', margin: '2px 0 0' }}>
+                    Deterministic project progress derives directly from completed tasks.
+                  </p>
+                </div>
+
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  {(['all', 'todo', 'done'] as const).map(f => (
+                    <button
+                      key={f}
+                      type="button"
+                      className={`btn-secondary btn-sm ${taskFilter === f ? 'btn-primary' : ''}`}
+                      onClick={() => setTaskFilter(f)}
+                      style={{ fontSize: '10.5px', textTransform: 'capitalize' }}
+                    >
+                      {f}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Add Task Form */}
+              <form onSubmit={handleAddTask} style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                <input
+                  type="text"
+                  placeholder="Task or milestone title..."
+                  value={newTaskTitle}
+                  onChange={e => setNewTaskTitle(e.target.value)}
+                  style={{
+                    flex: 2,
+                    minWidth: '200px',
+                    padding: '8px 10px',
+                    borderRadius: 'var(--rp-radius-sm)',
+                    border: '1px solid var(--rp-border)',
+                    background: 'var(--rp-surface-subtle)',
+                    color: 'var(--rp-text)',
+                    fontSize: '12px'
+                  }}
+                />
+                <select
+                  value={newTaskPriority}
+                  onChange={e => setNewTaskPriority(e.target.value as any)}
+                  style={{
+                    padding: '8px 10px',
+                    borderRadius: 'var(--rp-radius-sm)',
+                    border: '1px solid var(--rp-border)',
+                    background: 'var(--rp-surface-subtle)',
+                    color: 'var(--rp-text)',
+                    fontSize: '11.5px'
+                  }}
+                >
+                  <option value="low">Low Priority</option>
+                  <option value="medium">Medium Priority</option>
+                  <option value="high">High Priority</option>
+                </select>
+                <input
+                  type="date"
+                  value={newTaskDueDate}
+                  onChange={e => setNewTaskDueDate(e.target.value)}
+                  style={{
+                    padding: '8px 10px',
+                    borderRadius: 'var(--rp-radius-sm)',
+                    border: '1px solid var(--rp-border)',
+                    background: 'var(--rp-surface-subtle)',
+                    color: 'var(--rp-text)',
+                    fontSize: '11.5px'
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="btn-primary btn-sm"
+                  disabled={addingTask || !newTaskTitle.trim()}
+                  style={{ fontSize: '12px' }}
+                >
+                  {addingTask ? <RefreshCw size={12} className="spin" /> : <Plus size={12} />} Add Milestone
+                </button>
+              </form>
+
+              {/* Task Items */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {filteredTasks.map((t: any) => {
+                  const isDone = t.status === 'done';
+                  return (
+                    <div
+                      key={t._id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '10px 12px',
+                        background: 'var(--rp-surface-subtle)',
+                        borderRadius: 'var(--rp-radius-sm)',
+                        border: '1px solid var(--rp-border-subtle)'
+                      }}
+                    >
+                      <div
+                        onClick={() => handleToggleTask(t)}
+                        style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, cursor: 'pointer' }}
+                      >
+                        <button
+                          type="button"
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: isDone ? 'var(--rp-accent)' : 'var(--rp-text-muted)',
+                            padding: 0,
+                            cursor: 'pointer',
+                            display: 'flex'
+                          }}
+                        >
+                          {isDone ? <CheckSquare size={16} /> : <Square size={16} />}
+                        </button>
+                        <span style={{
+                          fontSize: '12.5px',
+                          color: isDone ? 'var(--rp-text-muted)' : 'var(--rp-text)',
+                          textDecoration: isDone ? 'line-through' : 'none'
+                        }}>
+                          {t.title}
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        {t.priority && (
+                          <span style={{
+                            fontSize: '9.5px',
+                            textTransform: 'uppercase',
+                            fontWeight: 700,
+                            padding: '2px 5px',
+                            borderRadius: '3px',
+                            background: t.priority === 'high' ? '#fef2f2' : t.priority === 'low' ? 'var(--rp-surface)' : 'var(--rp-surface-hover)',
+                            color: t.priority === 'high' ? '#b91c1c' : 'var(--rp-text-muted)'
+                          }}>
+                            {t.priority}
+                          </span>
+                        )}
+                        {t.dueDate && (
+                          <span style={{ fontSize: '10.5px', color: 'var(--rp-text-muted)' }}>
+                            {new Date(t.dueDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="icon-button danger-button"
+                          onClick={() => handleDeleteTask(t._id)}
+                          title="Delete task"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {filteredTasks.length === 0 && (
+                  <div style={{ textAlign: 'center', padding: '30px', color: 'var(--rp-text-muted)', fontSize: '12px' }}>
+                    No tasks match this filter. Add milestones above.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 4: ACTIVITY TRAIL */}
+          {projectTab === 'activity' && (
+            <div className="panel" style={{ padding: '18px' }}>
+              <h3 style={{ fontSize: '14px', fontWeight: 700, margin: '0 0 12px' }}>
+                Project Activity & Audit Trail
+              </h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {projectActivity.map((act: any, idx: number) => {
+                  const iconMap: Record<string, any> = {
+                    document: FileText,
+                    revision: Edit3,
+                    task: CheckSquare,
+                    project: FolderKanban,
+                    audit: ShieldCheck
+                  };
+                  const ActIcon = iconMap[act.type] || Activity;
+                  return (
+                    <div
+                      key={act._id || idx}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '9px 12px',
+                        background: 'var(--rp-surface-subtle)',
+                        borderRadius: 'var(--rp-radius-sm)',
+                        border: '1px solid var(--rp-border-subtle)',
+                        fontSize: '12px'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div style={{
+                          width: '24px',
+                          height: '24px',
+                          borderRadius: '50%',
+                          background: 'var(--rp-surface)',
+                          border: '1px solid var(--rp-border)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: 'var(--rp-accent)'
+                        }}>
+                          <ActIcon size={12} />
+                        </div>
+                        <span style={{ fontWeight: 600 }}>{act.title}</span>
+                      </div>
+                      <span style={{ fontSize: '10.5px', color: 'var(--rp-text-muted)' }}>
+                        {formatRelativeTime(act.date || act.createdAt)}
+                      </span>
+                    </div>
+                  );
+                })}
+                {projectActivity.length === 0 && (
+                  <div style={{ textAlign: 'center', padding: '30px', color: 'var(--rp-text-muted)', fontSize: '12px' }}>
+                    No activity recorded yet for this workspace.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 5: MODULE LAUNCHERS */}
+          {projectTab === 'bridges' && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '12px' }}>
+              <div className="panel" style={{ padding: '16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                  <BookOpen size={16} style={{ color: '#2563eb' }} />
+                  <strong style={{ fontSize: '13px' }}>Literature Review Studio</strong>
+                </div>
+                <p style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)', margin: '0 0 12px' }}>
+                  Extract evidence matrices and synthesis grounded in this project's research questions.
+                </p>
+                <button
+                  className="btn-secondary btn-sm"
+                  onClick={() => {
+                    handleSetActive(selectedProject);
+                    setSection('Literature Review');
+                  }}
+                  style={{ width: '100%', justifyContent: 'center' }}
+                >
+                  Launch Literature Studio ↗
+                </button>
+              </div>
+
+              <div className="panel" style={{ padding: '16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                  <Activity size={16} style={{ color: '#16a34a' }} />
+                  <strong style={{ fontSize: '13px' }}>Statistical Analysis Studio</strong>
+                </div>
+                <p style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)', margin: '0 0 12px' }}>
+                  Run deterministic hypothesis tests (t-Test, ANOVA, Regression) for this project's dataset.
+                </p>
+                <button
+                  className="btn-secondary btn-sm"
+                  onClick={() => {
+                    handleSetActive(selectedProject);
+                    setSection('Statistical Analysis');
+                  }}
+                  style={{ width: '100%', justifyContent: 'center' }}
+                >
+                  Launch Statistical Engine ↗
+                </button>
+              </div>
+
+              <div className="panel" style={{ padding: '16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                  <FileText size={16} style={{ color: '#9333ea' }} />
+                  <strong style={{ fontSize: '13px' }}>PDF Research Chat</strong>
+                </div>
+                <p style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)', margin: '0 0 12px' }}>
+                  Ask natural language questions against uploaded manuscripts without hallucinations.
+                </p>
+                <button
+                  className="btn-secondary btn-sm"
+                  onClick={() => {
+                    handleSetActive(selectedProject);
+                    setSection('PDF Research Chat');
+                  }}
+                  style={{ width: '100%', justifyContent: 'center' }}
+                >
+                  Launch PDF Chat ↗
+                </button>
+              </div>
+
+              <div className="panel" style={{ padding: '16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                  <Send size={16} style={{ color: '#e11d48' }} />
+                  <strong style={{ fontSize: '13px' }}>Journal Submission Studio</strong>
+                </div>
+                <p style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)', margin: '0 0 12px' }}>
+                  Verify journal requirements and generate publication bundles for this project.
+                </p>
+                <button
+                  className="btn-secondary btn-sm"
+                  onClick={() => {
+                    handleSetActive(selectedProject);
+                    setSection('Journal Submission');
+                  }}
+                  style={{ width: '100%', justifyContent: 'center' }}
+                >
+                  Launch Submission Studio ↗
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 6: CROSS-CHAPTER SCAN */}
           {projectTab === 'cross_scan' && (
             <div className="cross-scan-panel">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <h3 style={{ margin: 0, fontSize: '15px' }}>Cross-Chapter Redundancy & Consistency Audit</h3>
-                  <p style={{ margin: '3px 0 0', fontSize: '11px', color: 'var(--muted)' }}>
+                  <p style={{ margin: '3px 0 0', fontSize: '11px', color: 'var(--rp-text-muted)' }}>
                     Scans all dissertation chapters for verbatim overlaps, sample size reporting discrepancies, and terminology drift.
                   </p>
                 </div>
                 <button
-                  className="primary small"
+                  className="btn-primary btn-sm"
                   onClick={handleRunCrossScan}
                   disabled={busy || projectDocs.length === 0}
                 >
@@ -4993,7 +7039,6 @@ function Projects({
                     </div>
                   </div>
 
-                  {/* Statistical Inconsistencies */}
                   {crossScanReport.statisticalInconsistencies?.length > 0 && (
                     <div>
                       <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', color: '#b91c1c', marginBottom: '8px' }}>
@@ -5008,7 +7053,6 @@ function Projects({
                     </div>
                   )}
 
-                  {/* Overlaps Across Chapters */}
                   {crossScanReport.overlaps?.length > 0 ? (
                     <div>
                       <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', color: '#c2410c', marginBottom: '8px' }}>
@@ -5025,53 +7069,35 @@ function Projects({
                       ))}
                     </div>
                   ) : (
-                    <div style={{ padding: '16px', background: 'var(--surface2)', borderRadius: '10px', fontSize: '12px', color: '#10b981', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ padding: '16px', background: 'var(--rp-surface-subtle)', borderRadius: '10px', fontSize: '12px', color: '#10b981', display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <Check size={16} /> Zero verbatim cross-chapter redundancies detected. Each chapter contributes distinct scholarly arguments.
                     </div>
                   )}
-
-                  {/* Chapter Word Distribution */}
-                  <div>
-                    <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', color: 'var(--muted)', marginBottom: '8px' }}>
-                      Chapter Word Distribution & Balance
-                    </div>
-                    {crossScanReport.distribution?.map((dist: any, idx: number) => (
-                      <div key={idx} style={{ marginBottom: '8px' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', marginBottom: '2px' }}>
-                          <span>{dist.title}</span>
-                          <strong>{dist.wordCount} words ({dist.percentage}%)</strong>
-                        </div>
-                        <div className="chart-bar-bg" style={{ height: '8px' }}>
-                          <div className="chart-bar-fill" style={{ width: `${dist.percentage}%` }}></div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
                 </>
               ) : (
-                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }}>
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--rp-text-muted)' }}>
                   Click "Re-scan Chapters" to evaluate cross-chapter redundancies.
                 </div>
               )}
             </div>
           )}
 
-          {/* TAB 3: MASTER BIBLIOGRAPHY */}
+          {/* TAB 7: MASTER BIBLIOGRAPHY */}
           {projectTab === 'bibliography' && (
             <div className="cross-scan-panel">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <h3 style={{ margin: 0, fontSize: '15px' }}>Master Bibliography Synchronization</h3>
-                  <p style={{ margin: '3px 0 0', fontSize: '11px', color: 'var(--muted)' }}>
+                  <p style={{ margin: '3px 0 0', fontSize: '11px', color: 'var(--rp-text-muted)' }}>
                     Aggregates all cited DOIs and in-text references across chapters into a synchronized master .bib file.
                   </p>
                 </div>
                 <div style={{ display: 'flex', gap: '8px' }}>
-                  <button className="secondary small" onClick={handleSyncBib} disabled={busy}>
+                  <button className="btn-secondary btn-sm" onClick={handleSyncBib} disabled={busy}>
                     <RefreshCw size={12} className={busy ? 'spin' : ''} /> Sync References
                   </button>
                   {bibReport?.bibtexContent && (
-                    <button className="primary small" onClick={handleDownloadBibtex}>
+                    <button className="btn-primary btn-sm" onClick={handleDownloadBibtex}>
                       <Download size={12} /> Download Master .bib
                     </button>
                   )}
@@ -5102,16 +7128,16 @@ function Projects({
                   </div>
 
                   <div>
-                    <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', color: 'var(--muted)', marginBottom: '8px' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', color: 'var(--rp-text-muted)', marginBottom: '8px' }}>
                       Master BibTeX Preview
                     </div>
-                    <pre style={{ padding: '14px', background: 'var(--surface2)', borderRadius: '10px', fontSize: '11px', overflowX: 'auto', border: '1px solid var(--border)', maxHeight: '240px' }}>
+                    <pre style={{ padding: '14px', background: 'var(--rp-surface-subtle)', borderRadius: '10px', fontSize: '11px', overflowX: 'auto', border: '1px solid var(--rp-border)', maxHeight: '240px' }}>
                       {bibReport.bibtexContent || '% No citations found in chapters yet.'}
                     </pre>
                   </div>
                 </>
               ) : (
-                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--muted)' }}>
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--rp-text-muted)' }}>
                   Click "Sync References" to generate master bibliography.
                 </div>
               )}

@@ -75,3 +75,4 @@
 - **QuillBot Paraphraser Suite**: Modes for Standard, Fluency, Formal, Academic, Expand, and Shorten.
 - **TextGuard Plagiarism Studio**: Similarity score gauge, color-coded matched passages, source drawer, and originality certificates.
 - **Document Export**: Office Open XML (.docx) with embedded references and Overleaf-ready LaTeX (.zip) bundles.
+

@@ -54,3 +54,4 @@
 | Sidebar occupied too much horizontal space on 1280px laptops | `1024px - 1280px` | Previous width was 252px with 22px padding | Reduced to 248px with compact 14px padding; supported 64px compact mode |
 | Topbar breadcrumb and project selector wrapped on mobile | `< 768px` | Rigid flex gaps without responsive wrapping | Media query adjusts font size, hides secondary tags, and expands hamburger |
 | Table content pushed outer container boundary | `< 1024px` | Missing wrapper with horizontal overflow rule | Enclosed all tables in `.rp-table-wrap` with `overflow-x: auto` |
+

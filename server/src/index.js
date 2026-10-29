@@ -1894,58 +1894,461 @@ apiRouter.post('/revisions/:id/reject', requireAuth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Projects
-// Projects (Unified Workspace & Tenancy)
+// Project Progress Recalculator (derives completion deterministically from tasks)
+async function syncProjectProgress(projectId) {
+  try {
+    if (isDbConnected()) {
+      const allTasks = await Task.find({ projectId }).lean();
+      const completed = allTasks.filter(t => t.status === 'done').length;
+      const progress = allTasks.length > 0 ? Math.round((completed / allTasks.length) * 100) : 0;
+      await Project.findByIdAndUpdate(projectId, {
+        $set: { progress, completionPercentage: progress }
+      });
+    } else {
+      const allTasks = [...memTasks.values()].filter(t => t.projectId === projectId);
+      const completed = allTasks.filter(t => t.status === 'done').length;
+      const progress = allTasks.length > 0 ? Math.round((completed / allTasks.length) * 100) : 0;
+      const proj = memProjects.get(projectId);
+      if (proj) {
+        proj.progress = progress;
+        proj.completionPercentage = progress;
+      }
+    }
+  } catch (err) {
+    console.warn('syncProjectProgress notice:', err.message);
+  }
+}
+
+// ============================================================================
+// Phase 3: Dashboard Overview & Real-Time Enterprise Metrics
+// ============================================================================
+apiRouter.get('/dashboard/overview', requireAuth, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+
+    if (isDbConnected()) {
+      const memberRecords = await ProjectMember.find({ userId, status: 'active' }).select('projectId').lean();
+      const memberProjIds = memberRecords.map(m => m.projectId);
+      const projectFilter = {
+        $or: [{ userId }, { _id: { $in: memberProjIds } }],
+        status: { $ne: 'deleted' }
+      };
+
+      const [
+        totalProjects,
+        activeProjects,
+        draftProjects,
+        researchDocuments,
+        userDocuments,
+        savedReferences,
+        verifiedDoisCount,
+        recentProjects,
+        userProjects
+      ] = await Promise.all([
+        Project.countDocuments(projectFilter),
+        Project.countDocuments({ ...projectFilter, status: 'active' }),
+        Project.countDocuments({ ...projectFilter, status: 'draft' }),
+        Document.countDocuments({ ownerId: userId }),
+        Document.find({ ownerId: userId }).select('wordCount').lean(),
+        Citation.countDocuments({ userId }),
+        Citation.countDocuments({ userId, doi: { $exists: true, $ne: '' } }),
+        Project.find(projectFilter).sort({ updatedAt: -1 }).limit(4).lean(),
+        Project.find(projectFilter).select('_id').lean()
+      ]);
+
+      const projectIds = userProjects.map(p => p._id);
+      const totalWords = userDocuments.reduce((acc, d) => acc + (d.wordCount || 0), 0);
+      const now = new Date();
+      const twoWeeksAhead = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+
+      const [totalTasksCount, completedTasksCount, pendingTasks, upcomingDeadlines, upcomingTasksList, recentActivityEvents] = await Promise.all([
+        Task.countDocuments({
+          $or: [{ projectId: { $in: projectIds } }, { userId }]
+        }),
+        Task.countDocuments({
+          $or: [{ projectId: { $in: projectIds } }, { userId }],
+          status: 'done'
+        }),
+        Task.countDocuments({
+          $or: [{ projectId: { $in: projectIds } }, { userId }],
+          status: { $ne: 'done' }
+        }),
+        Task.countDocuments({
+          $or: [{ projectId: { $in: projectIds } }, { userId }],
+          status: { $ne: 'done' },
+          dueDate: { $gte: now, $lte: twoWeeksAhead }
+        }),
+        Task.find({
+          $or: [{ projectId: { $in: projectIds } }, { userId }],
+          status: { $ne: 'done' }
+        }).sort({ dueDate: 1, priority: -1 }).limit(5).lean(),
+        AuditEvent.find({
+          $or: [{ actorId: userId }, { targetId: userId }]
+        }).sort({ createdAt: -1 }).limit(10).lean()
+      ]);
+
+      const recentActivity = recentActivityEvents.map(evt => ({
+        id: evt._id,
+        action: evt.action,
+        resourceType: evt.resourceType,
+        resourceId: evt.resourceId,
+        date: evt.createdAt,
+        metadata: evt.metadata
+      }));
+
+      const completionRate = totalTasksCount > 0 ? Math.round((completedTasksCount / totalTasksCount) * 100) : 0;
+
+      return res.json({
+        metrics: {
+          totalProjects,
+          activeProjects,
+          draftProjects,
+          totalDocuments: researchDocuments,
+          researchDocuments,
+          totalWords,
+          totalCitations: savedReferences,
+          savedReferences,
+          verifiedDois: verifiedDoisCount,
+          tasks: {
+            total: totalTasksCount,
+            completed: completedTasksCount,
+            pending: pendingTasks,
+            completionRate
+          },
+          pendingTasks,
+          upcomingDeadlines
+        },
+        recentProjects,
+        recentActivity,
+        upcomingTasks: upcomingTasksList
+      });
+    }
+
+    // In-memory fallback
+    const memberProjIds = [...memProjectMembers.values()]
+      .filter(m => m.userId === userId && m.status === 'active')
+      .map(m => m.projectId);
+
+    const userProjects = [...memProjects.values()]
+      .filter(p => (p.userId === userId || memberProjIds.includes(p._id)) && p.status !== 'deleted');
+
+    const totalProjects = userProjects.length;
+    const activeProjects = userProjects.filter(p => (p.status || 'active') === 'active').length;
+    const draftProjects = userProjects.filter(p => p.status === 'draft').length;
+    const userDocs = [...memDocuments.values()].filter(d => d.ownerId === userId);
+    const researchDocuments = userDocs.length;
+    const totalWords = userDocs.reduce((acc, d) => acc + (d.wordCount || 0), 0);
+    const userCitations = [...memCitations.values()].filter(c => c.userId === userId);
+    const savedReferences = userCitations.length;
+    const verifiedDois = userCitations.filter(c => !!c.doi).length;
+
+    const projIds = userProjects.map(p => p._id);
+    const allTasks = [...memTasks.values()].filter(t => projIds.includes(t.projectId) || t.userId === userId);
+    const completedTasks = allTasks.filter(t => t.status === 'done').length;
+    const pendingTasks = allTasks.filter(t => t.status !== 'done').length;
+    const completionRate = allTasks.length > 0 ? Math.round((completedTasks / allTasks.length) * 100) : 0;
+
+    const now = Date.now();
+    const twoWeeksAhead = now + 14 * 24 * 60 * 60 * 1000;
+    const upcomingDeadlines = allTasks.filter(t => {
+      if (t.status === 'done' || !t.dueDate) return false;
+      const due = new Date(t.dueDate).getTime();
+      return due >= now && due <= twoWeeksAhead;
+    }).length;
+
+    const recentProjects = [...userProjects]
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      .slice(0, 4);
+
+    const upcomingTasks = allTasks
+      .filter(t => t.status !== 'done')
+      .sort((a, b) => {
+        if (!a.dueDate) return 1;
+        if (!b.dueDate) return -1;
+        return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+      })
+      .slice(0, 5);
+
+    const recentActivity = memAuditEvents
+      .filter(e => e.actorId === userId || e.targetId === userId)
+      .slice(0, 10)
+      .map(evt => ({
+        id: evt._id,
+        action: evt.action,
+        resourceType: evt.resourceType,
+        resourceId: evt.resourceId,
+        date: evt.createdAt,
+        metadata: evt.metadata
+      }));
+
+    res.json({
+      metrics: {
+        totalProjects,
+        activeProjects,
+        draftProjects,
+        totalDocuments: researchDocuments,
+        researchDocuments,
+        totalWords,
+        totalCitations: savedReferences,
+        savedReferences,
+        verifiedDois,
+        tasks: {
+          total: allTasks.length,
+          completed: completedTasks,
+          pending: pendingTasks,
+          completionRate
+        },
+        pendingTasks,
+        upcomingDeadlines
+      },
+      recentProjects,
+      recentActivity,
+      upcomingTasks
+    });
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/dashboard/recent-projects', requireAuth, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    if (isDbConnected()) {
+      const memberRecords = await ProjectMember.find({ userId, status: 'active' }).select('projectId').lean();
+      const memberProjIds = memberRecords.map(m => m.projectId);
+      const projects = await Project.find({
+        $or: [{ userId }, { _id: { $in: memberProjIds } }],
+        status: { $ne: 'deleted' }
+      }).sort({ updatedAt: -1 }).limit(5).lean();
+      return res.json(projects);
+    }
+    const memberProjIds = [...memProjectMembers.values()]
+      .filter(m => m.userId === userId && m.status === 'active')
+      .map(m => m.projectId);
+    const projects = [...memProjects.values()]
+      .filter(p => (p.userId === userId || memberProjIds.includes(p._id)) && p.status !== 'deleted')
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      .slice(0, 5);
+    res.json(projects);
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/dashboard/recent-activity', requireAuth, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    if (isDbConnected()) {
+      const events = await AuditEvent.find({
+        $or: [{ actorId: userId }, { targetId: userId }]
+      }).sort({ createdAt: -1 }).limit(20).lean();
+      return res.json(events);
+    }
+    const events = memAuditEvents
+      .filter(e => e.actorId === userId || e.targetId === userId)
+      .slice(0, 20);
+    res.json(events);
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/dashboard/upcoming-tasks', requireAuth, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    if (isDbConnected()) {
+      const memberRecords = await ProjectMember.find({ userId, status: 'active' }).select('projectId').lean();
+      const memberProjIds = memberRecords.map(m => m.projectId);
+      const userProjects = await Project.find({
+        $or: [{ userId }, { _id: { $in: memberProjIds } }],
+        status: { $ne: 'deleted' }
+      }).select('_id').lean();
+      const projectIds = userProjects.map(p => p._id);
+
+      const tasks = await Task.find({
+        $or: [{ projectId: { $in: projectIds } }, { userId }],
+        status: { $ne: 'done' }
+      }).sort({ dueDate: 1, priority: -1 }).limit(10).lean();
+      return res.json(tasks);
+    }
+    const memberProjIds = [...memProjectMembers.values()]
+      .filter(m => m.userId === userId && m.status === 'active')
+      .map(m => m.projectId);
+    const userProjects = [...memProjects.values()]
+      .filter(p => (p.userId === userId || memberProjIds.includes(p._id)) && p.status !== 'deleted');
+    const projIds = userProjects.map(p => p._id);
+
+    const tasks = [...memTasks.values()]
+      .filter(t => (projIds.includes(t.projectId) || t.userId === userId) && t.status !== 'done')
+      .sort((a, b) => {
+        if (!a.dueDate) return 1;
+        if (!b.dueDate) return -1;
+        return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+      })
+      .slice(0, 10);
+    res.json(tasks);
+  } catch (e) { next(e); }
+});
+
+// ============================================================================
+// Projects (Unified Research Project Management & Tenancy)
+// ============================================================================
 apiRouter.get('/projects', requireAuth, async (req, res, next) => {
   try {
+    const { status, discipline, q, search, sort = 'updatedAt', order = 'desc', page, limit = 20, paginated } = req.query;
+    const searchQuery = (q || search || '').trim().toLowerCase();
+    const sortOrder = order === 'asc' ? 1 : -1;
+    const sortField = ['updatedAt', 'createdAt', 'title', 'progress', 'targetDate'].includes(sort) ? sort : 'updatedAt';
+
     if (isDbConnected()) {
       // Find projects owned by user or where user is an active member
       const memberRecords = await ProjectMember.find({ userId: req.user.id, status: 'active' }).select('projectId').lean();
       const memberProjIds = memberRecords.map(m => m.projectId);
-      const projects = await Project.find({
+      const filter = {
         $or: [
           { userId: req.user.id },
           { _id: { $in: memberProjIds } }
-        ],
-        status: { $ne: 'deleted' }
-      }).sort({ updatedAt: -1 }).lean();
+        ]
+      };
+
+      if (status && status !== 'all') {
+        filter.status = status.toLowerCase();
+      } else {
+        filter.status = { $ne: 'deleted' };
+      }
+
+      if (discipline && discipline !== 'all') {
+        filter.discipline = new RegExp(`^${discipline}$`, 'i');
+      }
+
+      if (searchQuery) {
+        filter.$and = filter.$and || [];
+        filter.$and.push({
+          $or: [
+            { title: { $regex: searchQuery, $options: 'i' } },
+            { description: { $regex: searchQuery, $options: 'i' } },
+            { discipline: { $regex: searchQuery, $options: 'i' } },
+            { keywords: { $in: [new RegExp(searchQuery, 'i')] } }
+          ]
+        });
+      }
+
+      const totalCount = await Project.countDocuments(filter);
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+      const totalPages = Math.ceil(totalCount / limitNum) || 1;
+
+      let query = Project.find(filter).sort({ [sortField]: sortOrder });
+      if (page || paginated === 'true') {
+        query = query.skip((pageNum - 1) * limitNum).limit(limitNum);
+      }
+      const projects = await query.lean();
+
+      res.setHeader('X-Total-Count', totalCount);
+      res.setHeader('X-Page', pageNum);
+      res.setHeader('X-Total-Pages', totalPages);
+
+      if (paginated === 'true') {
+        return res.json({ projects, pagination: { page: pageNum, limit: limitNum, totalCount, totalPages } });
+      }
       return res.json(projects);
     }
+
+    // In-memory fallback
     const memberProjIds = [...memProjectMembers.values()]
       .filter(m => m.userId === req.user.id && m.status === 'active')
       .map(m => m.projectId);
-    const userProjects = [...memProjects.values()]
-      .filter(p => (p.userId === req.user.id || memberProjIds.includes(p._id)) && p.status !== 'deleted')
-      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-    res.json(userProjects);
+
+    let list = [...memProjects.values()]
+      .filter(p => p.userId === req.user.id || memberProjIds.includes(p._id));
+
+    if (status && status !== 'all') {
+      list = list.filter(p => (p.status || 'active').toLowerCase() === status.toLowerCase());
+    } else {
+      list = list.filter(p => p.status !== 'deleted');
+    }
+
+    if (discipline && discipline !== 'all') {
+      list = list.filter(p => (p.discipline || '').toLowerCase() === discipline.toLowerCase());
+    }
+
+    if (searchQuery) {
+      list = list.filter(p =>
+        (p.title || '').toLowerCase().includes(searchQuery) ||
+        (p.description || '').toLowerCase().includes(searchQuery) ||
+        (p.discipline || '').toLowerCase().includes(searchQuery) ||
+        (p.keywords || []).some(k => k.toLowerCase().includes(searchQuery))
+      );
+    }
+
+    list.sort((a, b) => {
+      let va = a[sortField] || 0;
+      let vb = b[sortField] || 0;
+      if (sortField === 'title') return sortOrder * String(va).localeCompare(String(vb));
+      return sortOrder * (new Date(vb).getTime() - new Date(va).getTime());
+    });
+
+    const totalCount = list.length;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const totalPages = Math.ceil(totalCount / limitNum) || 1;
+
+    let result = list;
+    if (page || paginated === 'true') {
+      result = list.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+    }
+
+    res.setHeader('X-Total-Count', totalCount);
+    res.setHeader('X-Page', pageNum);
+    res.setHeader('X-Total-Pages', totalPages);
+
+    if (paginated === 'true') {
+      return res.json({ projects: result, pagination: { page: pageNum, limit: limitNum, totalCount, totalPages } });
+    }
+    res.json(result);
   } catch (e) { next(e); }
 });
 
 apiRouter.post('/projects', requireAuth, async (req, res, next) => {
   try {
     const schema = z.object({
-      title: z.string().trim().min(1).max(160),
-      description: z.string().max(1000).optional(),
-      discipline: z.string().max(100).optional(),
-      documentType: z.string().max(80).optional(),
-      workflowStage: z.enum(['literature', 'analysis', 'drafting', 'review', 'submission']).optional(),
+      title: z.string().trim().min(3, 'Project title must be at least 3 characters.').max(160),
+      description: z.string().max(1000).optional().default(''),
+      discipline: z.string().max(100).optional().default('General Academic'),
+      documentType: z.string().max(80).optional().default('Manuscript'),
+      researchType: z.enum(['Quantitative', 'Qualitative', 'Mixed Methods', 'Experimental', 'Systematic Review', 'Literature Review', 'Meta-Analysis', 'Observational', 'Computational', 'Theoretical', 'Other']).optional().default('Quantitative'),
+      objectives: z.union([z.string(), z.array(z.string())]).optional().default([]),
+      keywords: z.array(z.string()).optional().default([]),
+      status: z.enum(['draft', 'active', 'on_hold', 'completed', 'archived', 'deleted', 'Draft', 'Active', 'On Hold', 'Completed', 'Archived']).optional().default('active'),
+      progress: z.number().min(0).max(100).optional(),
+      workflowStage: z.enum(['literature', 'analysis', 'drafting', 'review', 'submission']).optional().default('literature'),
       completionPercentage: z.number().min(0).max(100).optional(),
-      tags: z.array(z.string()).optional()
+      startDate: z.union([z.string(), z.date()]).optional().nullable(),
+      targetDate: z.union([z.string(), z.date()]).optional().nullable(),
+      visibility: z.enum(['private', 'team', 'public']).optional().default('private'),
+      tags: z.array(z.string()).optional().default([])
     });
     const p = schema.safeParse(req.body);
-    if (!p.success) return res.status(400).json({ error: 'Project title is required.' });
+    if (!p.success) {
+      const msg = p.error.issues?.[0]?.message || 'Project title is required.';
+      return res.status(400).json({ error: msg });
+    }
+
+    const calculatedProgress = p.data.progress ?? p.data.completionPercentage ?? 0;
 
     if (isDbConnected()) {
       const project = await Project.create({
         userId: req.user.id,
+        ownerId: req.user.id,
         title: p.data.title,
-        description: p.data.description || '',
-        discipline: p.data.discipline || 'General Academic',
-        documentType: p.data.documentType || 'Manuscript',
-        workflowStage: p.data.workflowStage || 'literature',
-        completionPercentage: p.data.completionPercentage || 0,
-        tags: p.data.tags || [],
-        status: 'active'
+        description: p.data.description,
+        discipline: p.data.discipline,
+        documentType: p.data.documentType,
+        researchType: p.data.researchType,
+        objectives: p.data.objectives,
+        keywords: p.data.keywords,
+        status: p.data.status.toLowerCase(),
+        progress: calculatedProgress,
+        workflowStage: p.data.workflowStage,
+        completionPercentage: calculatedProgress,
+        startDate: p.data.startDate ? new Date(p.data.startDate) : null,
+        targetDate: p.data.targetDate ? new Date(p.data.targetDate) : null,
+        visibility: p.data.visibility,
+        tags: p.data.tags
       });
       // Register owner in ProjectMember
       await ProjectMember.create({
@@ -1955,7 +2358,7 @@ apiRouter.post('/projects', requireAuth, async (req, res, next) => {
         status: 'active',
         permissions: ['read', 'write', 'admin', 'delete']
       });
-      await recordAudit(req.user.id, 'PROJECT_CREATED', 'Project', project._id);
+      await recordAudit(req.user.id, 'PROJECT_CREATED', 'Project', project._id, { title: project.title });
       return res.status(201).json(project);
     }
 
@@ -1963,14 +2366,22 @@ apiRouter.post('/projects', requireAuth, async (req, res, next) => {
     const newProj = {
       _id: projectId,
       userId: req.user.id,
+      ownerId: req.user.id,
       title: p.data.title,
-      description: p.data.description || '',
-      discipline: p.data.discipline || 'General Academic',
-      documentType: p.data.documentType || 'Manuscript',
-      workflowStage: p.data.workflowStage || 'literature',
-      completionPercentage: p.data.completionPercentage || 0,
-      tags: p.data.tags || [],
-      status: 'active',
+      description: p.data.description,
+      discipline: p.data.discipline,
+      documentType: p.data.documentType,
+      researchType: p.data.researchType,
+      objectives: p.data.objectives,
+      keywords: p.data.keywords,
+      status: p.data.status.toLowerCase(),
+      progress: calculatedProgress,
+      workflowStage: p.data.workflowStage,
+      completionPercentage: calculatedProgress,
+      startDate: p.data.startDate || null,
+      targetDate: p.data.targetDate || null,
+      visibility: p.data.visibility,
+      tags: p.data.tags,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -1983,6 +2394,7 @@ apiRouter.post('/projects', requireAuth, async (req, res, next) => {
       status: 'active',
       permissions: ['read', 'write', 'admin', 'delete']
     });
+    await recordAudit(req.user.id, 'PROJECT_CREATED', 'Project', projectId, { title: newProj.title });
     res.status(201).json(newProj);
   } catch (e) { next(e); }
 });
@@ -2021,28 +2433,100 @@ apiRouter.patch('/projects/:id', requireAuth, async (req, res, next) => {
       description: z.string().max(1000).optional(),
       discipline: z.string().max(100).optional(),
       documentType: z.string().max(80).optional(),
+      researchType: z.enum(['Quantitative', 'Qualitative', 'Mixed Methods', 'Experimental', 'Systematic Review', 'Literature Review', 'Meta-Analysis', 'Observational', 'Computational', 'Theoretical', 'Other']).optional(),
+      objectives: z.union([z.string(), z.array(z.string())]).optional(),
+      keywords: z.array(z.string()).optional(),
+      status: z.enum(['draft', 'active', 'on_hold', 'completed', 'archived', 'deleted', 'Draft', 'Active', 'On Hold', 'Completed', 'Archived']).optional(),
+      progress: z.number().min(0).max(100).optional(),
       workflowStage: z.enum(['literature', 'analysis', 'drafting', 'review', 'submission']).optional(),
       completionPercentage: z.number().min(0).max(100).optional(),
-      tags: z.array(z.string()).optional(),
-      status: z.enum(['active', 'archived', 'deleted']).optional()
+      startDate: z.union([z.string(), z.date()]).optional().nullable(),
+      targetDate: z.union([z.string(), z.date()]).optional().nullable(),
+      visibility: z.enum(['private', 'team', 'public']).optional(),
+      tags: z.array(z.string()).optional()
     });
     const p = schema.safeParse(req.body);
     if (!p.success) return res.status(400).json({ error: 'Invalid update data.' });
+
+    const updatePayload = { ...p.data };
+    if (updatePayload.status) {
+      updatePayload.status = updatePayload.status.toLowerCase();
+      if (updatePayload.status === 'archived') updatePayload.archivedAt = new Date();
+      if (updatePayload.status === 'active') {
+        updatePayload.archivedAt = null;
+        updatePayload.deletedAt = null;
+      }
+    }
+    if (updatePayload.progress !== undefined && updatePayload.completionPercentage === undefined) {
+      updatePayload.completionPercentage = updatePayload.progress;
+    }
+    if (updatePayload.completionPercentage !== undefined && updatePayload.progress === undefined) {
+      updatePayload.progress = updatePayload.completionPercentage;
+    }
 
     if (isDbConnected()) {
       const member = await ProjectMember.findOne({ projectId: req.params.id, userId: req.user.id, status: 'active', role: { $in: ['owner', 'editor'] } });
       const project = await Project.findOneAndUpdate(
         { _id: req.params.id, $or: [{ userId: req.user.id }, ...(member ? [{ _id: req.params.id }] : [])] },
-        { $set: p.data },
+        { $set: updatePayload },
         { new: true }
       );
       if (!project) return res.status(404).json({ error: 'Project not found or insufficient permissions.' });
+      await recordAudit(req.user.id, 'PROJECT_UPDATED', 'Project', req.params.id, updatePayload);
       return res.json(project);
     }
 
     const proj = memProjects.get(req.params.id);
     if (!proj || (proj.userId !== req.user.id)) return res.status(404).json({ error: 'Project not found.' });
-    Object.assign(proj, p.data, { updatedAt: new Date().toISOString() });
+    Object.assign(proj, updatePayload, { updatedAt: new Date().toISOString() });
+    await recordAudit(req.user.id, 'PROJECT_UPDATED', 'Project', req.params.id, updatePayload);
+    res.json(proj);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/archive', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const member = await ProjectMember.findOne({ projectId: req.params.id, userId: req.user.id, status: 'active', role: { $in: ['owner', 'editor'] } });
+      const project = await Project.findOneAndUpdate(
+        { _id: req.params.id, $or: [{ userId: req.user.id }, ...(member ? [{ _id: req.params.id }] : [])] },
+        { $set: { status: 'archived', archivedAt: new Date() } },
+        { new: true }
+      );
+      if (!project) return res.status(404).json({ error: 'Project not found or unauthorized.' });
+      await recordAudit(req.user.id, 'PROJECT_ARCHIVED', 'Project', req.params.id);
+      return res.json(project);
+    }
+    const proj = memProjects.get(req.params.id);
+    if (!proj || proj.userId !== req.user.id) return res.status(404).json({ error: 'Project not found.' });
+    proj.status = 'archived';
+    proj.archivedAt = new Date().toISOString();
+    proj.updatedAt = new Date().toISOString();
+    await recordAudit(req.user.id, 'PROJECT_ARCHIVED', 'Project', req.params.id);
+    res.json(proj);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/restore', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const member = await ProjectMember.findOne({ projectId: req.params.id, userId: req.user.id, status: 'active', role: { $in: ['owner', 'editor'] } });
+      const project = await Project.findOneAndUpdate(
+        { _id: req.params.id, $or: [{ userId: req.user.id }, ...(member ? [{ _id: req.params.id }] : [])] },
+        { $set: { status: 'active', archivedAt: null, deletedAt: null } },
+        { new: true }
+      );
+      if (!project) return res.status(404).json({ error: 'Project not found or unauthorized.' });
+      await recordAudit(req.user.id, 'PROJECT_RESTORED', 'Project', req.params.id);
+      return res.json(project);
+    }
+    const proj = memProjects.get(req.params.id);
+    if (!proj || proj.userId !== req.user.id) return res.status(404).json({ error: 'Project not found.' });
+    proj.status = 'active';
+    proj.archivedAt = null;
+    proj.deletedAt = null;
+    proj.updatedAt = new Date().toISOString();
+    await recordAudit(req.user.id, 'PROJECT_RESTORED', 'Project', req.params.id);
     res.json(proj);
   } catch (e) { next(e); }
 });
@@ -2050,29 +2534,23 @@ apiRouter.patch('/projects/:id', requireAuth, async (req, res, next) => {
 apiRouter.delete('/projects/:id', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
-      const project = await Project.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
+      const project = await Project.findOneAndUpdate(
+        { _id: req.params.id, userId: req.user.id },
+        { $set: { status: 'deleted', deletedAt: new Date() } },
+        { new: true }
+      );
       if (!project) return res.status(404).json({ error: 'Project not found or not owner.' });
-      await Revision.deleteMany({ projectId: project._id });
-      await Document.deleteMany({ projectId: project._id });
-      await Task.deleteMany({ projectId: project._id });
-      await ProjectMember.deleteMany({ projectId: project._id });
       await recordAudit(req.user.id, 'PROJECT_DELETED', 'Project', req.params.id);
-      return res.json({ deleted: true });
+      return res.json({ deleted: true, status: 'deleted' });
     }
 
     const proj = memProjects.get(req.params.id);
     if (!proj || proj.userId !== req.user.id) return res.status(404).json({ error: 'Project not found.' });
-    memProjects.delete(req.params.id);
-    for (const [id, r] of memRevisions.entries()) {
-      if (r.projectId === req.params.id) memRevisions.delete(id);
-    }
-    for (const [id, d] of memDocuments.entries()) {
-      if (d.projectId === req.params.id) memDocuments.delete(id);
-    }
-    for (const [id, t] of memTasks.entries()) {
-      if (t.projectId === req.params.id) memTasks.delete(id);
-    }
-    res.json({ deleted: true });
+    proj.status = 'deleted';
+    proj.deletedAt = new Date().toISOString();
+    proj.updatedAt = new Date().toISOString();
+    await recordAudit(req.user.id, 'PROJECT_DELETED', 'Project', req.params.id);
+    res.json({ deleted: true, status: 'deleted' });
   } catch (e) { next(e); }
 });
 
@@ -2172,6 +2650,8 @@ apiRouter.post('/projects/:id/tasks', requireAuth, async (req, res, next) => {
         dueDate: dueDate ? new Date(dueDate) : null,
         status: 'todo'
       });
+      await syncProjectProgress(req.params.id);
+      await recordAudit(req.user.id, 'TASK_CREATED', 'Task', task._id, { title: task.title, projectId: req.params.id });
       return res.status(201).json(task);
     }
 
@@ -2189,6 +2669,8 @@ apiRouter.post('/projects/:id/tasks', requireAuth, async (req, res, next) => {
       createdAt: new Date().toISOString()
     };
     memTasks.set(taskId, newTask);
+    await syncProjectProgress(req.params.id);
+    await recordAudit(req.user.id, 'TASK_CREATED', 'Task', taskId, { title: newTask.title, projectId: req.params.id });
     res.status(201).json(newTask);
   } catch (e) { next(e); }
 });
@@ -2203,11 +2685,15 @@ apiRouter.patch('/projects/:id/tasks/:taskId', requireAuth, async (req, res, nex
         { new: true }
       );
       if (!task) return res.status(404).json({ error: 'Task not found.' });
+      await syncProjectProgress(req.params.id);
+      await recordAudit(req.user.id, 'TASK_UPDATED', 'Task', task._id, { updates, projectId: req.params.id });
       return res.json(task);
     }
     const t = memTasks.get(req.params.taskId);
     if (!t) return res.status(404).json({ error: 'Task not found.' });
     Object.assign(t, updates, { updatedAt: new Date().toISOString() });
+    await syncProjectProgress(req.params.id);
+    await recordAudit(req.user.id, 'TASK_UPDATED', 'Task', req.params.taskId, { updates, projectId: req.params.id });
     res.json(t);
   } catch (e) { next(e); }
 });
@@ -2216,9 +2702,13 @@ apiRouter.delete('/projects/:id/tasks/:taskId', requireAuth, async (req, res, ne
   try {
     if (isDbConnected()) {
       await Task.findOneAndDelete({ _id: req.params.taskId, projectId: req.params.id });
+      await syncProjectProgress(req.params.id);
+      await recordAudit(req.user.id, 'TASK_DELETED', 'Task', req.params.taskId, { projectId: req.params.id });
       return res.json({ deleted: true });
     }
     memTasks.delete(req.params.taskId);
+    await syncProjectProgress(req.params.id);
+    await recordAudit(req.user.id, 'TASK_DELETED', 'Task', req.params.taskId, { projectId: req.params.id });
     res.json({ deleted: true });
   } catch (e) { next(e); }
 });
@@ -2227,21 +2717,28 @@ apiRouter.delete('/projects/:id/tasks/:taskId', requireAuth, async (req, res, ne
 apiRouter.get('/projects/:id/activity', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
-      const revisions = await Revision.find({ projectId: req.params.id }).sort({ createdAt: -1 }).limit(10).lean();
-      const documents = await Document.find({ projectId: req.params.id }).sort({ updatedAt: -1 }).limit(10).lean();
-      const tasks = await Task.find({ projectId: req.params.id }).sort({ updatedAt: -1 }).limit(10).lean();
+      const [revisions, documents, tasks, audits] = await Promise.all([
+        Revision.find({ projectId: req.params.id }).sort({ createdAt: -1 }).limit(10).lean(),
+        Document.find({ projectId: req.params.id }).sort({ updatedAt: -1 }).limit(10).lean(),
+        Task.find({ projectId: req.params.id }).sort({ updatedAt: -1 }).limit(10).lean(),
+        AuditEvent.find({ resourceId: req.params.id }).sort({ createdAt: -1 }).limit(10).lean()
+      ]);
 
       const activities = [
+        ...audits.map(a => ({ type: 'audit', title: `${a.action.replace(/_/g, ' ')}: ${a.metadata?.title || a.resourceType}`, date: a.createdAt })),
         ...revisions.map(r => ({ type: 'revision', title: `Revision (${r.mode}): ${r.summary || 'Content updated'}`, date: r.createdAt })),
         ...documents.map(d => ({ type: 'document', title: `Document updated: ${d.title}`, date: d.updatedAt })),
         ...tasks.map(t => ({ type: 'task', title: `Task: ${t.title} [${t.status}]`, date: t.updatedAt || t.createdAt }))
-      ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 15);
+      ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 20);
 
       return res.json(activities);
     }
-    res.json([
+    const memAudits = memAuditEvents.filter(e => e.resourceId === req.params.id);
+    const activities = [
+      ...memAudits.map(a => ({ type: 'audit', title: `${a.action.replace(/_/g, ' ')}`, date: a.createdAt })),
       { type: 'project', title: 'Project workspace initialized', date: new Date().toISOString() }
-    ]);
+    ];
+    res.json(activities);
   } catch (e) { next(e); }
 });
 

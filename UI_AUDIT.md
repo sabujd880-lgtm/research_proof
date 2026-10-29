@@ -100,3 +100,4 @@ The application currently has a solid functional foundation across 8 core resear
 ## 5. Audit Conclusion
 
 The application structure is robust and well-modularized. The migration to the Linear-inspired Minimal Enterprise design will be executed systematically by establishing unified CSS custom properties, standardizing components, upgrading typography to Inter/JetBrains Mono, polishing the App Shell (sidebar + topbar), and applying dense, elegant card and table layouts across all views.
+

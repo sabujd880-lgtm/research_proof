@@ -49,16 +49,28 @@ usageRecordSchema.index({ userId: 1, feature: 1, quotaWindow: 1 }, { unique: tru
 
 const projectSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: function() { return this.userId; }, index: true },
   title: { type: String, required: true, trim: true, maxlength: 160 },
   description: { type: String, default: '', maxlength: 1000 },
   discipline: { type: String, default: 'General Academic', maxlength: 100 },
   documentType: { type: String, default: 'Manuscript', maxlength: 80 },
-  status: { type: String, enum: ['active', 'archived', 'deleted'], default: 'active', index: true },
+  researchType: { type: String, enum: ['Quantitative', 'Qualitative', 'Mixed Methods', 'Experimental', 'Systematic Review', 'Literature Review', 'Meta-Analysis', 'Observational', 'Computational', 'Theoretical', 'Other'], default: 'Quantitative' },
+  objectives: { type: mongoose.Schema.Types.Mixed, default: [] },
+  keywords: [{ type: String, trim: true }],
+  status: { type: String, enum: ['draft', 'active', 'on_hold', 'completed', 'archived', 'deleted', 'Draft', 'Active', 'On Hold', 'Completed', 'Archived'], default: 'active', index: true },
+  progress: { type: Number, default: 0, min: 0, max: 100 },
   workflowStage: { type: String, enum: ['literature', 'analysis', 'drafting', 'review', 'submission'], default: 'literature', index: true },
   completionPercentage: { type: Number, default: 0, min: 0, max: 100 },
+  startDate: { type: Date, default: null },
+  targetDate: { type: Date, default: null },
+  visibility: { type: String, enum: ['private', 'team', 'public'], default: 'private' },
+  archivedAt: { type: Date, default: null },
+  deletedAt: { type: Date, default: null },
   tags: [{ type: String, trim: true }]
 }, { timestamps: true });
 projectSchema.index({ userId: 1, updatedAt: -1 });
+projectSchema.index({ userId: 1, status: 1 });
+projectSchema.index({ discipline: 1 });
 
 const projectMemberSchema = new mongoose.Schema({
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
