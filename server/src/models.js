@@ -52,9 +52,207 @@ const projectSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true, maxlength: 160 },
   description: { type: String, default: '', maxlength: 1000 },
   discipline: { type: String, default: 'General Academic', maxlength: 100 },
-  documentType: { type: String, default: 'Manuscript', maxlength: 80 }
+  documentType: { type: String, default: 'Manuscript', maxlength: 80 },
+  status: { type: String, enum: ['active', 'archived', 'deleted'], default: 'active', index: true },
+  workflowStage: { type: String, enum: ['literature', 'analysis', 'drafting', 'review', 'submission'], default: 'literature', index: true },
+  completionPercentage: { type: Number, default: 0, min: 0, max: 100 },
+  tags: [{ type: String, trim: true }]
 }, { timestamps: true });
 projectSchema.index({ userId: 1, updatedAt: -1 });
+
+const projectMemberSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  role: { type: String, enum: ['owner', 'editor', 'reviewer', 'viewer'], default: 'editor' },
+  invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  status: { type: String, enum: ['active', 'invited', 'declined'], default: 'active', index: true },
+  permissions: [{ type: String }]
+}, { timestamps: true });
+projectMemberSchema.index({ projectId: 1, userId: 1 }, { unique: true });
+
+const taskSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  assigneeId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+  title: { type: String, required: true, trim: true, maxlength: 200 },
+  description: { type: String, default: '', maxlength: 2000 },
+  status: { type: String, enum: ['todo', 'in_progress', 'review', 'done'], default: 'todo', index: true },
+  priority: { type: String, enum: ['low', 'medium', 'high', 'urgent'], default: 'medium' },
+  stage: { type: String, enum: ['literature', 'analysis', 'drafting', 'review', 'submission', 'general'], default: 'general' },
+  dueDate: { type: Date, default: null }
+}, { timestamps: true });
+taskSchema.index({ projectId: 1, status: 1 });
+
+const documentVersionSchema = new mongoose.Schema({
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', required: true, index: true },
+  versionNumber: { type: Number, required: true },
+  title: { type: String, required: true },
+  content: { type: String, default: '' },
+  wordCount: { type: Number, default: 0 },
+  snapshotBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  notes: { type: String, default: '' }
+}, { timestamps: true });
+documentVersionSchema.index({ documentId: 1, versionNumber: -1 });
+
+// Literature Review Model
+const literatureEntrySchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  title: { type: String, required: true, trim: true },
+  authors: [{ type: String, trim: true }],
+  year: { type: String, default: '' },
+  journal: { type: String, default: '' },
+  doi: { type: String, default: '', trim: true },
+  abstract: { type: String, default: '' },
+  matrixData: {
+    methodology: { type: String, default: '' },
+    sampleSize: { type: String, default: '' },
+    instruments: { type: String, default: '' },
+    findings: { type: String, default: '' },
+    limitations: { type: String, default: '' }
+  },
+  thematicTags: [{ type: String, trim: true }],
+  status: { type: String, enum: ['identified', 'screened', 'included', 'excluded'], default: 'identified' }
+}, { timestamps: true });
+literatureEntrySchema.index({ projectId: 1, createdAt: -1 });
+
+// Dataset and Analysis Models (Statistical Analysis Studio)
+const datasetSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  name: { type: String, required: true, trim: true },
+  fileName: { type: String, default: '' },
+  rowCount: { type: Number, default: 0 },
+  columnCount: { type: Number, default: 0 },
+  columns: [{
+    name: { type: String, required: true },
+    type: { type: String, enum: ['numeric', 'categorical', 'date', 'text'], default: 'numeric' },
+    sampleValues: [{ type: mongoose.Schema.Types.Mixed }]
+  }],
+  rawData: { type: mongoose.Schema.Types.Mixed, default: [] }
+}, { timestamps: true });
+datasetSchema.index({ projectId: 1, createdAt: -1 });
+
+const analysisSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  datasetId: { type: mongoose.Schema.Types.ObjectId, ref: 'Dataset', required: true, index: true },
+  analysisType: {
+    type: String,
+    enum: ['descriptive', 't_test', 'anova', 'correlation', 'regression', 'chi_square'],
+    required: true
+  },
+  parameters: { type: mongoose.Schema.Types.Mixed, default: {} },
+  results: { type: mongoose.Schema.Types.Mixed, default: {} },
+  apaReport: { type: String, default: '' }
+}, { timestamps: true });
+analysisSchema.index({ projectId: 1, datasetId: 1, createdAt: -1 });
+
+// PDF Research Chat Model
+const researchChatSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  title: { type: String, default: 'PDF Research Conversation' },
+  documentName: { type: String, default: '' },
+  documentChunks: [{
+    pageNumber: { type: Number, required: true },
+    content: { type: String, required: true }
+  }],
+  messages: [{
+    role: { type: String, enum: ['user', 'assistant', 'system'], required: true },
+    content: { type: String, required: true },
+    citations: [{
+      page: { type: Number },
+      passage: { type: String },
+      score: { type: Number }
+    }],
+    timestamp: { type: Date, default: Date.now }
+  }]
+}, { timestamps: true });
+researchChatSchema.index({ projectId: 1, updatedAt: -1 });
+
+// Systematic Review & Screening Models (PRISMA 2020)
+const systematicReviewSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  title: { type: String, required: true, trim: true },
+  protocol: {
+    population: { type: String, default: '' },
+    intervention: { type: String, default: '' },
+    comparison: { type: String, default: '' },
+    outcomes: { type: String, default: '' },
+    studyDesign: { type: String, default: '' }
+  },
+  eligibility: {
+    inclusionCriteria: [{ type: String }],
+    exclusionCriteria: [{ type: String }]
+  },
+  prismaMetrics: {
+    identified: { type: Number, default: 0 },
+    duplicatesRemoved: { type: Number, default: 0 },
+    screenedTitleAbstract: { type: Number, default: 0 },
+    excludedTitleAbstract: { type: Number, default: 0 },
+    assessedFullText: { type: Number, default: 0 },
+    excludedFullText: { type: Number, default: 0 },
+    includedInSynthesis: { type: Number, default: 0 }
+  },
+  searchQueries: [{
+    database: { type: String, default: 'PubMed' },
+    queryString: { type: String, default: '' },
+    dateRun: { type: Date, default: Date.now }
+  }]
+}, { timestamps: true });
+systematicReviewSchema.index({ projectId: 1, createdAt: -1 });
+
+const studyRecordSchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  title: { type: String, required: true, trim: true },
+  authors: [{ type: String }],
+  year: { type: String, default: '' },
+  journal: { type: String, default: '' },
+  doi: { type: String, default: '' },
+  abstract: { type: String, default: '' },
+  screeningStage: {
+    type: String,
+    enum: ['title_abstract', 'full_text', 'included', 'excluded'],
+    default: 'title_abstract',
+    index: true
+  },
+  decision: { type: String, enum: ['included', 'excluded', 'pending'], default: 'pending', index: true },
+  exclusionReason: { type: String, default: '' },
+  screenerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+}, { timestamps: true });
+studyRecordSchema.index({ reviewId: 1, decision: 1 });
+
+// Journal Submission Model
+const journalSubmissionSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  targetJournal: { type: String, required: true, trim: true },
+  publisher: { type: String, default: '' },
+  aimsAndScope: { type: String, default: '' },
+  wordLimit: { type: Number, default: 8000 },
+  citationStyle: { type: String, default: 'apa' },
+  guidelinesChecklist: [{
+    item: { type: String, required: true },
+    compliant: { type: Boolean, default: false },
+    notes: { type: String, default: '' }
+  }],
+  coverLetter: { type: String, default: '' },
+  submissionPackage: [{
+    fileName: { type: String },
+    fileType: { type: String },
+    urlOrPath: { type: String }
+  }],
+  status: {
+    type: String,
+    enum: ['drafting', 'under_review', 'revision_requested', 'accepted', 'rejected'],
+    default: 'drafting',
+    index: true
+  }
+}, { timestamps: true });
+journalSubmissionSchema.index({ projectId: 1, createdAt: -1 });
 
 const documentSchema = new mongoose.Schema({
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -300,7 +498,10 @@ textGuardScanSchema.index({ userId: 1, createdAt: -1 });
 
 export const User = mongoose.model('User', userSchema);
 export const Project = mongoose.model('Project', projectSchema);
+export const ProjectMember = mongoose.model('ProjectMember', projectMemberSchema);
+export const Task = mongoose.model('Task', taskSchema);
 export const Document = mongoose.model('Document', documentSchema);
+export const DocumentVersion = mongoose.model('DocumentVersion', documentVersionSchema);
 export const Revision = mongoose.model('Revision', revisionSchema);
 export const IntegrityReport = mongoose.model('IntegrityReport', integrityReportSchema);
 export const AuditEvent = mongoose.model('AuditEvent', auditEventSchema);
@@ -312,6 +513,14 @@ export const DailyUsageAggregate = mongoose.model('DailyUsageAggregate', dailyUs
 export const DataDeletionJob = mongoose.model('DataDeletionJob', dataDeletionJobSchema);
 export const LatexJob = mongoose.model('LatexJob', latexJobSchema);
 export const TextGuardScan = mongoose.model('TextGuardScan', textGuardScanSchema);
+export const LiteratureEntry = mongoose.model('LiteratureEntry', literatureEntrySchema);
+export const Dataset = mongoose.model('Dataset', datasetSchema);
+export const Analysis = mongoose.model('Analysis', analysisSchema);
+export const ResearchChat = mongoose.model('ResearchChat', researchChatSchema);
+export const SystematicReview = mongoose.model('SystematicReview', systematicReviewSchema);
+export const StudyRecord = mongoose.model('StudyRecord', studyRecordSchema);
+export const JournalSubmission = mongoose.model('JournalSubmission', journalSubmissionSchema);
+
 
 
 

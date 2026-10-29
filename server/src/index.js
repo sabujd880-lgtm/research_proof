@@ -30,7 +30,32 @@ import cookieParser from 'cookie-parser';
 import multer from 'multer';
 import crypto from 'node:crypto';
 import { OAuth2Client } from 'google-auth-library';
-import { User, Project, Document, Revision, IntegrityReport, AuditEvent, UsageRecord, Citation, DoiCache, UsageEvent, DailyUsageAggregate, DataDeletionJob, LatexJob, TextGuardScan } from './models.js';
+import {
+  User,
+  Project,
+  ProjectMember,
+  Task,
+  Document,
+  DocumentVersion,
+  Revision,
+  IntegrityReport,
+  AuditEvent,
+  UsageRecord,
+  Citation,
+  DoiCache,
+  UsageEvent,
+  DailyUsageAggregate,
+  DataDeletionJob,
+  LatexJob,
+  TextGuardScan,
+  LiteratureEntry,
+  Dataset,
+  Analysis,
+  ResearchChat,
+  SystematicReview,
+  StudyRecord,
+  JournalSubmission
+} from './models.js';
 import { requireAuth, requireAdmin } from './middleware.js';
 import { assessWriting, findRepeatedPhrases, assessOriginality, checkCitations, humanizeWithAI, ACADEMIC_REWRITE_MODES, assessAiAuthorship, assessPlagiarismAndSimilarity } from './services.js';
 import { auditMeaningPreservation, validateEmpiricalFacts, compareManuscriptVersions } from './meaningChecker.js';
@@ -56,13 +81,37 @@ import {
   isTurnstileEnabled
 } from './turnstileService.js';
 export { setTurnstileVerifier };
+
+import {
+  computeDescriptive,
+  computeTTest,
+  computeAnova,
+  computeCorrelation,
+  computeLinearRegression,
+  formatApa7StatisticalNarrative
+} from './statService.js';
+import {
+  parseBibtex,
+  parseRis,
+  exportToBibtex,
+  exportToRis,
+  detectDuplicates,
+  formatCitationInStyle,
+  checkRetractionStatus
+} from './bibtexRisService.js';
+import {
+  extractAndChunkDocument,
+  searchDocumentChunks,
+  generateGroundedAnswer
+} from './pdfChatService.js';
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit
   fileFilter: (_req, file, cb) => {
-    const allowed = /\.(docx|txt|tex|bib|zip)$/i;
+    const allowed = /\.(docx|txt|tex|bib|zip|pdf|ris|csv|xlsx|json)$/i;
     if (!file.originalname.match(allowed)) {
-      const err = new Error('Unsupported file format. Only .docx, .tex, .bib, .txt, and .zip files are allowed.');
+      const err = new Error('Unsupported file format. Allowed formats: .docx, .tex, .bib, .ris, .pdf, .csv, .xlsx, .json, .txt, .zip.');
       err.status = 400;
       return cb(err);
     }
@@ -249,7 +298,10 @@ export function setGoogleTokenVerifier(fn) {
 // In-Memory Dev Store (automatic fallback when MongoDB is disconnected)
 const memUsers = new Map();
 const memProjects = new Map();
+const memProjectMembers = new Map();
+const memTasks = new Map();
 const memDocuments = new Map();
+const memDocumentVersions = new Map();
 const memRevisions = new Map();
 const memCitations = new Map();
 const memReports = new Map();
@@ -258,16 +310,33 @@ const memAuditEvents = [];
 const memLatexJobs = new Map();
 const latexArtifactCache = new Map();
 const memTextGuardScans = new Map();
+const memLiterature = new Map();
+const memDatasets = new Map();
+const memAnalyses = new Map();
+const memResearchChats = new Map();
+const memSystematicReviews = new Map();
+const memStudyRecords = new Map();
+const memJournalSubmissions = new Map();
 const isDbConnected = () => mongoose.connection.readyState === 1;
 app.locals.memUsers = memUsers;
 app.locals.memProjects = memProjects;
+app.locals.memProjectMembers = memProjectMembers;
+app.locals.memTasks = memTasks;
 app.locals.memDocuments = memDocuments;
+app.locals.memDocumentVersions = memDocumentVersions;
 app.locals.memRevisions = memRevisions;
 app.locals.memCitations = memCitations;
 app.locals.memReports = memReports;
 app.locals.memJobs = memJobs;
 app.locals.memAuditEvents = memAuditEvents;
 app.locals.memLatexJobs = memLatexJobs;
+app.locals.memLiterature = memLiterature;
+app.locals.memDatasets = memDatasets;
+app.locals.memAnalyses = memAnalyses;
+app.locals.memResearchChats = memResearchChats;
+app.locals.memSystematicReviews = memSystematicReviews;
+app.locals.memStudyRecords = memStudyRecords;
+app.locals.memJournalSubmissions = memJournalSubmissions;
 app.locals.latexArtifactCache = latexArtifactCache;
 app.locals.memTextGuardScans = memTextGuardScans;
 
@@ -1826,13 +1895,27 @@ apiRouter.post('/revisions/:id/reject', requireAuth, async (req, res, next) => {
 });
 
 // Projects
+// Projects (Unified Workspace & Tenancy)
 apiRouter.get('/projects', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
-      return res.json(await Project.find({ userId: req.user.id }).sort({ updatedAt: -1 }).lean());
+      // Find projects owned by user or where user is an active member
+      const memberRecords = await ProjectMember.find({ userId: req.user.id, status: 'active' }).select('projectId').lean();
+      const memberProjIds = memberRecords.map(m => m.projectId);
+      const projects = await Project.find({
+        $or: [
+          { userId: req.user.id },
+          { _id: { $in: memberProjIds } }
+        ],
+        status: { $ne: 'deleted' }
+      }).sort({ updatedAt: -1 }).lean();
+      return res.json(projects);
     }
+    const memberProjIds = [...memProjectMembers.values()]
+      .filter(m => m.userId === req.user.id && m.status === 'active')
+      .map(m => m.projectId);
     const userProjects = [...memProjects.values()]
-      .filter(p => p.userId === req.user.id)
+      .filter(p => (p.userId === req.user.id || memberProjIds.includes(p._id)) && p.status !== 'deleted')
       .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
     res.json(userProjects);
   } catch (e) { next(e); }
@@ -1844,7 +1927,10 @@ apiRouter.post('/projects', requireAuth, async (req, res, next) => {
       title: z.string().trim().min(1).max(160),
       description: z.string().max(1000).optional(),
       discipline: z.string().max(100).optional(),
-      documentType: z.string().max(80).optional()
+      documentType: z.string().max(80).optional(),
+      workflowStage: z.enum(['literature', 'analysis', 'drafting', 'review', 'submission']).optional(),
+      completionPercentage: z.number().min(0).max(100).optional(),
+      tags: z.array(z.string()).optional()
     });
     const p = schema.safeParse(req.body);
     if (!p.success) return res.status(400).json({ error: 'Project title is required.' });
@@ -1855,7 +1941,19 @@ apiRouter.post('/projects', requireAuth, async (req, res, next) => {
         title: p.data.title,
         description: p.data.description || '',
         discipline: p.data.discipline || 'General Academic',
-        documentType: p.data.documentType || 'Manuscript'
+        documentType: p.data.documentType || 'Manuscript',
+        workflowStage: p.data.workflowStage || 'literature',
+        completionPercentage: p.data.completionPercentage || 0,
+        tags: p.data.tags || [],
+        status: 'active'
+      });
+      // Register owner in ProjectMember
+      await ProjectMember.create({
+        projectId: project._id,
+        userId: req.user.id,
+        role: 'owner',
+        status: 'active',
+        permissions: ['read', 'write', 'admin', 'delete']
       });
       await recordAudit(req.user.id, 'PROJECT_CREATED', 'Project', project._id);
       return res.status(201).json(project);
@@ -1869,10 +1967,22 @@ apiRouter.post('/projects', requireAuth, async (req, res, next) => {
       description: p.data.description || '',
       discipline: p.data.discipline || 'General Academic',
       documentType: p.data.documentType || 'Manuscript',
+      workflowStage: p.data.workflowStage || 'literature',
+      completionPercentage: p.data.completionPercentage || 0,
+      tags: p.data.tags || [],
+      status: 'active',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
     memProjects.set(projectId, newProj);
+    memProjectMembers.set(`${projectId}_${req.user.id}`, {
+      _id: new mongoose.Types.ObjectId().toString(),
+      projectId,
+      userId: req.user.id,
+      role: 'owner',
+      status: 'active',
+      permissions: ['read', 'write', 'admin', 'delete']
+    });
     res.status(201).json(newProj);
   } catch (e) { next(e); }
 });
@@ -1880,15 +1990,27 @@ apiRouter.post('/projects', requireAuth, async (req, res, next) => {
 apiRouter.get('/projects/:id', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
-      const project = await Project.findOne({ _id: req.params.id, userId: req.user.id }).lean();
-      if (!project) return res.status(404).json({ error: 'Project not found.' });
-      const documents = await Document.find({ projectId: project._id, ownerId: req.user.id }).sort({ updatedAt: -1 }).lean();
-      return res.json({ ...project, documents });
+      const member = await ProjectMember.findOne({ projectId: req.params.id, userId: req.user.id, status: 'active' }).lean();
+      const project = await Project.findOne({
+        _id: req.params.id,
+        $or: [{ userId: req.user.id }, ...(member ? [{ _id: req.params.id }] : [])]
+      }).lean();
+      if (!project) return res.status(404).json({ error: 'Project not found or unauthorized.' });
+      const documents = await Document.find({ projectId: project._id }).sort({ updatedAt: -1 }).lean();
+      const tasks = await Task.find({ projectId: project._id }).sort({ createdAt: -1 }).lean();
+      const members = await ProjectMember.find({ projectId: project._id, status: 'active' })
+        .populate('userId', 'displayName email avatarUrl')
+        .lean();
+      return res.json({ ...project, documents, tasks, members, userRole: member?.role || (String(project.userId) === String(req.user.id) ? 'owner' : 'viewer') });
     }
     const proj = memProjects.get(req.params.id);
-    if (!proj || proj.userId !== req.user.id) return res.status(404).json({ error: 'Project not found.' });
-    const documents = [...memDocuments.values()].filter(d => d.projectId === req.params.id && d.ownerId === req.user.id);
-    res.json({ ...proj, documents });
+    const memKey = `${req.params.id}_${req.user.id}`;
+    const member = memProjectMembers.get(memKey);
+    if (!proj || (proj.userId !== req.user.id && !member)) return res.status(404).json({ error: 'Project not found.' });
+    const documents = [...memDocuments.values()].filter(d => d.projectId === req.params.id);
+    const tasks = [...memTasks.values()].filter(t => t.projectId === req.params.id);
+    const members = [...memProjectMembers.values()].filter(m => m.projectId === req.params.id && m.status === 'active');
+    res.json({ ...proj, documents, tasks, members, userRole: member?.role || 'owner' });
   } catch (e) { next(e); }
 });
 
@@ -1898,23 +2020,28 @@ apiRouter.patch('/projects/:id', requireAuth, async (req, res, next) => {
       title: z.string().trim().min(1).max(160).optional(),
       description: z.string().max(1000).optional(),
       discipline: z.string().max(100).optional(),
-      documentType: z.string().max(80).optional()
+      documentType: z.string().max(80).optional(),
+      workflowStage: z.enum(['literature', 'analysis', 'drafting', 'review', 'submission']).optional(),
+      completionPercentage: z.number().min(0).max(100).optional(),
+      tags: z.array(z.string()).optional(),
+      status: z.enum(['active', 'archived', 'deleted']).optional()
     });
     const p = schema.safeParse(req.body);
     if (!p.success) return res.status(400).json({ error: 'Invalid update data.' });
 
     if (isDbConnected()) {
+      const member = await ProjectMember.findOne({ projectId: req.params.id, userId: req.user.id, status: 'active', role: { $in: ['owner', 'editor'] } });
       const project = await Project.findOneAndUpdate(
-        { _id: req.params.id, userId: req.user.id },
+        { _id: req.params.id, $or: [{ userId: req.user.id }, ...(member ? [{ _id: req.params.id }] : [])] },
         { $set: p.data },
         { new: true }
       );
-      if (!project) return res.status(404).json({ error: 'Project not found.' });
+      if (!project) return res.status(404).json({ error: 'Project not found or insufficient permissions.' });
       return res.json(project);
     }
 
     const proj = memProjects.get(req.params.id);
-    if (!proj || proj.userId !== req.user.id) return res.status(404).json({ error: 'Project not found.' });
+    if (!proj || (proj.userId !== req.user.id)) return res.status(404).json({ error: 'Project not found.' });
     Object.assign(proj, p.data, { updatedAt: new Date().toISOString() });
     res.json(proj);
   } catch (e) { next(e); }
@@ -1924,9 +2051,11 @@ apiRouter.delete('/projects/:id', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
       const project = await Project.findOneAndDelete({ _id: req.params.id, userId: req.user.id });
-      if (!project) return res.status(404).json({ error: 'Project not found.' });
-      await Revision.deleteMany({ projectId: project._id, userId: req.user.id });
-      await Document.deleteMany({ projectId: project._id, ownerId: req.user.id });
+      if (!project) return res.status(404).json({ error: 'Project not found or not owner.' });
+      await Revision.deleteMany({ projectId: project._id });
+      await Document.deleteMany({ projectId: project._id });
+      await Task.deleteMany({ projectId: project._id });
+      await ProjectMember.deleteMany({ projectId: project._id });
       await recordAudit(req.user.id, 'PROJECT_DELETED', 'Project', req.params.id);
       return res.json({ deleted: true });
     }
@@ -1935,14 +2064,934 @@ apiRouter.delete('/projects/:id', requireAuth, async (req, res, next) => {
     if (!proj || proj.userId !== req.user.id) return res.status(404).json({ error: 'Project not found.' });
     memProjects.delete(req.params.id);
     for (const [id, r] of memRevisions.entries()) {
-      if (r.projectId === req.params.id && r.userId === req.user.id) memRevisions.delete(id);
+      if (r.projectId === req.params.id) memRevisions.delete(id);
     }
     for (const [id, d] of memDocuments.entries()) {
-      if (d.projectId === req.params.id && d.ownerId === req.user.id) memDocuments.delete(id);
+      if (d.projectId === req.params.id) memDocuments.delete(id);
+    }
+    for (const [id, t] of memTasks.entries()) {
+      if (t.projectId === req.params.id) memTasks.delete(id);
     }
     res.json({ deleted: true });
   } catch (e) { next(e); }
 });
+
+// Project Members & Collaboration (Module 8)
+apiRouter.get('/projects/:id/members', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const members = await ProjectMember.find({ projectId: req.params.id })
+        .populate('userId', 'displayName email avatarUrl')
+        .lean();
+      return res.json(members);
+    }
+    const members = [...memProjectMembers.values()].filter(m => m.projectId === req.params.id);
+    res.json(members);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/members', requireAuth, async (req, res, next) => {
+  try {
+    const { email, role = 'editor' } = req.body || {};
+    if (!email || !email.trim()) return res.status(400).json({ error: 'Member email is required.' });
+
+    if (isDbConnected()) {
+      const targetUser = await User.findOne({ email: email.trim().toLowerCase() });
+      if (!targetUser) return res.status(404).json({ error: 'User with this email not found.' });
+
+      const existing = await ProjectMember.findOne({ projectId: req.params.id, userId: targetUser._id });
+      if (existing) {
+        existing.role = role;
+        existing.status = 'active';
+        await existing.save();
+        return res.json(existing);
+      }
+
+      const member = await ProjectMember.create({
+        projectId: req.params.id,
+        userId: targetUser._id,
+        role,
+        invitedBy: req.user.id,
+        status: 'active',
+        permissions: role === 'editor' ? ['read', 'write'] : ['read']
+      });
+      return res.status(201).json(member);
+    }
+
+    const memberId = new mongoose.Types.ObjectId().toString();
+    const newMember = {
+      _id: memberId,
+      projectId: req.params.id,
+      userId: req.user.id,
+      email: email.trim().toLowerCase(),
+      role,
+      status: 'active',
+      createdAt: new Date().toISOString()
+    };
+    memProjectMembers.set(`${req.params.id}_${email}`, newMember);
+    res.status(201).json(newMember);
+  } catch (e) { next(e); }
+});
+
+apiRouter.delete('/projects/:id/members/:memberId', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      await ProjectMember.findByIdAndDelete(req.params.memberId);
+      return res.json({ removed: true });
+    }
+    memProjectMembers.delete(req.params.memberId);
+    res.json({ removed: true });
+  } catch (e) { next(e); }
+});
+
+// Project Tasks & Milestones (Unified Workspace)
+apiRouter.get('/projects/:id/tasks', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const tasks = await Task.find({ projectId: req.params.id }).sort({ createdAt: -1 }).lean();
+      return res.json(tasks);
+    }
+    const tasks = [...memTasks.values()].filter(t => t.projectId === req.params.id);
+    res.json(tasks);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/tasks', requireAuth, async (req, res, next) => {
+  try {
+    const { title, description, priority = 'medium', stage = 'general', dueDate } = req.body || {};
+    if (!title || !title.trim()) return res.status(400).json({ error: 'Task title is required.' });
+
+    if (isDbConnected()) {
+      const task = await Task.create({
+        projectId: req.params.id,
+        userId: req.user.id,
+        title: title.trim(),
+        description: description || '',
+        priority,
+        stage,
+        dueDate: dueDate ? new Date(dueDate) : null,
+        status: 'todo'
+      });
+      return res.status(201).json(task);
+    }
+
+    const taskId = new mongoose.Types.ObjectId().toString();
+    const newTask = {
+      _id: taskId,
+      projectId: req.params.id,
+      userId: req.user.id,
+      title: title.trim(),
+      description: description || '',
+      priority,
+      stage,
+      status: 'todo',
+      dueDate: dueDate || null,
+      createdAt: new Date().toISOString()
+    };
+    memTasks.set(taskId, newTask);
+    res.status(201).json(newTask);
+  } catch (e) { next(e); }
+});
+
+apiRouter.patch('/projects/:id/tasks/:taskId', requireAuth, async (req, res, next) => {
+  try {
+    const updates = req.body || {};
+    if (isDbConnected()) {
+      const task = await Task.findOneAndUpdate(
+        { _id: req.params.taskId, projectId: req.params.id },
+        { $set: updates },
+        { new: true }
+      );
+      if (!task) return res.status(404).json({ error: 'Task not found.' });
+      return res.json(task);
+    }
+    const t = memTasks.get(req.params.taskId);
+    if (!t) return res.status(404).json({ error: 'Task not found.' });
+    Object.assign(t, updates, { updatedAt: new Date().toISOString() });
+    res.json(t);
+  } catch (e) { next(e); }
+});
+
+apiRouter.delete('/projects/:id/tasks/:taskId', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      await Task.findOneAndDelete({ _id: req.params.taskId, projectId: req.params.id });
+      return res.json({ deleted: true });
+    }
+    memTasks.delete(req.params.taskId);
+    res.json({ deleted: true });
+  } catch (e) { next(e); }
+});
+
+// Project Activity Timeline
+apiRouter.get('/projects/:id/activity', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const revisions = await Revision.find({ projectId: req.params.id }).sort({ createdAt: -1 }).limit(10).lean();
+      const documents = await Document.find({ projectId: req.params.id }).sort({ updatedAt: -1 }).limit(10).lean();
+      const tasks = await Task.find({ projectId: req.params.id }).sort({ updatedAt: -1 }).limit(10).lean();
+
+      const activities = [
+        ...revisions.map(r => ({ type: 'revision', title: `Revision (${r.mode}): ${r.summary || 'Content updated'}`, date: r.createdAt })),
+        ...documents.map(d => ({ type: 'document', title: `Document updated: ${d.title}`, date: d.updatedAt })),
+        ...tasks.map(t => ({ type: 'task', title: `Task: ${t.title} [${t.status}]`, date: t.updatedAt || t.createdAt }))
+      ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 15);
+
+      return res.json(activities);
+    }
+    res.json([
+      { type: 'project', title: 'Project workspace initialized', date: new Date().toISOString() }
+    ]);
+  } catch (e) { next(e); }
+});
+
+// Reference & Citation Manager Endpoints (Module 2)
+apiRouter.post('/references/import', requireAuth, upload.single('file'), async (req, res, next) => {
+  try {
+    const rawText = req.file ? req.file.buffer.toString('utf8') : (req.body?.text || '');
+    const format = (req.body?.format || (req.file?.originalname?.endsWith('.ris') ? 'ris' : 'bibtex')).toLowerCase();
+    const projectId = req.body?.projectId || null;
+
+    if (!rawText.trim()) return res.status(400).json({ error: 'No BibTeX or RIS content provided for import.' });
+
+    const parsed = format === 'ris' ? parseRis(rawText) : parseBibtex(rawText);
+    if (parsed.length === 0) return res.status(400).json({ error: 'Could not extract valid citations from provided input.' });
+
+    // Fetch existing citations to detect duplicates
+    let existing = [];
+    if (isDbConnected()) {
+      existing = await Citation.find({ ownerId: req.user.id }).lean();
+    } else {
+      existing = [...memCitations.values()].filter(c => c.ownerId === req.user.id);
+    }
+
+    const { unique, duplicates } = detectDuplicates(parsed, existing);
+
+    // Persist unique citations
+    const saved = [];
+    for (const item of unique) {
+      if (isDbConnected()) {
+        const doc = await Citation.create({
+          ownerId: req.user.id,
+          projectId: projectId || null,
+          doi: item.doi || '',
+          title: item.title,
+          authors: item.authors,
+          year: item.year,
+          journal: item.journal,
+          volume: item.volume,
+          issue: item.issue,
+          pages: item.pages,
+          publisher: item.publisher,
+          verificationStatus: item.doi ? 'verified' : 'unverified'
+        });
+        saved.push(doc);
+      } else {
+        const id = new mongoose.Types.ObjectId().toString();
+        const entry = { _id: id, ownerId: req.user.id, projectId: projectId || null, ...item };
+        memCitations.set(id, entry);
+        saved.push(entry);
+      }
+    }
+
+    res.json({
+      importedCount: saved.length,
+      duplicateCount: duplicates.length,
+      imported: saved,
+      duplicates: duplicates.map(d => ({ title: d.entry.title, reason: d.reason }))
+    });
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/references/export', requireAuth, async (req, res, next) => {
+  try {
+    const format = (req.query.format || 'bibtex').toLowerCase();
+    const projectId = req.query.projectId || null;
+
+    let citations = [];
+    if (isDbConnected()) {
+      const filter = { ownerId: req.user.id };
+      if (projectId) filter.projectId = projectId;
+      citations = await Citation.find(filter).lean();
+    } else {
+      citations = [...memCitations.values()].filter(c => c.ownerId === req.user.id && (!projectId || c.projectId === projectId));
+    }
+
+    const exported = format === 'ris' ? exportToRis(citations) : exportToBibtex(citations);
+    const contentType = format === 'ris' ? 'application/x-research-info-systems' : 'application/x-bibtex';
+    res.setHeader('Content-Type', `${contentType}; charset=utf-8`);
+    res.setHeader('Content-Disposition', `attachment; filename="references.${format === 'ris' ? 'ris' : 'bib'}"`);
+    res.send(exported);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/references/retraction-check', requireAuth, async (req, res, next) => {
+  try {
+    const { citations = [] } = req.body || {};
+    const results = citations.map(c => checkRetractionStatus(c.doi, c.title));
+    res.json({ results });
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/references/format', requireAuth, async (req, res, next) => {
+  try {
+    const style = (req.query.style || 'apa').toLowerCase();
+    const citation = {
+      title: req.query.title || 'Sample Title',
+      authors: [{ family: req.query.author || 'Author', given: 'A' }],
+      year: req.query.year || '2025',
+      journal: req.query.journal || 'Journal of Research',
+      doi: req.query.doi || ''
+    };
+    const formatted = formatCitationInStyle(citation, style);
+    res.json({ style, formatted });
+  } catch (e) { next(e); }
+});
+
+// Literature Review Studio Endpoints (Module 3)
+apiRouter.get('/projects/:id/literature', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const entries = await LiteratureEntry.find({ projectId: req.params.id }).sort({ createdAt: -1 }).lean();
+      return res.json(entries);
+    }
+    const entries = [...memLiterature.values()].filter(l => l.projectId === req.params.id);
+    res.json(entries);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/literature', requireAuth, async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    if (!body.title || !body.title.trim()) return res.status(400).json({ error: 'Paper title is required.' });
+
+    const entryData = {
+      projectId: req.params.id,
+      userId: req.user.id,
+      title: body.title.trim(),
+      authors: Array.isArray(body.authors) ? body.authors : (body.authors ? [body.authors] : []),
+      year: body.year || '',
+      journal: body.journal || '',
+      doi: normalizeDoi(body.doi || ''),
+      abstract: body.abstract || '',
+      matrixData: {
+        methodology: body.methodology || '',
+        sampleSize: body.sampleSize || '',
+        instruments: body.instruments || '',
+        findings: body.findings || '',
+        limitations: body.limitations || ''
+      },
+      thematicTags: Array.isArray(body.thematicTags) ? body.thematicTags : (body.thematicTags ? [body.thematicTags] : []),
+      status: body.status || 'identified'
+    };
+
+    if (isDbConnected()) {
+      const entry = await LiteratureEntry.create(entryData);
+      return res.status(201).json(entry);
+    }
+
+    const id = new mongoose.Types.ObjectId().toString();
+    const newEntry = { _id: id, ...entryData, createdAt: new Date().toISOString() };
+    memLiterature.set(id, newEntry);
+    res.status(201).json(newEntry);
+  } catch (e) { next(e); }
+});
+
+apiRouter.patch('/projects/:id/literature/:entryId', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const entry = await LiteratureEntry.findOneAndUpdate(
+        { _id: req.params.entryId, projectId: req.params.id },
+        { $set: req.body },
+        { new: true }
+      );
+      if (!entry) return res.status(404).json({ error: 'Literature entry not found.' });
+      return res.json(entry);
+    }
+    const entry = memLiterature.get(req.params.entryId);
+    if (!entry) return res.status(404).json({ error: 'Literature entry not found.' });
+    Object.assign(entry, req.body, { updatedAt: new Date().toISOString() });
+    res.json(entry);
+  } catch (e) { next(e); }
+});
+
+apiRouter.delete('/projects/:id/literature/:entryId', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      await LiteratureEntry.findOneAndDelete({ _id: req.params.entryId, projectId: req.params.id });
+      return res.json({ deleted: true });
+    }
+    memLiterature.delete(req.params.entryId);
+    res.json({ deleted: true });
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/literature/synthesize', requireAuth, async (req, res, next) => {
+  try {
+    let entries = [];
+    if (isDbConnected()) {
+      entries = await LiteratureEntry.find({ projectId: req.params.id }).lean();
+    } else {
+      entries = [...memLiterature.values()].filter(l => l.projectId === req.params.id);
+    }
+
+    if (entries.length === 0) return res.status(400).json({ error: 'No literature entries found to synthesize.' });
+
+    // Group entries by thematic tags or methodology
+    const themes = {};
+    for (const e of entries) {
+      const tags = (e.thematicTags && e.thematicTags.length > 0) ? e.thematicTags : ['General Empirical Findings'];
+      for (const t of tags) {
+        if (!themes[t]) themes[t] = [];
+        themes[t].push(e);
+      }
+    }
+
+    const sections = Object.entries(themes).map(([theme, items]) => {
+      const citations = items.map(i => {
+        const lead = i.authors?.[0] || 'Author';
+        return lead ? `(${lead}, ${i.year || 'n.d.'})` : '';
+      }).filter(Boolean).join(', ');
+
+      const synthesisParagraph = `In the thematic area of "${theme}", evidence from ${items.length} study(ies) ${citations} indicates consistent patterns. Specifically, ${items.map(i => i.matrixData?.findings || i.abstract?.slice(0, 150) || i.title).join(' Furthermore, ')}.`;
+      return { theme, studyCount: items.length, synthesis: synthesisParagraph, citations };
+    });
+
+    res.json({
+      themeCount: Object.keys(themes).length,
+      studyCount: entries.length,
+      sections,
+      fullDraft: sections.map(s => `### ${s.theme}\n\n${s.synthesis}`).join('\n\n')
+    });
+  } catch (e) { next(e); }
+});
+
+// PDF Grounded Research Chat Endpoints (Module 4)
+apiRouter.post('/projects/:id/pdf-chat/upload', requireAuth, upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Please upload a PDF or text document.' });
+
+    const chunks = extractAndChunkDocument(req.file.buffer, req.file.originalname);
+    const chatTitle = `Research Chat: ${req.file.originalname}`;
+
+    if (isDbConnected()) {
+      const chat = await ResearchChat.create({
+        projectId: req.params.id,
+        userId: req.user.id,
+        title: chatTitle,
+        documentName: req.file.originalname,
+        documentChunks: chunks,
+        messages: [{
+          role: 'system',
+          content: `Document "${req.file.originalname}" loaded with ${chunks.length} page/section chunks. Ask any grounded question regarding its methodology, findings, or data.`
+        }]
+      });
+      return res.status(201).json({ chatId: chat._id, title: chat.title, chunkCount: chunks.length });
+    }
+
+    const chatId = new mongoose.Types.ObjectId().toString();
+    const newChat = {
+      _id: chatId,
+      projectId: req.params.id,
+      userId: req.user.id,
+      title: chatTitle,
+      documentName: req.file.originalname,
+      documentChunks: chunks,
+      messages: [{
+        role: 'system',
+        content: `Document "${req.file.originalname}" loaded with ${chunks.length} chunks.`
+      }],
+      createdAt: new Date().toISOString()
+    };
+    memResearchChats.set(chatId, newChat);
+    res.status(201).json({ chatId, title: chatTitle, chunkCount: chunks.length });
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/projects/:id/pdf-chat', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const chats = await ResearchChat.find({ projectId: req.params.id }).select('title documentName updatedAt messages').lean();
+      return res.json(chats);
+    }
+    const chats = [...memResearchChats.values()].filter(c => c.projectId === req.params.id);
+    res.json(chats);
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/projects/:id/pdf-chat/:chatId', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const chat = await ResearchChat.findOne({ _id: req.params.chatId, projectId: req.params.id }).lean();
+      if (!chat) return res.status(404).json({ error: 'Chat not found.' });
+      return res.json(chat);
+    }
+    const chat = memResearchChats.get(req.params.chatId);
+    if (!chat) return res.status(404).json({ error: 'Chat not found.' });
+    res.json(chat);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/pdf-chat/:chatId/message', requireAuth, async (req, res, next) => {
+  try {
+    const { query } = req.body || {};
+    if (!query || !query.trim()) return res.status(400).json({ error: 'Question query is required.' });
+
+    let chat = null;
+    if (isDbConnected()) {
+      chat = await ResearchChat.findOne({ _id: req.params.chatId, projectId: req.params.id });
+    } else {
+      chat = memResearchChats.get(req.params.chatId);
+    }
+    if (!chat) return res.status(404).json({ error: 'Research chat not found.' });
+
+    // Grounded retrieval across chunks
+    const retrieved = searchDocumentChunks(chat.documentChunks, query, 3);
+    const { answer, citations } = generateGroundedAnswer(query, retrieved);
+
+    const userMsg = { role: 'user', content: query, timestamp: new Date() };
+    const assistantMsg = { role: 'assistant', content: answer, citations, timestamp: new Date() };
+
+    chat.messages.push(userMsg);
+    chat.messages.push(assistantMsg);
+
+    if (isDbConnected()) {
+      await chat.save();
+    } else {
+      memResearchChats.set(req.params.chatId, chat);
+    }
+
+    res.json({ message: assistantMsg });
+  } catch (e) { next(e); }
+});
+
+// Statistical Analysis Studio Endpoints (Module 5)
+apiRouter.get('/projects/:id/datasets', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const datasets = await Dataset.find({ projectId: req.params.id }).select('-rawData').lean();
+      return res.json(datasets);
+    }
+    const datasets = [...memDatasets.values()].filter(d => d.projectId === req.params.id);
+    res.json(datasets.map(({ rawData, ...rest }) => rest));
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/datasets', requireAuth, upload.single('file'), async (req, res, next) => {
+  try {
+    let rows = [];
+    let fileName = req.file?.originalname || 'dataset.csv';
+
+    if (req.file) {
+      const content = req.file.buffer.toString('utf8');
+      const lines = content.split(/\r?\n/).filter(l => l.trim().length > 0);
+      if (lines.length > 0) {
+        const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
+        for (let i = 1; i < lines.length; i++) {
+          const cells = lines[i].split(',').map(c => c.trim().replace(/^["']|["']$/g, ''));
+          const rowObj = {};
+          headers.forEach((h, idx) => {
+            rowObj[h] = cells[idx] !== undefined ? cells[idx] : '';
+          });
+          rows.push(rowObj);
+        }
+      }
+    } else if (Array.isArray(req.body?.rows)) {
+      rows = req.body.rows;
+      fileName = req.body.name || 'manual_data.json';
+    }
+
+    if (rows.length === 0) return res.status(400).json({ error: 'No data rows detected in dataset.' });
+
+    // Infer column types
+    const firstRow = rows[0] || {};
+    const columns = Object.keys(firstRow).map(colName => {
+      const vals = rows.map(r => r[colName]).filter(v => v !== '' && v !== null && v !== undefined);
+      const isNum = vals.length > 0 && vals.every(v => !isNaN(Number(v)));
+      return {
+        name: colName,
+        type: isNum ? 'numeric' : 'categorical',
+        sampleValues: vals.slice(0, 5)
+      };
+    });
+
+    const datasetName = req.body?.name || fileName.replace(/\.[^/.]+$/, '');
+
+    if (isDbConnected()) {
+      const dataset = await Dataset.create({
+        projectId: req.params.id,
+        userId: req.user.id,
+        name: datasetName,
+        fileName,
+        rowCount: rows.length,
+        columnCount: columns.length,
+        columns,
+        rawData: rows.slice(0, 1000) // bounded storage
+      });
+      return res.status(201).json(dataset);
+    }
+
+    const datasetId = new mongoose.Types.ObjectId().toString();
+    const newDs = {
+      _id: datasetId,
+      projectId: req.params.id,
+      userId: req.user.id,
+      name: datasetName,
+      fileName,
+      rowCount: rows.length,
+      columnCount: columns.length,
+      columns,
+      rawData: rows.slice(0, 1000),
+      createdAt: new Date().toISOString()
+    };
+    memDatasets.set(datasetId, newDs);
+    res.status(201).json(newDs);
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/projects/:id/datasets/:datasetId', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const ds = await Dataset.findOne({ _id: req.params.datasetId, projectId: req.params.id }).lean();
+      if (!ds) return res.status(404).json({ error: 'Dataset not found.' });
+      return res.json(ds);
+    }
+    const ds = memDatasets.get(req.params.datasetId);
+    if (!ds) return res.status(404).json({ error: 'Dataset not found.' });
+    res.json(ds);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/datasets/:datasetId/analyze', requireAuth, async (req, res, next) => {
+  try {
+    const { analysisType, varX, varY, groupVar, paired = false } = req.body || {};
+
+    let dataset = null;
+    if (isDbConnected()) {
+      dataset = await Dataset.findOne({ _id: req.params.datasetId, projectId: req.params.id });
+    } else {
+      dataset = memDatasets.get(req.params.datasetId);
+    }
+    if (!dataset) return res.status(404).json({ error: 'Dataset not found.' });
+
+    const rows = dataset.rawData || [];
+    let results = {};
+    let apaReport = '';
+
+    switch (analysisType) {
+      case 'descriptive': {
+        const vals = rows.map(r => r[varX]).filter(v => v !== undefined && v !== '');
+        results = computeDescriptive(vals);
+        apaReport = `Descriptive statistics for ${varX} (N = ${results.count}): Mean = ${results.mean}, SD = ${results.stdDev}, Median = ${results.median}, IQR = ${results.iqr}, Skewness = ${results.skewness}.`;
+        break;
+      }
+      case 'independent_t_test': {
+        // Group by groupVar or compare varX and varY
+        let gA = [];
+        let gB = [];
+        if (groupVar) {
+          const groupVals = [...new Set(rows.map(r => r[groupVar]))];
+          gA = rows.filter(r => r[groupVar] === groupVals[0]).map(r => r[varX]);
+          gB = rows.filter(r => r[groupVar] === groupVals[1]).map(r => r[varX]);
+        } else {
+          gA = rows.map(r => r[varX]);
+          gB = rows.map(r => r[varY]);
+        }
+        results = computeTTest(gA, gB, false);
+        apaReport = formatApa7StatisticalNarrative('independent_t_test', results, { groupA: varX, groupB: varY });
+        break;
+      }
+      case 'paired_t_test': {
+        const gA = rows.map(r => r[varX]);
+        const gB = rows.map(r => r[varY]);
+        results = computeTTest(gA, gB, true);
+        apaReport = formatApa7StatisticalNarrative('paired_t_test', results);
+        break;
+      }
+      case 'one_way_anova': {
+        if (!groupVar) return res.status(400).json({ error: 'ANOVA requires a grouping factor (groupVar).' });
+        const distinctGroups = [...new Set(rows.map(r => r[groupVar]))];
+        const groupArrays = distinctGroups.map(gName => rows.filter(r => r[groupVar] === gName).map(r => r[varX]));
+        results = computeAnova(groupArrays);
+        apaReport = formatApa7StatisticalNarrative('one_way_anova', results);
+        break;
+      }
+      case 'pearson_correlation':
+      case 'spearman_correlation': {
+        const x = rows.map(r => r[varX]);
+        const y = rows.map(r => r[varY]);
+        results = computeCorrelation(x, y, analysisType === 'spearman_correlation' ? 'spearman' : 'pearson');
+        apaReport = formatApa7StatisticalNarrative(analysisType, results, { varX, varY });
+        break;
+      }
+      case 'linear_regression': {
+        const x = rows.map(r => r[varX]);
+        const y = rows.map(r => r[varY]);
+        results = computeLinearRegression(x, y);
+        apaReport = formatApa7StatisticalNarrative('linear_regression', results, { varX, varY });
+        break;
+      }
+      default:
+        return res.status(400).json({ error: `Unsupported analysis type: ${analysisType}` });
+    }
+
+    if (isDbConnected()) {
+      const saved = await Analysis.create({
+        projectId: req.params.id,
+        userId: req.user.id,
+        datasetId: req.params.datasetId,
+        analysisType,
+        parameters: req.body,
+        results,
+        apaReport
+      });
+      return res.status(201).json(saved);
+    }
+
+    const aId = new mongoose.Types.ObjectId().toString();
+    const newAnalysis = {
+      _id: aId,
+      projectId: req.params.id,
+      userId: req.user.id,
+      datasetId: req.params.datasetId,
+      analysisType,
+      parameters: req.body,
+      results,
+      apaReport,
+      createdAt: new Date().toISOString()
+    };
+    memAnalyses.set(aId, newAnalysis);
+    res.status(201).json(newAnalysis);
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/projects/:id/analyses', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const list = await Analysis.find({ projectId: req.params.id }).sort({ createdAt: -1 }).lean();
+      return res.json(list);
+    }
+    const list = [...memAnalyses.values()].filter(a => a.projectId === req.params.id);
+    res.json(list);
+  } catch (e) { next(e); }
+});
+
+// Systematic Review Assistant (Module 6 - PRISMA 2020)
+apiRouter.get('/projects/:id/systematic-reviews', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const reviews = await SystematicReview.find({ projectId: req.params.id }).sort({ createdAt: -1 }).lean();
+      return res.json(reviews);
+    }
+    const reviews = [...memSystematicReviews.values()].filter(s => s.projectId === req.params.id);
+    res.json(reviews);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/systematic-reviews', requireAuth, async (req, res, next) => {
+  try {
+    const { title, protocol, eligibility } = req.body || {};
+    if (!title || !title.trim()) return res.status(400).json({ error: 'Systematic review title is required.' });
+
+    const reviewData = {
+      projectId: req.params.id,
+      userId: req.user.id,
+      title: title.trim(),
+      protocol: protocol || {},
+      eligibility: eligibility || { inclusionCriteria: [], exclusionCriteria: [] },
+      prismaMetrics: {
+        identified: 0,
+        duplicatesRemoved: 0,
+        screenedTitleAbstract: 0,
+        excludedTitleAbstract: 0,
+        assessedFullText: 0,
+        excludedFullText: 0,
+        includedInSynthesis: 0
+      }
+    };
+
+    if (isDbConnected()) {
+      const review = await SystematicReview.create(reviewData);
+      return res.status(201).json(review);
+    }
+
+    const rId = new mongoose.Types.ObjectId().toString();
+    const newRev = { _id: rId, ...reviewData, createdAt: new Date().toISOString() };
+    memSystematicReviews.set(rId, newRev);
+    res.status(201).json(newRev);
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/projects/:id/systematic-reviews/:reviewId/studies', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const studies = await StudyRecord.find({ reviewId: req.params.reviewId }).sort({ createdAt: -1 }).lean();
+      return res.json(studies);
+    }
+    const studies = [...memStudyRecords.values()].filter(s => s.reviewId === req.params.reviewId);
+    res.json(studies);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/systematic-reviews/:reviewId/studies', requireAuth, async (req, res, next) => {
+  try {
+    const { studies = [] } = req.body || {};
+    if (!Array.isArray(studies) || studies.length === 0) return res.status(400).json({ error: 'Array of studies is required.' });
+
+    const inserted = [];
+    for (const s of studies) {
+      const record = {
+        reviewId: req.params.reviewId,
+        projectId: req.params.id,
+        title: s.title || 'Untitled Study',
+        authors: Array.isArray(s.authors) ? s.authors : [s.authors || 'Unknown'],
+        year: s.year || '',
+        journal: s.journal || '',
+        doi: s.doi || '',
+        abstract: s.abstract || '',
+        screeningStage: 'title_abstract',
+        decision: 'pending'
+      };
+
+      if (isDbConnected()) {
+        const doc = await StudyRecord.create(record);
+        inserted.push(doc);
+      } else {
+        const id = new mongoose.Types.ObjectId().toString();
+        const entry = { _id: id, ...record };
+        memStudyRecords.set(id, entry);
+        inserted.push(entry);
+      }
+    }
+
+    // Update PRISMA identified count
+    if (isDbConnected()) {
+      await SystematicReview.findByIdAndUpdate(req.params.reviewId, {
+        $inc: { 'prismaMetrics.identified': inserted.length }
+      });
+    }
+
+    res.status(201).json({ addedCount: inserted.length, studies: inserted });
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/systematic-reviews/:reviewId/studies/:studyId/screen', requireAuth, async (req, res, next) => {
+  try {
+    const { decision, reason = '' } = req.body || {};
+    if (!['included', 'excluded'].includes(decision)) {
+      return res.status(400).json({ error: 'Decision must be "included" or "excluded".' });
+    }
+
+    if (isDbConnected()) {
+      const study = await StudyRecord.findByIdAndUpdate(
+        req.params.studyId,
+        { $set: { decision, exclusionReason: reason, screenerId: req.user.id } },
+        { new: true }
+      );
+      if (!study) return res.status(404).json({ error: 'Study not found.' });
+
+      // Re-aggregate PRISMA metrics
+      const totalIdentified = await StudyRecord.countDocuments({ reviewId: req.params.reviewId });
+      const screened = await StudyRecord.countDocuments({ reviewId: req.params.reviewId, decision: { $ne: 'pending' } });
+      const excluded = await StudyRecord.countDocuments({ reviewId: req.params.reviewId, decision: 'excluded' });
+      const included = await StudyRecord.countDocuments({ reviewId: req.params.reviewId, decision: 'included' });
+
+      await SystematicReview.findByIdAndUpdate(req.params.reviewId, {
+        $set: {
+          'prismaMetrics.identified': totalIdentified,
+          'prismaMetrics.screenedTitleAbstract': screened,
+          'prismaMetrics.excludedTitleAbstract': excluded,
+          'prismaMetrics.includedInSynthesis': included
+        }
+      });
+
+      return res.json(study);
+    }
+
+    const s = memStudyRecords.get(req.params.studyId);
+    if (!s) return res.status(404).json({ error: 'Study not found.' });
+    s.decision = decision;
+    s.exclusionReason = reason;
+    res.json(s);
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/projects/:id/systematic-reviews/:reviewId/prisma', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const rev = await SystematicReview.findById(req.params.reviewId).select('prismaMetrics title').lean();
+      if (!rev) return res.status(404).json({ error: 'Review not found.' });
+      return res.json(rev.prismaMetrics || {});
+    }
+    const rev = memSystematicReviews.get(req.params.reviewId);
+    if (!rev) return res.status(404).json({ error: 'Review not found.' });
+    res.json(rev.prismaMetrics || {});
+  } catch (e) { next(e); }
+});
+
+// Journal Submission Studio Endpoints (Module 7)
+apiRouter.get('/projects/:id/submission', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const sub = await JournalSubmission.findOne({ projectId: req.params.id }).lean();
+      return res.json(sub || { targetJournal: '', guidelinesChecklist: [], coverLetter: '', status: 'drafting' });
+    }
+    const sub = memJournalSubmissions.get(req.params.id);
+    res.json(sub || { targetJournal: '', guidelinesChecklist: [], coverLetter: '', status: 'drafting' });
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/submission', requireAuth, async (req, res, next) => {
+  try {
+    const { targetJournal, publisher, wordLimit, citationStyle, guidelinesChecklist, coverLetter, status } = req.body || {};
+    const payload = {
+      projectId: req.params.id,
+      userId: req.user.id,
+      targetJournal: targetJournal || 'Target Academic Journal',
+      publisher: publisher || '',
+      wordLimit: wordLimit || 8000,
+      citationStyle: citationStyle || 'apa',
+      guidelinesChecklist: guidelinesChecklist || [],
+      coverLetter: coverLetter || '',
+      status: status || 'drafting'
+    };
+
+    if (isDbConnected()) {
+      const sub = await JournalSubmission.findOneAndUpdate(
+        { projectId: req.params.id },
+        { $set: payload },
+        { upsert: true, new: true }
+      );
+      return res.json(sub);
+    }
+
+    memJournalSubmissions.set(req.params.id, payload);
+    res.json(payload);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/projects/:id/submission/cover-letter', requireAuth, async (req, res, next) => {
+  try {
+    const { targetJournal = 'Journal of Academic Research', editorName = 'Editor-in-Chief', manuscriptTitle = 'Empirical Investigation' } = req.body || {};
+    const dateStr = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    const coverLetter = `Dear ${editorName},
+
+I am pleased to submit our original research manuscript titled "${manuscriptTitle}" for consideration for publication in ${targetJournal}.
+
+This manuscript presents novel empirical findings that align directly with the aims and scope of ${targetJournal}. We confirm that this work is original, has not been published previously, and is not under consideration for publication elsewhere. All authors have approved the manuscript and agree with its submission.
+
+Thank you for your time and consideration of our work. We look forward to hearing from you regarding the peer review process.
+
+Sincerely,
+${req.user.displayName || 'Lead Researcher'}
+Corresponding Author
+Date: ${dateStr}`;
+
+    res.json({ coverLetter });
+  } catch (e) { next(e); }
+});
+
 
 // Multi-Chapter Thesis Tree Initialization (Pillar 2)
 apiRouter.post('/projects/:id/thesis/init', requireAuth, async (req, res, next) => {

@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { app, resolveMongoUri, getSanitizedMongoDiagnostics, setTurnstileVerifier } from '../src/index.js';
 import { memDoiCache } from '../src/citationService.js';
+import { computeDescriptive, computeTTest, computeAnova, computeCorrelation, computeLinearRegression, formatApa7StatisticalNarrative } from '../src/statService.js';
+import { parseBibtex, parseRis, exportToBibtex, exportToRis, detectDuplicates, formatCitationInStyle, checkRetractionStatus } from '../src/bibtexRisService.js';
+import { extractAndChunkDocument, searchDocumentChunks, generateGroundedAnswer } from '../src/pdfChatService.js';
+
 
 let server;
 let pipeName;
@@ -516,5 +520,171 @@ test('ResearchProof AI — Comprehensive System & Auth Audit Suite', async (t) =
       const diag = getSanitizedMongoDiagnostics(uri, 'MONGODB_URI');
       assert.equal(diag.isLocalhost, true, `URI ${uri} must be recognized as localhost`);
     }
+  });
+
+  // 28. Statistical Analysis Engine: Transparent numerical computations without AI hallucinations
+  await t.test('28. Statistical Analysis: Computes exact descriptive, t-test, ANOVA, and regression with APA 7', async () => {
+    // Descriptive
+    const rawData = [12, 15, 14, 10, 18, 20, 22, 19, 14, 16];
+    const desc = computeDescriptive(rawData);
+    assert.equal(desc.count, 10);
+    assert.equal(desc.mean, 16);
+    assert.ok(desc.stdDev > 0);
+    assert.ok(desc.median >= 14 && desc.median <= 16);
+
+    // Independent Two-Sample t-Test
+    const groupA = [25, 28, 30, 29, 31, 26, 32];
+    const groupB = [18, 20, 22, 19, 21, 23, 17];
+    const tTestRes = computeTTest(groupA, groupB, false);
+    assert.ok(tTestRes.t > 0);
+    assert.ok(tTestRes.pValue < 0.05, 'Differences between distinct groups should be significant');
+    assert.ok(tTestRes.cohensD > 1.0, "Effect size should reflect large divergence");
+    const apaNarrative = formatApa7StatisticalNarrative('independent_t_test', tTestRes, { groupA: 'Intervention', groupB: 'Control' });
+    assert.ok(apaNarrative.includes('t('), 'APA narrative must include t-statistic format');
+    assert.ok(apaNarrative.includes('p <') || apaNarrative.includes('p ='), 'APA narrative must format p-value');
+
+    // Correlation
+    const x = [1, 2, 3, 4, 5, 6, 7];
+    const y = [2, 4, 6, 8, 10, 12, 14];
+    const corr = computeCorrelation(x, y, 'pearson');
+    assert.equal(corr.r, 1);
+    assert.equal(corr.rSquared, 1);
+
+    // Linear Regression
+    const reg = computeLinearRegression(x, y);
+    assert.equal(reg.slope, 2);
+    assert.ok(Math.abs(reg.intercept) < 0.01, 'Intercept should be approximately 0');
+    assert.equal(reg.rSquared, 1);
+  });
+
+  // 29. Reference & Citation Manager: BibTeX & RIS parser, duplicate detection, and multi-style export
+  await t.test('29. Reference Manager: Parses BibTeX/RIS, detects duplicates, and formats citations', async () => {
+    const bibtexRaw = `@article{smith2023deep,
+      author = {Smith, John and Doe, Jane},
+      title = {Deep Learning in Precision Medicine},
+      journal = {Journal of Medical AI},
+      year = {2023},
+      volume = {12},
+      number = {4},
+      pages = {101-115},
+      doi = {10.1016/j.jmai.2023.01.002}
+    }`;
+
+    const parsed = parseBibtex(bibtexRaw);
+    assert.equal(parsed.length, 1);
+    assert.equal(parsed[0].title, 'Deep Learning in Precision Medicine');
+    assert.equal(parsed[0].doi, '10.1016/j.jmai.2023.01.002');
+    assert.equal(parsed[0].year, '2023');
+
+    // Export to RIS
+    const risOutput = exportToRis(parsed);
+    assert.ok(risOutput.includes('TY  - JOUR'));
+    assert.ok(risOutput.includes('TI  - Deep Learning in Precision Medicine'));
+    assert.ok(risOutput.includes('ER  - '));
+
+    // Duplicate Detection
+    const duplicateCheck = detectDuplicates(parsed, parsed);
+    assert.equal(duplicateCheck.duplicates.length, 1, 'Should detect identical incoming citation as duplicate');
+
+    // Retraction Check
+    const retractedCitation = checkRetractionStatus('10.1016/sample', 'RETRACTED: Falsified Cell Growth Dynamics');
+    assert.equal(retractedCitation.isRetracted, true);
+    assert.ok(retractedCitation.warning.includes('RETRACTED'));
+
+    // Multi-Style Formatter
+    const apa = formatCitationInStyle(parsed[0], 'apa');
+    const mla = formatCitationInStyle(parsed[0], 'mla');
+    const ieee = formatCitationInStyle(parsed[0], 'ieee');
+    assert.ok(apa.includes('(2023)'));
+    assert.ok(mla.includes('"Deep Learning in Precision Medicine."'));
+    assert.ok(ieee.includes('[1]'));
+  });
+
+  // 30. PDF Research Chat: Chunking engine and grounded passage citation
+  await t.test('30. PDF Research Chat: Chunks documents and provides grounded answers with citations', async () => {
+    const sampleText = Buffer.from(
+      'Section 1: Introduction\n\n' +
+      'Cognitive load theory posits that working memory has finite processing capacity during instructional tasks.\n\n' +
+      'Section 2: Methodology\n\n' +
+      'A randomized trial of 120 undergraduate students was conducted to evaluate cognitive load under dual-task conditions.\n\n' +
+      'Section 3: Results\n\n' +
+      'Students in the adaptive feedback group exhibited a 42% reduction in extraneous cognitive load compared to controls.'
+    );
+
+    const chunks = extractAndChunkDocument(sampleText, 'cognition_study.txt');
+    assert.ok(chunks.length >= 1, 'Document should be divided into chunks');
+
+    const searchResults = searchDocumentChunks(chunks, 'adaptive feedback cognitive load', 2);
+    assert.ok(searchResults.length > 0, 'Retrieval should find matching passages');
+    assert.ok(searchResults[0].passage.includes('cognitive load'));
+
+    const grounded = generateGroundedAnswer('adaptive feedback cognitive load', searchResults);
+    assert.ok(grounded.answer.includes('Based on the manuscript'));
+    assert.ok(grounded.citations.length > 0);
+    assert.ok(typeof grounded.citations[0].page === 'number');
+  });
+
+  // 31. Unified Research Projects: Tenancy, Members, and Task Management Lifecycle
+  await t.test('31. Project Lifecycle: Supports collaborative members and project-scoped tasks', async () => {
+    // Re-login to get active session
+    const authRes = await api('/api/auth/login', {
+      method: 'POST',
+      body: { email: userEmail, password: userPassword }
+    });
+    const token = authRes.body.token;
+
+    // Create a new project with workflow stage and completion percentage
+    const projRes = await api('/api/v1/projects', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: {
+        title: 'Neural Networks & Neuroplasticity Study',
+        description: 'Collaborative neurocomputational investigation',
+        workflowStage: 'analysis',
+        completionPercentage: 45,
+        tags: ['neuroscience', 'machine-learning']
+      }
+    });
+    assert.equal(projRes.status, 201);
+    const projectId = projRes.body._id;
+    assert.ok(projectId);
+    assert.equal(projRes.body.workflowStage, 'analysis');
+
+    // Create a project task
+    const taskRes = await api(`/api/v1/projects/${projectId}/tasks`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: {
+        title: 'Run two-way ANOVA on EEG latency signals',
+        priority: 'high',
+        stage: 'analysis'
+      }
+    });
+    assert.equal(taskRes.status, 201);
+    const taskId = taskRes.body._id;
+    assert.ok(taskId);
+
+    // List tasks
+    const listTasksRes = await api(`/api/v1/projects/${projectId}/tasks`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    assert.equal(listTasksRes.status, 200);
+    assert.ok(listTasksRes.body.length >= 1);
+
+    // Update task status to done
+    const updateTaskRes = await api(`/api/v1/projects/${projectId}/tasks/${taskId}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${token}` },
+      body: { status: 'done' }
+    });
+    assert.equal(updateTaskRes.status, 200);
+    assert.equal(updateTaskRes.body.status, 'done');
+
+    // Get project activity feed
+    const activityRes = await api(`/api/v1/projects/${projectId}/activity`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    assert.equal(activityRes.status, 200);
+    assert.ok(Array.isArray(activityRes.body));
   });
 });

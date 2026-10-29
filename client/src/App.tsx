@@ -5,8 +5,17 @@ import {
   CircleHelp, Clock3, Copy, Download, FileCheck2, FileText, FolderKanban, Gauge, History,
   LayoutDashboard, LogOut, Menu, Moon, PanelLeft, Plus, RefreshCw, ScanText, Settings2,
   ShieldAlert, ShieldCheck, Sliders, Sparkles, Sun, Trash2, Upload, WandSparkles, X,
-  AlertTriangle, AlertCircle, ExternalLink, Printer, Eye, Edit3, GitCompare, Search
+  AlertTriangle, AlertCircle, ExternalLink, Printer, Eye, Edit3, GitCompare, Search,
+  Users, Send, FileSpreadsheet, Layers, Share2, Table
 } from 'lucide-react';
+
+import LiteratureReview from './modules/LiteratureReview';
+import StatisticalAnalysis from './modules/StatisticalAnalysis';
+import PdfResearchChat from './modules/PdfResearchChat';
+import SystematicReviews from './modules/SystematicReviews';
+import JournalSubmission from './modules/JournalSubmission';
+import ResearchCollaboration from './modules/ResearchCollaboration';
+import DocumentStudio from './modules/DocumentStudio';
 
 function resolveApiUrl() {
   const envUrl = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '');
@@ -54,7 +63,18 @@ type Revision = {
   meaningWarnings?: any[];
 };
 
-type Project = { _id: string; title: string; description: string; updatedAt: string };
+type Project = {
+  _id: string;
+  title: string;
+  description: string;
+  discipline?: string;
+  documentType?: string;
+  workflowStage?: string;
+  completionPercentage?: number;
+  tags?: string[];
+  status?: string;
+  updatedAt: string;
+};
 
 type DocumentItem = {
   _id: string;
@@ -172,9 +192,32 @@ export interface NavGroupConfig {
 
 export const NAV_GROUPS: NavGroupConfig[] = [
   {
-    id: 'writing-analysis',
-    title: 'Writing & Analysis',
-    path: '/writing',
+    id: 'workspace',
+    title: 'Research Workspace',
+    path: '/dashboard',
+    icon: LayoutDashboard,
+    items: [
+      { id: 'overview', name: 'Overview', path: '/dashboard', icon: LayoutDashboard },
+      { id: 'my-projects', name: 'My Research Projects', path: '/projects', icon: FolderKanban },
+      { id: 'literature-review', name: 'Literature Review', path: '/literature', icon: BookOpen },
+      {
+        id: 'reference-manager',
+        name: 'Reference Manager',
+        path: '/reference-manager',
+        icon: BookOpenCheck,
+        badge: (ctx) => (ctx.citationsList.length > 0 ? ctx.citationsList.length : undefined)
+      },
+      { id: 'statistical-analysis', name: 'Statistical Analysis', path: '/statistical-analysis', icon: Activity },
+      { id: 'pdf-research-chat', name: 'PDF Research Chat', path: '/pdf-chat', icon: FileText },
+      { id: 'systematic-reviews', name: 'Systematic Reviews', path: '/systematic-reviews', icon: Layers },
+      { id: 'journal-submission', name: 'Journal Submission', path: '/journal-submission', icon: Send },
+      { id: 'research-collaboration', name: 'Research Collaboration', path: '/collaboration', icon: Users }
+    ]
+  },
+  {
+    id: 'authoring-integrity',
+    title: 'Authoring & Integrity',
+    path: '/studio',
     icon: WandSparkles,
     items: [
       { id: 'writing-studio', name: 'Writing Studio', path: '/studio', icon: WandSparkles },
@@ -183,48 +226,18 @@ export const NAV_GROUPS: NavGroupConfig[] = [
       { id: 'summarization-tool', name: 'Summarization Tool', path: '/summarize', icon: FileText },
       { id: 'grammar-fluency', name: 'Grammar & Fluency', path: '/grammar-fluency', icon: Sparkles },
       { id: 'tone-rewriting', name: 'Tone & Rewriting', path: '/tone-rewriting', icon: Sliders },
+      { id: 'research-integrity', name: 'Research Integrity', path: '/integrity', icon: ShieldCheck },
       { id: 'plagiarism-similarity', name: 'Plagiarism & Similarity', path: '/plagiarism-similarity', icon: FileCheck2 },
-      { id: 'ai-authorship-indicators', name: 'AI-Authorship Indicators', path: '/ai-authorship', icon: ScanText }
+      { id: 'ai-authorship-indicators', name: 'AI-Authorship Indicators', path: '/ai-authorship', icon: ScanText },
+      { id: 'document-studio', name: 'Document Studio', path: '/document-studio', icon: Download }
     ]
   },
   {
-    id: 'research-integrity',
-    title: 'Research Integrity',
-    path: '/integrity',
-    icon: ShieldCheck,
+    id: 'platform-governance',
+    title: 'Platform & History',
+    path: '/history',
+    icon: History,
     items: [
-      { id: 'source-verification', name: 'Source Verification', path: '/source-verification', icon: BookOpenCheck },
-      {
-        id: 'reference-manager',
-        name: 'Reference Manager',
-        path: '/reference-manager',
-        icon: BookOpen,
-        badge: (ctx) => (ctx.citationsList.length > 0 ? ctx.citationsList.length : undefined)
-      },
-      { id: 'citation-formatter', name: 'Citation Formatter', path: '/citation-formatter', icon: BookOpenCheck },
-      { id: 'statistical-checker', name: 'Statistical Checker', path: '/statistical-checker', icon: Activity },
-      { id: 'integrity-reports', name: 'Integrity Reports', path: '/integrity-reports', icon: ShieldCheck }
-    ]
-  },
-  {
-    id: 'publishing',
-    title: 'Publishing',
-    path: '/publishing',
-    icon: BookOpen,
-    items: [
-      { id: 'journal-readiness', name: 'Journal Readiness', path: '/journal-readiness', icon: FileCheck2 },
-      { id: 'latex-export-studio', name: 'LaTeX Export Studio', path: '/latex-export', icon: BookOpen },
-      { id: 'docx-pdf-export', name: 'DOCX / PDF Export', path: '/docx-pdf-export', icon: Download }
-    ]
-  },
-  {
-    id: 'management',
-    title: 'Management',
-    path: '/management',
-    icon: LayoutDashboard,
-    items: [
-      { id: 'dashboard', name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
-      { id: 'projects', name: 'Projects', path: '/projects', icon: FolderKanban },
       {
         id: 'revision-history',
         name: 'Revision History',
@@ -253,7 +266,7 @@ export const NAV_GROUPS: NavGroupConfig[] = [
 
 export function getSectionFromPath(pathname: string): string {
   const clean = (pathname || '').toLowerCase().replace(/\/+$/, '') || '/';
-  if (clean === '/' || clean === '/dashboard') return 'Dashboard';
+  if (clean === '/' || clean === '/dashboard') return 'Overview';
   for (const group of NAV_GROUPS) {
     for (const item of group.items) {
       if (item.path.toLowerCase() === clean) {
@@ -262,17 +275,35 @@ export function getSectionFromPath(pathname: string): string {
     }
   }
   if (clean === '/studio') return 'Writing Studio';
+  if (clean === '/projects') return 'My Research Projects';
+  if (clean === '/literature') return 'Literature Review';
   if (clean === '/citations' || clean === '/reference-manager') return 'Reference Manager';
+  if (clean === '/statistical-analysis') return 'Statistical Analysis';
+  if (clean === '/pdf-chat') return 'PDF Research Chat';
+  if (clean === '/systematic-reviews') return 'Systematic Reviews';
+  if (clean === '/journal-submission') return 'Journal Submission';
+  if (clean === '/collaboration') return 'Research Collaboration';
+  if (clean === '/integrity') return 'Research Integrity';
+  if (clean === '/document-studio') return 'Document Studio';
   if (clean === '/humanizer') return 'AI Text Humanizer';
   if (clean === '/paraphrase') return 'Paraphrasing Tool';
   if (clean === '/originality' || clean === '/plagiarism-similarity') return 'Plagiarism & Similarity';
   if (clean === '/history') return 'Revision History';
   if (clean === '/settings') return 'Settings';
-  return 'Dashboard';
+  return 'Overview';
 }
 
 export function getPathForSection(sectionName: string): string {
-  if (sectionName === 'Dashboard') return '/dashboard';
+  if (sectionName === 'Overview' || sectionName === 'Dashboard') return '/dashboard';
+  if (sectionName === 'My Research Projects' || sectionName === 'Projects') return '/projects';
+  if (sectionName === 'Literature Review') return '/literature';
+  if (sectionName === 'Statistical Analysis' || sectionName === 'Statistical Checker') return '/statistical-analysis';
+  if (sectionName === 'PDF Research Chat') return '/pdf-chat';
+  if (sectionName === 'Systematic Reviews') return '/systematic-reviews';
+  if (sectionName === 'Journal Submission' || sectionName === 'Journal Readiness') return '/journal-submission';
+  if (sectionName === 'Research Collaboration') return '/collaboration';
+  if (sectionName === 'Research Integrity' || sectionName === 'Integrity Reports') return '/integrity';
+  if (sectionName === 'Document Studio' || sectionName === 'DOCX / PDF Export' || sectionName === 'LaTeX Export Studio') return '/document-studio';
   if (sectionName === 'Originality Review') return '/plagiarism-similarity';
   if (sectionName === 'AI Assessment') return '/ai-authorship';
   if (sectionName === 'Citation Assistant') return '/reference-manager';
@@ -293,9 +324,13 @@ export function getGroupIdForSection(sectionName: string): string {
       return group.id;
     }
   }
-  if (sectionName === 'Originality Review' || sectionName === 'AI Assessment') return 'writing-analysis';
-  if (sectionName === 'Citation Assistant' || sectionName === 'Citation Checker') return 'research-integrity';
-  return 'management';
+  if (['Overview', 'My Research Projects', 'Literature Review', 'Reference Manager', 'Statistical Analysis', 'PDF Research Chat', 'Systematic Reviews', 'Journal Submission', 'Research Collaboration'].includes(sectionName)) {
+    return 'workspace';
+  }
+  if (['Writing Studio', 'Paraphrasing Tool', 'AI Text Humanizer', 'Summarization Tool', 'Grammar & Fluency', 'Tone & Rewriting', 'Research Integrity', 'Plagiarism & Similarity', 'AI-Authorship Indicators', 'Document Studio', 'Originality Review', 'AI Assessment'].includes(sectionName)) {
+    return 'authoring-integrity';
+  }
+  return 'platform-governance';
 }
 
 interface TurnstileWidgetProps {
@@ -534,10 +569,19 @@ export default function App() {
 
   // Core Data
   const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [revisions, setRevisions] = useState<Revision[]>([]);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [citationsList, setCitationsList] = useState<CitationItem[]>([]);
   const [usage, setUsage] = useState<any>(null);
+
+  useEffect(() => {
+    if (projects.length > 0) {
+      const savedId = typeof window !== 'undefined' ? localStorage.getItem('rp_active_project_id') : null;
+      const found = projects.find(p => p._id === savedId) || projects[0];
+      setActiveProject(found);
+    }
+  }, [projects]);
 
   // Active Document State
   const [activeDoc, setActiveDoc] = useState<DocumentItem | null>(null);
@@ -1479,6 +1523,53 @@ export default function App() {
               <span>Workspace</span>
               <span className="slash">/</span>
               <strong>{section}</strong>
+            </div>
+
+            {/* Global Active Project Context Selector */}
+            <div className="topbar-project-context" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '8px' }}>
+              <span className="slash" style={{ color: 'var(--muted)' }}>/</span>
+              <FolderKanban size={14} style={{ color: 'var(--primary)' }} />
+              <select
+                value={activeProject?._id || ''}
+                onChange={(e) => {
+                  const found = projects.find(p => p._id === e.target.value);
+                  setActiveProject(found || null);
+                  if (found) localStorage.setItem('rp_active_project_id', found._id);
+                  else localStorage.removeItem('rp_active_project_id');
+                }}
+                style={{
+                  background: 'var(--surface2, #f8fafc)',
+                  border: '1px solid var(--border-color, #cbd5e1)',
+                  borderRadius: '6px',
+                  padding: '3px 8px',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: 'var(--text-main, #0f172a)',
+                  cursor: 'pointer',
+                  maxWidth: '220px'
+                }}
+                title="Select active project context"
+              >
+                <option value="">(All Projects)</option>
+                {projects.map(p => (
+                  <option key={p._id} value={p._id}>
+                    {p.title} ({p.workflowStage || 'literature'} · {p.completionPercentage || 0}%)
+                  </option>
+                ))}
+              </select>
+              {activeProject && (
+                <span style={{
+                  fontSize: '10px',
+                  padding: '2px 8px',
+                  borderRadius: '10px',
+                  background: 'var(--primary-subtle, #eff6ff)',
+                  color: 'var(--primary, #2563eb)',
+                  fontWeight: 700,
+                  textTransform: 'capitalize'
+                }}>
+                  {activeProject.workflowStage || 'literature'} ({activeProject.completionPercentage || 0}%)
+                </span>
+              )}
             </div>
           </div>
           <div className="top-actions">
@@ -3215,15 +3306,107 @@ export default function App() {
           )}
 
           {/* DASHBOARD VIEW */}
-          {section === 'Dashboard' && (
+          {(section === 'Overview' || section === 'Dashboard') && (
             <Dashboard
               user={user}
               usage={usage}
               projects={projects}
+              activeProject={activeProject}
               revisions={revisions}
               documents={documents}
               setSection={setSection}
               setShowProjectForm={setShowProjectForm}
+            />
+          )}
+
+          {/* LITERATURE REVIEW STUDIO */}
+          {section === 'Literature Review' && (
+            <LiteratureReview
+              token={token}
+              activeProject={activeProject}
+              setSection={setSection}
+              setMessage={setMessage}
+              setError={setError}
+              onSendToStudio={(text: string) => {
+                setText(prev => `${prev}\n\n${text}`);
+                setSection('Writing Studio');
+                setMessage('Literature synthesis added to active manuscript.');
+              }}
+            />
+          )}
+
+          {/* STATISTICAL ANALYSIS STUDIO */}
+          {(section === 'Statistical Analysis' || section === 'Statistical Checker') && (
+            <StatisticalAnalysis
+              token={token}
+              activeProject={activeProject}
+              setSection={setSection}
+              setMessage={setMessage}
+              setError={setError}
+              onSendToStudio={(narrative: string) => {
+                setText(prev => `${prev}\n\n${narrative}`);
+                setSection('Writing Studio');
+                setMessage('Statistical results narrative inserted into manuscript.');
+              }}
+            />
+          )}
+
+          {/* PDF RESEARCH CHAT */}
+          {section === 'PDF Research Chat' && (
+            <PdfResearchChat
+              token={token}
+              activeProject={activeProject}
+              setSection={setSection}
+              setMessage={setMessage}
+              setError={setError}
+            />
+          )}
+
+          {/* SYSTEMATIC REVIEWS (PRISMA 2020) */}
+          {section === 'Systematic Reviews' && (
+            <SystematicReviews
+              token={token}
+              activeProject={activeProject}
+              setSection={setSection}
+              setMessage={setMessage}
+              setError={setError}
+            />
+          )}
+
+          {/* JOURNAL SUBMISSION STUDIO */}
+          {(section === 'Journal Submission' || section === 'Journal Readiness') && (
+            <JournalSubmission
+              token={token}
+              activeProject={activeProject}
+              setSection={setSection}
+              setMessage={setMessage}
+              setError={setError}
+            />
+          )}
+
+          {/* RESEARCH COLLABORATION */}
+          {section === 'Research Collaboration' && (
+            <ResearchCollaboration
+              token={token}
+              activeProject={activeProject}
+              setSection={setSection}
+              setMessage={setMessage}
+              setError={setError}
+            />
+          )}
+
+          {/* DOCUMENT STUDIO */}
+          {(section === 'Document Studio' || section === 'DOCX / PDF Export') && (
+            <DocumentStudio
+              token={token}
+              activeDoc={activeDoc}
+              documents={documents}
+              citationsList={citationsList}
+              setSection={setSection}
+              setMessage={setMessage}
+              setError={setError}
+              onExportDocx={handleExportDocx}
+              onImportChange={handleImportDocx}
             />
           )}
 
@@ -3416,7 +3599,7 @@ export default function App() {
           )}
 
           {/* PROJECTS VIEW */}
-          {section === 'Projects' && (
+          {(section === 'My Research Projects' || section === 'Projects') && (
             <Projects
               projects={projects}
               showForm={showProjectForm}
@@ -3560,17 +3743,101 @@ export default function App() {
   );
 }
 
-function Dashboard({ user, usage, projects, revisions, documents, setSection, setShowProjectForm }: any) {
+function Dashboard({ user, usage, projects, activeProject, revisions, documents, setSection, setShowProjectForm }: any) {
   return (
     <section className="dashboard">
       <div className="welcome-row">
         <div>
-          <p className="eyebrow">YOUR RESEARCH, IN FOCUS</p>
-          <h1>Good work starts with <span>clarity.</span></h1>
-          <p className="muted">A focused workspace for stronger academic writing and responsible research.</p>
+          <p className="eyebrow">RESEARCHPROOF AI 1.0 · ALL-IN-ONE RESEARCH COMMAND CENTER</p>
+          <h1>Good science starts with <span>rigor & clarity.</span></h1>
+          <p className="muted">An interconnected operating system uniting literature review, statistical analysis, PDF research chat, and academic writing.</p>
         </div>
-        <button className="primary" onClick={() => setSection('Writing Studio')}><Plus size={17} /> Open Writing Studio</button>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button className="secondary" onClick={() => setSection('My Research Projects')}>
+            <FolderKanban size={16} /> All Projects
+          </button>
+          <button className="primary" onClick={() => setSection('Writing Studio')}>
+            <Plus size={16} /> Open Writing Studio
+          </button>
+        </div>
       </div>
+
+      {/* Active Project Banner & Workflow Stage */}
+      {activeProject && (
+        <div style={{
+          background: 'var(--card-bg, #ffffff)',
+          border: '1px solid var(--border-color, #e2e8f0)',
+          borderRadius: '12px',
+          padding: '20px',
+          marginBottom: '20px'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '14px' }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                <span style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--primary)', fontWeight: 700 }}>
+                  Active Project Context
+                </span>
+                <span style={{
+                  fontSize: '10px',
+                  padding: '2px 8px',
+                  borderRadius: '10px',
+                  background: 'var(--primary-subtle, #eff6ff)',
+                  color: 'var(--primary, #2563eb)',
+                  fontWeight: 700,
+                  textTransform: 'capitalize'
+                }}>
+                  {activeProject.workflowStage || 'literature'} stage
+                </span>
+              </div>
+              <h2 style={{ fontSize: '18px', fontWeight: 800, margin: 0 }}>{activeProject.title}</h2>
+              <small style={{ color: 'var(--muted)' }}>{activeProject.discipline || 'General Academic'} · {activeProject.documentType || 'Manuscript'}</small>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: '11px', color: 'var(--muted)', fontWeight: 600 }}>Workflow Completion</div>
+                <div style={{ fontSize: '18px', fontWeight: 800, color: 'var(--primary)' }}>{activeProject.completionPercentage || 0}%</div>
+              </div>
+              <button className="primary small" onClick={() => setSection('My Research Projects')}>
+                Manage Project ↗
+              </button>
+            </div>
+          </div>
+
+          {/* Workflow Progress Bar */}
+          <div style={{ height: '6px', background: 'var(--surface2, #f1f5f9)', borderRadius: '3px', overflow: 'hidden', marginBottom: '16px' }}>
+            <div style={{
+              height: '100%',
+              width: `${Math.max(activeProject.completionPercentage || 0, 10)}%`,
+              background: 'linear-gradient(90deg, #3b82f6, #10b981)',
+              transition: 'width 0.3s'
+            }} />
+          </div>
+
+          {/* Quick Tools Jump Bar */}
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', paddingTop: '10px', borderTop: '1px solid var(--border-color, #f1f5f9)' }}>
+            <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--muted)', alignSelf: 'center' }}>Quick Tools:</span>
+            <button className="filter-btn" onClick={() => setSection('Literature Review')}>
+              <BookOpen size={13} /> Review Literature
+            </button>
+            <button className="filter-btn" onClick={() => setSection('Statistical Analysis')}>
+              <Activity size={13} /> Analyze Data
+            </button>
+            <button className="filter-btn" onClick={() => setSection('PDF Research Chat')}>
+              <FileText size={13} /> Chat with PDF
+            </button>
+            <button className="filter-btn" onClick={() => setSection('Reference Manager')}>
+              <BookOpenCheck size={13} /> Manage Citations
+            </button>
+            <button className="filter-btn" onClick={() => setSection('Systematic Reviews')}>
+              <Layers size={13} /> Systematic Review
+            </button>
+            <button className="filter-btn" onClick={() => setSection('Journal Submission')}>
+              <Send size={13} /> Journal Submission
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="stats-grid">
         <Stat icon={<FileText />} label="Manuscripts & Docs" value={documents?.length || 0} note="Active studio documents" />
@@ -3597,18 +3864,21 @@ function Dashboard({ user, usage, projects, revisions, documents, setSection, se
 
       <div className="section-heading">
         <div>
-          <h2>Phase 2 Academic Toolkit</h2>
-          <p>Scientific writing tools built for research rigor.</p>
+          <h2>8 Unified Core Modules</h2>
+          <p>Scientific research, numerical statistics, and publication tools built for rigorous scholarship.</p>
         </div>
-        <span className="subtle-tag"><ShieldCheck size={14} /> Meaning-preserving pipeline</span>
+        <span className="subtle-tag"><ShieldCheck size={14} /> Full 1.0 Production Architecture</span>
       </div>
 
       <div className="tool-grid">
+        <ToolCard icon={<BookOpen />} tone="blue" title="Literature Review Studio" description="Extract methodologies, sample sizes, and empirical findings into structured matrices with synthesis." onClick={() => setSection('Literature Review')} action="Open Literature Studio" />
+        <ToolCard icon={<Activity />} tone="green" title="Statistical Analysis Studio" description="Deterministic numerical compute (t-Test, ANOVA, Regression, Correlation) with exact APA 7 reports." onClick={() => setSection('Statistical Analysis')} action="Open Statistics" />
+        <ToolCard icon={<FileText />} tone="purple" title="PDF Research Chat" description="Interactive manuscript Q&A strictly grounded in extracted pages. Zero hallucinations." onClick={() => setSection('PDF Research Chat')} action="Open PDF Chat" />
+        <ToolCard icon={<Layers />} tone="amber" title="Systematic Reviews (PRISMA)" description="PICOS protocol definitions, candidate study screening queues, and PRISMA 2020 flow metrics." onClick={() => setSection('Systematic Reviews')} action="Open PRISMA Review" />
+        <ToolCard icon={<Send />} tone="rose" title="Journal Submission Studio" description="Journal guidelines checklist, editorial cover letter generator, and submission bundle exporter." onClick={() => setSection('Journal Submission')} action="Open Submission Studio" />
+        <ToolCard icon={<Users />} tone="blue" title="Research Collaboration" description="Multi-user role management (Owner, Editor, Reviewer, Viewer) and project task Kanban." onClick={() => setSection('Research Collaboration')} action="Open Collaboration" />
         <ToolCard icon={<FileCheck2 />} tone="rose" title="TextGuard Plagiarism Studio" description="Interactive matched text scan, visual originality gauge, Crossref DOIs & 1-click Humanizer bridge." onClick={() => setSection('Plagiarism & Similarity')} action="Launch TextGuard" />
-        <ToolCard icon={<RefreshCw />} tone="purple" title="Paraphrasing Tool" description="Rewrite text across 7 QuillBot modes with synonym intensity control." onClick={() => setSection('Paraphrasing Tool')} action="Open Paraphraser" />
-        <ToolCard icon={<ShieldCheck />} tone="green" title="AI Text Humanizer" description="Transform AI text into authentic human cadence that bypasses AI detectors." onClick={() => setSection('AI Text Humanizer')} action="Open Humanizer" />
-        <ToolCard icon={<WandSparkles />} tone="blue" title="Academic Writing Studio" description="Full-featured 3-column workspace with live diffs and DOCX import/export." onClick={() => setSection('Writing Studio')} action="Open studio" />
-        <ToolCard icon={<BookOpenCheck />} tone="amber" title="Citation Assistant" description="DOI lookup via Crossref, APA/MLA/IEEE formatting, and integrity audits." onClick={() => setSection('Citation Assistant')} action="Open citations" />
+        <ToolCard icon={<WandSparkles />} tone="blue" title="Academic Writing Studio" description="Full-featured 3-column workspace with live diffs and DOCX import/export." onClick={() => setSection('Writing Studio')} action="Open Studio" />
       </div>
 
       <div className="bottom-grid">
