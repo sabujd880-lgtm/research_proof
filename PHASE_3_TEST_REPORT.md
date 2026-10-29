@@ -51,3 +51,4 @@
    - Tested `POST /projects/:id/archive`: sets `status: 'archived'` with timestamp.
    - Tested `POST /projects/:id/restore`: resets `status: 'active'` and clears timestamp.
    - Tested `DELETE /projects/:id`: soft delete verified (`status: 'deleted'`).
+

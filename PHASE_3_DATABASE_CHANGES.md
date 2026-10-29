@@ -84,3 +84,4 @@ To guarantee seamless offline development, continuous integration, and test suit
 2. **Deterministic Progress Sync**: Derived via `syncProjectProgress(projectId)`:
    $$\text{progress} = \begin{cases} 0 & \text{if } \text{totalTasks} = 0 \\ \text{round}\left(\frac{\text{completedTasks}}{\text{totalTasks}} \times 100\right) & \text{otherwise} \end{cases}$$
 3. **Legacy Schema Tolerance**: Historical projects without `ownerId` automatically fall back to `userId` via Mongoose default getter functions.
+

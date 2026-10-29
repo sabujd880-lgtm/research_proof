@@ -201,3 +201,4 @@ Deletes a task and recalculates project progress.
 
 ### `GET /api/v1/projects/:id/activity`
 Aggregates revisions, documents, tasks, and audit logs for the specific project into a unified chronological feed.
+

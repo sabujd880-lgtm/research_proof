@@ -18,6 +18,7 @@ import SystematicReviews from './modules/SystematicReviews';
 import JournalSubmission from './modules/JournalSubmission';
 import ResearchCollaboration from './modules/ResearchCollaboration';
 import DocumentStudio from './modules/DocumentStudio';
+import ReferenceManager from './modules/ReferenceManager';
 
 function resolveApiUrl() {
   const envUrl = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '');
@@ -3486,22 +3487,18 @@ export default function App() {
             />
           )}
 
-          {/* CITATION ASSISTANT VIEW */}
+          {/* REFERENCE & CITATION MANAGER (PHASE 4) */}
           {(section === 'Citation Assistant' || section === 'Reference Manager') && (
-            <CitationAssistantPage
-              citations={citationsList}
-              lookupDoiInput={lookupDoiInput}
-              setLookupDoiInput={setLookupDoiInput}
-              handleLookupDoi={handleLookupDoi}
-              lookupResult={lookupResult}
-              citationFormatStyle={citationFormatStyle}
-              setCitationFormatStyle={setCitationFormatStyle}
-              handleAddCitationToLibrary={handleAddCitationToLibrary}
-              busy={busy}
-              onDeleteCitation={async (id: string) => {
-                await request(`/citations/${id}`, token, undefined, 'DELETE');
-                setCitationsList(citationsList.filter(c => c._id !== id));
-                setMessage('Citation removed from library.');
+            <ReferenceManager
+              token={token}
+              activeProject={activeProject}
+              setSection={setSection}
+              setMessage={setMessage}
+              setError={setError}
+              onRefreshCitations={() => {
+                request('/citations', token).then(c => {
+                  if (Array.isArray(c)) setCitationsList(c);
+                }).catch(() => {});
               }}
             />
           )}

@@ -42,6 +42,8 @@ import {
   AuditEvent,
   UsageRecord,
   Citation,
+  Reference,
+  ReferenceCollection,
   DoiCache,
   UsageEvent,
   DailyUsageAggregate,
@@ -56,10 +58,18 @@ import {
   StudyRecord,
   JournalSubmission
 } from './models.js';
+import {
+  searchScholarlyReferences,
+  detectReferenceDuplicates,
+  mergeReferenceRecords,
+  formatCslCitation,
+  generateBibliography,
+  normalizeAuthorObject
+} from './referenceService.js';
 import { requireAuth, requireAdmin } from './middleware.js';
 import { assessWriting, findRepeatedPhrases, assessOriginality, checkCitations, humanizeWithAI, ACADEMIC_REWRITE_MODES, assessAiAuthorship, assessPlagiarismAndSimilarity } from './services.js';
 import { auditMeaningPreservation, validateEmpiricalFacts, compareManuscriptVersions } from './meaningChecker.js';
-import { lookupDoiMetadata, formatApa, formatMla, formatIeee, formatInTextCitation, validateDocumentCitations, normalizeDoi } from './citationService.js';
+import { lookupDoiMetadata, isValidDoi, formatApa, formatMla, formatIeee, formatInTextCitation, validateDocumentCitations, normalizeDoi } from './citationService.js';
 import { importDocxFromBuffer, exportDocxFromText, extractManuscriptMetadata } from './docxService.js';
 import { recordUsageEvent, getAnalyticsOverview, getFeatureUsageBreakdown, getErrorTrends } from './analyticsService.js';
 import { generateIntegrityReport, exportIntegrityReportDocx } from './integrityService.js';
@@ -304,6 +314,7 @@ const memDocuments = new Map();
 const memDocumentVersions = new Map();
 const memRevisions = new Map();
 const memCitations = new Map();
+const memReferenceCollections = new Map();
 const memReports = new Map();
 const memJobs = new Map();
 const memAuditEvents = [];
@@ -326,6 +337,7 @@ app.locals.memDocuments = memDocuments;
 app.locals.memDocumentVersions = memDocumentVersions;
 app.locals.memRevisions = memRevisions;
 app.locals.memCitations = memCitations;
+app.locals.memReferenceCollections = memReferenceCollections;
 app.locals.memReports = memReports;
 app.locals.memJobs = memJobs;
 app.locals.memAuditEvents = memAuditEvents;
@@ -2742,52 +2754,486 @@ apiRouter.get('/projects/:id/activity', requireAuth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Reference & Citation Manager Endpoints (Module 2)
-apiRouter.post('/references/import', requireAuth, upload.single('file'), async (req, res, next) => {
+// ============================================================================
+// Phase 4: Complete Reference & Citation Management Engine
+// ============================================================================
+
+// 1. Query References (Filtered, Sorted, Paginated)
+apiRouter.get('/references', requireAuth, async (req, res, next) => {
   try {
-    const rawText = req.file ? req.file.buffer.toString('utf8') : (req.body?.text || '');
-    const format = (req.body?.format || (req.file?.originalname?.endsWith('.ris') ? 'ris' : 'bibtex')).toLowerCase();
-    const projectId = req.body?.projectId || null;
+    const {
+      projectId,
+      collectionId,
+      publicationType,
+      type,
+      metadataStatus,
+      status,
+      favorite,
+      q,
+      search,
+      sort = 'updatedAt',
+      order = 'desc',
+      page = 1,
+      limit = 50,
+      paginated
+    } = req.query;
 
-    if (!rawText.trim()) return res.status(400).json({ error: 'No BibTeX or RIS content provided for import.' });
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    const searchQuery = (q || search || '').trim().toLowerCase();
+    const targetType = publicationType || type;
+    const targetStatus = metadataStatus || status;
+    const isFav = favorite === 'true' ? true : (favorite === 'false' ? false : null);
 
-    const parsed = format === 'ris' ? parseRis(rawText) : parseBibtex(rawText);
-    if (parsed.length === 0) return res.status(400).json({ error: 'Could not extract valid citations from provided input.' });
-
-    // Fetch existing citations to detect duplicates
-    let existing = [];
     if (isDbConnected()) {
-      existing = await Citation.find({ ownerId: req.user.id }).lean();
-    } else {
-      existing = [...memCitations.values()].filter(c => c.ownerId === req.user.id);
+      const filter = {
+        ownerId: req.user.id,
+        deletedAt: null
+      };
+
+      if (projectId && projectId !== 'all') {
+        filter.projectId = projectId;
+      }
+      if (collectionId && collectionId !== 'all') {
+        filter.collectionIds = collectionId;
+      }
+      if (targetType && targetType !== 'all') {
+        filter.publicationType = targetType;
+      }
+      if (targetStatus && targetStatus !== 'all') {
+        filter.metadataStatus = targetStatus;
+      }
+      if (isFav !== null) {
+        filter.isFavorite = isFav;
+      }
+      if (searchQuery) {
+        filter.$or = [
+          { title: { $regex: searchQuery, $options: 'i' } },
+          { 'authors.name': { $regex: searchQuery, $options: 'i' } },
+          { 'authors.family': { $regex: searchQuery, $options: 'i' } },
+          { journalTitle: { $regex: searchQuery, $options: 'i' } },
+          { journal: { $regex: searchQuery, $options: 'i' } },
+          { doi: { $regex: searchQuery, $options: 'i' } },
+          { keywords: { $regex: searchQuery, $options: 'i' } }
+        ];
+      }
+
+      const sortDir = order === 'asc' ? 1 : -1;
+      const sortObj = {};
+      if (sort === 'year') sortObj.publicationYear = sortDir;
+      else if (sort === 'title') sortObj.title = sortDir;
+      else sortObj.updatedAt = sortDir;
+
+      const [totalCount, references] = await Promise.all([
+        Citation.countDocuments(filter),
+        Citation.find(filter)
+          .sort(sortObj)
+          .skip((pageNum - 1) * limitNum)
+          .limit(limitNum)
+          .lean()
+      ]);
+
+      const totalPages = Math.ceil(totalCount / limitNum) || 1;
+      res.setHeader('X-Total-Count', totalCount);
+      res.setHeader('X-Page', pageNum);
+      res.setHeader('X-Total-Pages', totalPages);
+
+      if (paginated === 'true') {
+        return res.json({ references, pagination: { page: pageNum, limit: limitNum, totalCount, totalPages } });
+      }
+      return res.json(references);
     }
 
-    const { unique, duplicates } = detectDuplicates(parsed, existing);
+    // In-memory fallback
+    let list = [...memCitations.values()].filter(c => {
+      if (c.ownerId !== req.user.id) return false;
+      if (c.deletedAt) return false;
+      if (projectId && projectId !== 'all' && c.projectId !== projectId) return false;
+      if (collectionId && collectionId !== 'all' && (!c.collectionIds || !c.collectionIds.includes(collectionId))) return false;
+      if (targetType && targetType !== 'all' && (c.publicationType || 'journal-article') !== targetType) return false;
+      if (targetStatus && targetStatus !== 'all' && (c.metadataStatus || 'unverified') !== targetStatus) return false;
+      if (isFav !== null && Boolean(c.isFavorite) !== isFav) return false;
 
-    // Persist unique citations
+      if (searchQuery) {
+        const titleMatch = (c.title || '').toLowerCase().includes(searchQuery);
+        const doiMatch = (c.doi || '').toLowerCase().includes(searchQuery);
+        const journalMatch = (c.journalTitle || c.journal || '').toLowerCase().includes(searchQuery);
+        const authorMatch = Array.isArray(c.authors) && c.authors.some(a => (a.name || a.family || '').toLowerCase().includes(searchQuery));
+        const kwMatch = Array.isArray(c.keywords) && c.keywords.some(k => k.toLowerCase().includes(searchQuery));
+        if (!titleMatch && !doiMatch && !journalMatch && !authorMatch && !kwMatch) return false;
+      }
+      return true;
+    });
+
+    list.sort((a, b) => {
+      let cmp = 0;
+      if (sort === 'year') {
+        cmp = String(a.publicationYear || a.year || '').localeCompare(String(b.publicationYear || b.year || ''));
+      } else if (sort === 'title') {
+        cmp = (a.title || '').localeCompare(b.title || '');
+      } else {
+        const dateA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+        const dateB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+        cmp = dateA - dateB;
+      }
+      return order === 'asc' ? cmp : -cmp;
+    });
+
+    const totalCount = list.length;
+    const totalPages = Math.ceil(totalCount / limitNum) || 1;
+    const paginatedItems = list.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+
+    res.setHeader('X-Total-Count', totalCount);
+    res.setHeader('X-Page', pageNum);
+    res.setHeader('X-Total-Pages', totalPages);
+
+    const normalizedItems = paginatedItems.map(c => ({
+      ...c,
+      id: (c._id || c.id).toString(),
+      type: c.publicationType || c.type || 'journal-article'
+    }));
+    if (paginated === 'true') {
+      return res.json({ references: normalizedItems, pagination: { page: pageNum, limit: limitNum, totalCount, totalPages } });
+    }
+    res.json(normalizedItems);
+  } catch (e) { next(e); }
+});
+
+// 2. Lookup DOI Metadata (Supports GET and POST)
+const handleLookupDoi = async (req, res, next) => {
+  try {
+    const doi = req.body?.doi || req.query?.doi;
+    if (!doi || !doi.trim()) return res.status(400).json({ error: 'DOI is required.' });
+
+    const normalized = normalizeDoi(doi);
+    if (!isValidDoi(normalized)) {
+      return res.status(400).json({ error: `Invalid DOI format: "${doi}". Expected pattern: 10.xxxx/...` });
+    }
+
+    const metadata = await lookupDoiMetadata(normalized, isDbConnected());
+
+    let existing = null;
+    if (isDbConnected()) {
+      existing = await Citation.findOne({ ownerId: req.user.id, doi: normalized, deletedAt: null }).lean();
+    } else {
+      existing = [...memCitations.values()].find(c => c.ownerId === req.user.id && normalizeDoi(c.doi) === normalized && !c.deletedAt);
+    }
+
+    res.json({
+      doi: normalized,
+      reference: metadata,
+      metadata,
+      existsInLibrary: Boolean(existing),
+      existingId: existing?._id || null
+    });
+  } catch (e) { next(e); }
+};
+apiRouter.get('/references/lookup/doi', requireAuth, handleLookupDoi);
+apiRouter.post('/references/lookup/doi', requireAuth, handleLookupDoi);
+
+// 3. Scholarly Search (Supports GET and POST)
+const handleScholarlySearch = async (req, res, next) => {
+  try {
+    const query = req.body?.query || req.query?.q || req.query?.query;
+    const provider = req.body?.provider || req.query?.provider || 'crossref';
+    const limit = parseInt(req.body?.limit || req.query?.limit || 15, 10);
+    if (!query || !query.trim()) return res.status(400).json({ error: 'Search query is required.' });
+
+    const results = await searchScholarlyReferences(query.trim(), { provider, limit: limit || 15 });
+    res.json({ query: query.trim(), total: results.length, results });
+  } catch (e) { next(e); }
+};
+apiRouter.get('/references/search/scholarly', requireAuth, handleScholarlySearch);
+apiRouter.post('/references/search/scholarly', requireAuth, handleScholarlySearch);
+
+// 4. Create Reference Manually
+apiRouter.post('/references', requireAuth, async (req, res, next) => {
+  try {
+    const {
+      title,
+      subtitle = '',
+      authors = [],
+      editors = [],
+      publicationYear = '',
+      publicationDate = '',
+      publicationType = req.body?.publicationType || req.body?.type || 'journal-article',
+      journalTitle = '',
+      bookTitle = '',
+      publisher = '',
+      volume = '',
+      issue = '',
+      pages = '',
+      articleNumber = '',
+      doi = '',
+      isbn = '',
+      issn = '',
+      url = '',
+      abstract = '',
+      keywords = [],
+      language = 'en',
+      citationKey = '',
+      sourceProvider = 'manual',
+      metadataStatus = 'unverified',
+      tags = [],
+      collectionIds = [],
+      isFavorite = false,
+      notes = '',
+      projectId = null
+    } = req.body || {};
+
+    if (!title || !title.trim()) return res.status(400).json({ error: 'Reference title is required.' });
+
+    const cleanDoi = normalizeDoi(doi);
+    const normalizedAuthors = Array.isArray(authors) ? authors.map(normalizeAuthorObject) : [];
+    const normalizedEditors = Array.isArray(editors) ? editors.map(normalizeAuthorObject) : [];
+    const year = publicationYear || (publicationDate ? publicationDate.slice(0, 4) : '');
+
+    const newRefData = {
+      ownerId: req.user.id,
+      projectId: projectId || null,
+      title: title.trim(),
+      subtitle: subtitle.trim(),
+      authors: normalizedAuthors.length > 0 ? normalizedAuthors : [{ name: 'Unknown Author' }],
+      editors: normalizedEditors,
+      publicationYear: year,
+      publicationDate,
+      year,
+      publicationType,
+      type: publicationType,
+      journalTitle: journalTitle.trim() || req.body?.journal || '',
+      journal: journalTitle.trim() || req.body?.journal || '',
+      bookTitle: bookTitle.trim(),
+      publisher: publisher.trim(),
+      volume: volume.trim(),
+      issue: issue.trim(),
+      pages: pages.trim(),
+      articleNumber: articleNumber.trim(),
+      doi: cleanDoi,
+      normalizedDoi: cleanDoi,
+      isbn: isbn.trim(),
+      issn: issn.trim(),
+      url: url.trim() || (cleanDoi ? `https://doi.org/${cleanDoi}` : ''),
+      abstract: abstract.trim(),
+      keywords: Array.isArray(keywords) ? keywords : [],
+      language,
+      citationKey: citationKey.trim(),
+      sourceProvider,
+      metadataSource: sourceProvider,
+      metadataStatus: cleanDoi ? 'verified' : metadataStatus,
+      verificationStatus: cleanDoi ? 'verified' : 'unverified',
+      metadataLastVerifiedAt: cleanDoi ? new Date() : null,
+      retractionStatus: 'unknown',
+      tags: Array.isArray(tags) ? tags : [],
+      collectionIds: Array.isArray(collectionIds) ? collectionIds : [],
+      isFavorite: Boolean(isFavorite),
+      notes: notes.trim(),
+      deletedAt: null
+    };
+
+    if (isDbConnected()) {
+      const created = await Citation.create(newRefData);
+      const payload = created.toObject ? created.toObject() : created;
+      payload.id = payload._id.toString();
+      await recordAudit(req.user.id, 'REFERENCE_CREATED', 'Reference', created._id, { title: created.title, doi: created.doi });
+      return res.status(201).json({ ...payload, reference: payload });
+    }
+
+    const newId = new mongoose.Types.ObjectId().toString();
+    const inMemRef = { _id: newId, id: newId, ...newRefData, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    memCitations.set(newId, inMemRef);
+    await recordAudit(req.user.id, 'REFERENCE_CREATED', 'Reference', newId, { title: inMemRef.title, doi: inMemRef.doi });
+    res.status(201).json({ ...inMemRef, reference: inMemRef });
+  } catch (e) { next(e); }
+});
+
+// 5. Import BibTeX
+apiRouter.post('/references/import/bibtex', requireAuth, upload.single('file'), async (req, res, next) => {
+  try {
+    const rawText = req.file ? req.file.buffer.toString('utf8') : (req.body?.text || req.body?.bibtex || req.body?.content || '');
+    const projectId = req.body?.projectId || null;
+    const collectionId = req.body?.collectionId || null;
+
+    if (!rawText.trim()) return res.status(400).json({ error: 'No BibTeX content provided.' });
+
+    const parsed = parseBibtex(rawText);
+    if (parsed.length === 0) return res.status(400).json({ error: 'No valid BibTeX records could be parsed.' });
+
+    let existing = [];
+    if (isDbConnected()) {
+      existing = await Citation.find({ ownerId: req.user.id, deletedAt: null }).lean();
+    } else {
+      existing = [...memCitations.values()].filter(c => c.ownerId === req.user.id && !c.deletedAt);
+    }
+
+    const { unique, duplicates } = detectReferenceDuplicates(parsed, existing);
     const saved = [];
+
     for (const item of unique) {
+      const cleanDoi = normalizeDoi(item.doi);
+      const record = {
+        ownerId: req.user.id,
+        projectId: projectId || null,
+        title: item.title,
+        authors: item.authors?.map(normalizeAuthorObject) || [{ name: 'Unknown Author' }],
+        publicationYear: item.year || '',
+        year: item.year || '',
+        journalTitle: item.journal || '',
+        journal: item.journal || '',
+        volume: item.volume || '',
+        issue: item.issue || '',
+        pages: item.pages || '',
+        publisher: item.publisher || '',
+        doi: cleanDoi,
+        normalizedDoi: cleanDoi,
+        url: item.url || (cleanDoi ? `https://doi.org/${cleanDoi}` : ''),
+        citationKey: item.citeKey || '',
+        sourceProvider: 'bibtex',
+        metadataSource: 'bibtex',
+        metadataStatus: cleanDoi ? 'verified' : 'unverified',
+        collectionIds: collectionId ? [collectionId] : [],
+        deletedAt: null
+      };
+
       if (isDbConnected()) {
-        const doc = await Citation.create({
-          ownerId: req.user.id,
-          projectId: projectId || null,
-          doi: item.doi || '',
-          title: item.title,
-          authors: item.authors,
-          year: item.year,
-          journal: item.journal,
-          volume: item.volume,
-          issue: item.issue,
-          pages: item.pages,
-          publisher: item.publisher,
-          verificationStatus: item.doi ? 'verified' : 'unverified'
-        });
+        const doc = await Citation.create(record);
         saved.push(doc);
       } else {
         const id = new mongoose.Types.ObjectId().toString();
-        const entry = { _id: id, ownerId: req.user.id, projectId: projectId || null, ...item };
-        memCitations.set(id, entry);
-        saved.push(entry);
+        const memEntry = { _id: id, ...record, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+        memCitations.set(id, memEntry);
+        saved.push(memEntry);
+      }
+    }
+
+    res.status(saved.length > 0 ? 201 : 200).json({
+      importedCount: saved.length,
+      duplicateCount: duplicates.length,
+      references: saved,
+      imported: saved,
+      duplicates: duplicates.map(d => ({ title: d.entry.title, reason: d.reason, matchType: d.matchType }))
+    });
+  } catch (e) { next(e); }
+});
+
+// 6. Import RIS
+apiRouter.post('/references/import/ris', requireAuth, upload.single('file'), async (req, res, next) => {
+  try {
+    const rawText = req.file ? req.file.buffer.toString('utf8') : (req.body?.text || req.body?.ris || req.body?.content || '');
+    const projectId = req.body?.projectId || null;
+    const collectionId = req.body?.collectionId || null;
+
+    if (!rawText.trim()) return res.status(400).json({ error: 'No RIS content provided.' });
+
+    const parsed = parseRis(rawText);
+    if (parsed.length === 0) return res.status(400).json({ error: 'No valid RIS records could be parsed.' });
+
+    let existing = [];
+    if (isDbConnected()) {
+      existing = await Citation.find({ ownerId: req.user.id, deletedAt: null }).lean();
+    } else {
+      existing = [...memCitations.values()].filter(c => c.ownerId === req.user.id && !c.deletedAt);
+    }
+
+    const { unique, duplicates } = detectReferenceDuplicates(parsed, existing);
+    const saved = [];
+
+    for (const item of unique) {
+      const cleanDoi = normalizeDoi(item.doi);
+      const record = {
+        ownerId: req.user.id,
+        projectId: projectId || null,
+        title: item.title,
+        authors: item.authors?.map(normalizeAuthorObject) || [{ name: 'Unknown Author' }],
+        publicationYear: item.year || '',
+        year: item.year || '',
+        journalTitle: item.journal || '',
+        journal: item.journal || '',
+        volume: item.volume || '',
+        issue: item.issue || '',
+        pages: item.pages || '',
+        publisher: item.publisher || '',
+        doi: cleanDoi,
+        normalizedDoi: cleanDoi,
+        url: item.url || (cleanDoi ? `https://doi.org/${cleanDoi}` : ''),
+        sourceProvider: 'ris',
+        metadataSource: 'ris',
+        metadataStatus: cleanDoi ? 'verified' : 'unverified',
+        collectionIds: collectionId ? [collectionId] : [],
+        deletedAt: null
+      };
+
+      if (isDbConnected()) {
+        const doc = await Citation.create(record);
+        saved.push(doc);
+      } else {
+        const id = new mongoose.Types.ObjectId().toString();
+        const memEntry = { _id: id, ...record, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+        memCitations.set(id, memEntry);
+        saved.push(memEntry);
+      }
+    }
+
+    res.status(saved.length > 0 ? 201 : 200).json({
+      importedCount: saved.length,
+      duplicateCount: duplicates.length,
+      references: saved,
+      imported: saved,
+      duplicates: duplicates.map(d => ({ title: d.entry.title, reason: d.reason, matchType: d.matchType }))
+    });
+  } catch (e) { next(e); }
+});
+
+// 7. Batch Import Pre-Parsed References
+apiRouter.post('/references/import/batch', requireAuth, async (req, res, next) => {
+  try {
+    const { references = [], projectId = null, collectionId = null } = req.body || {};
+    if (!Array.isArray(references) || references.length === 0) {
+      return res.status(400).json({ error: 'No references provided for batch import.' });
+    }
+
+    let existing = [];
+    if (isDbConnected()) {
+      existing = await Citation.find({ ownerId: req.user.id, deletedAt: null }).lean();
+    } else {
+      existing = [...memCitations.values()].filter(c => c.ownerId === req.user.id && !c.deletedAt);
+    }
+
+    const { unique, duplicates } = detectReferenceDuplicates(references, existing);
+    const saved = [];
+
+    for (const item of unique) {
+      const cleanDoi = normalizeDoi(item.doi);
+      const record = {
+        ownerId: req.user.id,
+        projectId: projectId || item.projectId || null,
+        title: item.title || 'Untitled Reference',
+        authors: item.authors?.map(normalizeAuthorObject) || [{ name: 'Unknown Author' }],
+        publicationYear: item.publicationYear || item.year || '',
+        year: item.publicationYear || item.year || '',
+        journalTitle: item.journalTitle || item.journal || '',
+        journal: item.journalTitle || item.journal || '',
+        publisher: item.publisher || '',
+        volume: item.volume || '',
+        issue: item.issue || '',
+        pages: item.pages || '',
+        doi: cleanDoi,
+        normalizedDoi: cleanDoi,
+        url: item.url || (cleanDoi ? `https://doi.org/${cleanDoi}` : ''),
+        publicationType: item.publicationType || 'journal-article',
+        sourceProvider: item.sourceProvider || 'batch',
+        metadataStatus: cleanDoi ? 'verified' : (item.metadataStatus || 'unverified'),
+        collectionIds: collectionId ? [collectionId] : (item.collectionIds || []),
+        deletedAt: null
+      };
+
+      if (isDbConnected()) {
+        const doc = await Citation.create(record);
+        saved.push(doc);
+      } else {
+        const id = new mongoose.Types.ObjectId().toString();
+        const memEntry = { _id: id, ...record, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+        memCitations.set(id, memEntry);
+        saved.push(memEntry);
       }
     }
 
@@ -2795,29 +3241,183 @@ apiRouter.post('/references/import', requireAuth, upload.single('file'), async (
       importedCount: saved.length,
       duplicateCount: duplicates.length,
       imported: saved,
-      duplicates: duplicates.map(d => ({ title: d.entry.title, reason: d.reason }))
+      duplicates: duplicates.map(d => ({ title: d.entry.title, reason: d.reason, matchType: d.matchType }))
     });
   } catch (e) { next(e); }
 });
 
+// 8. Detect Duplicates Across Library
+apiRouter.get('/references/duplicates', requireAuth, async (req, res, next) => {
+  try {
+    let all = [];
+    if (isDbConnected()) {
+      all = await Citation.find({ ownerId: req.user.id, deletedAt: null }).lean();
+    } else {
+      all = [...memCitations.values()].filter(c => c.ownerId === req.user.id && !c.deletedAt);
+    }
+
+    const duplicates = [];
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        const resCheck = detectReferenceDuplicates([all[i]], [all[j]]);
+        if (resCheck.duplicates.length > 0) {
+          const d = resCheck.duplicates[0];
+          duplicates.push({
+            primary: all[j],
+            duplicate: all[i],
+            matchType: d.matchType,
+            score: d.matchScore,
+            reason: d.reason
+          });
+        }
+      }
+    }
+
+    res.json({ totalDuplicatePairs: duplicates.length, duplicatePairs: duplicates, duplicateGroups: duplicates });
+  } catch (e) { next(e); }
+});
+
+// 9. Merge Duplicates
+apiRouter.post('/references/merge', requireAuth, async (req, res, next) => {
+  try {
+    const { primaryId, secondaryId, overrides = {} } = req.body || {};
+    if (!primaryId || !secondaryId) return res.status(400).json({ error: 'primaryId and secondaryId are required.' });
+
+    let primary = null;
+    let secondary = null;
+
+    if (isDbConnected()) {
+      primary = await Citation.findOne({ _id: primaryId, ownerId: req.user.id, deletedAt: null }).lean();
+      secondary = await Citation.findOne({ _id: secondaryId, ownerId: req.user.id, deletedAt: null }).lean();
+    } else {
+      primary = memCitations.get(primaryId);
+      secondary = memCitations.get(secondaryId);
+    }
+
+    if (!primary || !secondary) return res.status(404).json({ error: 'One or both reference records not found.' });
+
+    const mergedData = mergeReferenceRecords(primary, secondary, overrides);
+
+    if (isDbConnected()) {
+      const updatedPrimary = await Citation.findByIdAndUpdate(primaryId, { $set: mergedData }, { new: true });
+      const payload = updatedPrimary.toObject ? updatedPrimary.toObject() : updatedPrimary;
+      payload.id = payload._id.toString();
+      await Citation.findByIdAndUpdate(secondaryId, {
+        $set: { deletedAt: new Date(), notes: `[Merged into ${primaryId}] ${secondary.notes || ''}` }
+      });
+      await recordAudit(req.user.id, 'REFERENCE_MERGED', 'Reference', primaryId, { secondaryId });
+      return res.json({ success: true, merged: payload, mergedReference: payload, removedId: secondaryId });
+    }
+
+    Object.assign(primary, mergedData, { updatedAt: new Date().toISOString() });
+    primary.id = primary._id ? primary._id.toString() : primary.id;
+    secondary.deletedAt = new Date().toISOString();
+    secondary.notes = `[Merged into ${primaryId}] ${secondary.notes || ''}`;
+    await recordAudit(req.user.id, 'REFERENCE_MERGED', 'Reference', primaryId, { secondaryId });
+    res.json({ success: true, merged: primary, mergedReference: primary, removedId: secondaryId });
+  } catch (e) { next(e); }
+});
+
+// 10. Format Single Reference (CSL)
+apiRouter.post('/references/format', requireAuth, async (req, res, next) => {
+  try {
+    const { reference, style = 'apa7', type = 'bibliography' } = req.body || {};
+    if (!reference) return res.status(400).json({ error: 'Reference data is required.' });
+
+    const formatted = formatCslCitation(reference, style, type);
+    res.json({ style, type, formatted, citation: formatted });
+  } catch (e) { next(e); }
+});
+
+// 11. Generate Multi-Reference Bibliography
+apiRouter.post('/references/bibliography', requireAuth, async (req, res, next) => {
+  try {
+    const { referenceIds = [], projectId = null, style = 'apa7', format = 'plaintext' } = req.body || {};
+    let references = [];
+
+    if (isDbConnected()) {
+      const filter = { ownerId: req.user.id, deletedAt: null };
+      if (Array.isArray(referenceIds) && referenceIds.length > 0) {
+        filter._id = { $in: referenceIds };
+      } else if (projectId) {
+        filter.projectId = projectId;
+      }
+      references = await Citation.find(filter).lean();
+    } else {
+      references = [...memCitations.values()].filter(c => {
+        if (c.ownerId !== req.user.id || c.deletedAt) return false;
+        if (Array.isArray(referenceIds) && referenceIds.length > 0) return referenceIds.includes(c._id);
+        if (projectId) return c.projectId === projectId;
+        return true;
+      });
+    }
+
+    if (references.length === 0) {
+      return res.status(404).json({ error: 'No references found to generate bibliography.' });
+    }
+
+    const bibliography = generateBibliography(references, style, format);
+    res.json({
+      style,
+      format,
+      count: references.length,
+      bibliography
+    });
+  } catch (e) { next(e); }
+});
+
+// 12. Export References
 apiRouter.get('/references/export', requireAuth, async (req, res, next) => {
   try {
     const format = (req.query.format || 'bibtex').toLowerCase();
     const projectId = req.query.projectId || null;
+    const collectionId = req.query.collectionId || null;
+    const ids = req.query.ids ? String(req.query.ids).split(',').filter(Boolean) : null;
 
     let citations = [];
     if (isDbConnected()) {
-      const filter = { ownerId: req.user.id };
-      if (projectId) filter.projectId = projectId;
+      const filter = { ownerId: req.user.id, deletedAt: null };
+      if (ids) filter._id = { $in: ids };
+      else {
+        if (projectId && projectId !== 'all') filter.projectId = projectId;
+        if (collectionId && collectionId !== 'all') filter.collectionIds = collectionId;
+      }
       citations = await Citation.find(filter).lean();
     } else {
-      citations = [...memCitations.values()].filter(c => c.ownerId === req.user.id && (!projectId || c.projectId === projectId));
+      citations = [...memCitations.values()].filter(c => {
+        if (c.ownerId !== req.user.id || c.deletedAt) return false;
+        if (ids) return ids.includes(c._id);
+        if (projectId && projectId !== 'all' && c.projectId !== projectId) return false;
+        if (collectionId && collectionId !== 'all' && (!c.collectionIds || !c.collectionIds.includes(collectionId))) return false;
+        return true;
+      });
     }
 
-    const exported = format === 'ris' ? exportToRis(citations) : exportToBibtex(citations);
-    const contentType = format === 'ris' ? 'application/x-research-info-systems' : 'application/x-bibtex';
-    res.setHeader('Content-Type', `${contentType}; charset=utf-8`);
-    res.setHeader('Content-Disposition', `attachment; filename="references.${format === 'ris' ? 'ris' : 'bib'}"`);
+    let exported = '';
+    let contentType = 'text/plain; charset=utf-8';
+    let fileExt = 'txt';
+
+    if (format === 'ris') {
+      exported = exportToRis(citations);
+      contentType = 'application/x-research-info-systems; charset=utf-8';
+      fileExt = 'ris';
+    } else if (format === 'html') {
+      exported = generateBibliography(citations, 'apa7', 'html');
+      contentType = 'text/html; charset=utf-8';
+      fileExt = 'html';
+    } else if (format === 'txt' || format === 'plaintext') {
+      exported = generateBibliography(citations, 'apa7', 'plaintext');
+      contentType = 'text/plain; charset=utf-8';
+      fileExt = 'txt';
+    } else {
+      // Default: BibTeX
+      exported = exportToBibtex(citations);
+      contentType = 'application/x-bibtex; charset=utf-8';
+      fileExt = 'bib';
+    }
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="references_${Date.now()}.${fileExt}"`);
     res.send(exported);
   } catch (e) { next(e); }
 });
@@ -2830,18 +3430,205 @@ apiRouter.post('/references/retraction-check', requireAuth, async (req, res, nex
   } catch (e) { next(e); }
 });
 
-apiRouter.get('/references/format', requireAuth, async (req, res, next) => {
+// 13. Get Single Reference
+apiRouter.get('/references/:id', requireAuth, async (req, res, next) => {
   try {
-    const style = (req.query.style || 'apa').toLowerCase();
-    const citation = {
-      title: req.query.title || 'Sample Title',
-      authors: [{ family: req.query.author || 'Author', given: 'A' }],
-      year: req.query.year || '2025',
-      journal: req.query.journal || 'Journal of Research',
-      doi: req.query.doi || ''
+    if (isDbConnected()) {
+      const ref = await Citation.findOne({ _id: req.params.id, ownerId: req.user.id, deletedAt: null }).lean();
+      if (!ref) return res.status(404).json({ error: 'Reference not found.' });
+      const payload = { ...ref, id: ref._id.toString() };
+      return res.json({ ...payload, reference: payload });
+    }
+    const memRef = memCitations.get(req.params.id);
+    if (!memRef || memRef.ownerId !== req.user.id || memRef.deletedAt) {
+      return res.status(404).json({ error: 'Reference not found.' });
+    }
+    const payload = { ...memRef, id: (memRef._id || memRef.id).toString() };
+    res.json({ ...payload, reference: payload });
+  } catch (e) { next(e); }
+});
+
+// 14. Update Reference
+apiRouter.patch('/references/:id', requireAuth, async (req, res, next) => {
+  try {
+    const updates = { ...req.body };
+    delete updates._id;
+    delete updates.ownerId;
+
+    if (updates.doi) {
+      updates.normalizedDoi = normalizeDoi(updates.doi);
+      updates.doi = updates.normalizedDoi;
+    }
+    if (updates.authors && Array.isArray(updates.authors)) {
+      updates.authors = updates.authors.map(normalizeAuthorObject);
+    }
+    if (updates.publicationYear) {
+      updates.year = updates.publicationYear;
+    }
+
+    if (isDbConnected()) {
+      const updated = await Citation.findOneAndUpdate(
+        { _id: req.params.id, ownerId: req.user.id, deletedAt: null },
+        { $set: updates },
+        { new: true }
+      );
+      if (!updated) return res.status(404).json({ error: 'Reference not found.' });
+      await recordAudit(req.user.id, 'REFERENCE_UPDATED', 'Reference', req.params.id, updates);
+      const payload = updated.toObject ? updated.toObject() : updated;
+      payload.id = payload._id.toString();
+      return res.json({ ...payload, reference: payload });
+    }
+
+    const memRef = memCitations.get(req.params.id);
+    if (!memRef || memRef.ownerId !== req.user.id || memRef.deletedAt) {
+      return res.status(404).json({ error: 'Reference not found.' });
+    }
+    Object.assign(memRef, updates, { updatedAt: new Date().toISOString() });
+    await recordAudit(req.user.id, 'REFERENCE_UPDATED', 'Reference', req.params.id, updates);
+    const payload = { ...memRef, id: (memRef._id || memRef.id).toString() };
+    res.json({ ...payload, reference: payload });
+  } catch (e) { next(e); }
+});
+
+// 15. Delete Reference (Soft Delete)
+apiRouter.delete('/references/:id', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const deleted = await Citation.findOneAndUpdate(
+        { _id: req.params.id, ownerId: req.user.id, deletedAt: null },
+        { $set: { deletedAt: new Date() } },
+        { new: true }
+      );
+      if (!deleted) return res.status(404).json({ error: 'Reference not found.' });
+      await recordAudit(req.user.id, 'REFERENCE_DELETED', 'Reference', req.params.id);
+      return res.json({ deleted: true, success: true, id: req.params.id });
+    }
+
+    const memRef = memCitations.get(req.params.id);
+    if (!memRef || memRef.ownerId !== req.user.id || memRef.deletedAt) {
+      return res.status(404).json({ error: 'Reference not found.' });
+    }
+    memRef.deletedAt = new Date().toISOString();
+    memRef.updatedAt = new Date().toISOString();
+    await recordAudit(req.user.id, 'REFERENCE_DELETED', 'Reference', req.params.id);
+    res.json({ deleted: true, success: true, id: req.params.id });
+  } catch (e) { next(e); }
+});
+
+// ============================================================================
+// Reference Collections APIs
+// ============================================================================
+
+apiRouter.get('/reference-collections', requireAuth, async (req, res, next) => {
+  try {
+    const { projectId } = req.query;
+    if (isDbConnected()) {
+      const filter = { ownerId: req.user.id };
+      if (projectId && projectId !== 'all') filter.projectId = projectId;
+      const collections = await ReferenceCollection.find(filter).sort({ name: 1 }).lean();
+      return res.json(collections);
+    }
+    const list = [...memReferenceCollections.values()].filter(c => {
+      if (c.ownerId !== req.user.id) return false;
+      if (projectId && projectId !== 'all' && c.projectId !== projectId) return false;
+      return true;
+    });
+    list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    const mapped = list.map(c => ({ ...(c.toObject ? c.toObject() : c), id: (c._id || c.id).toString() }));
+    res.json({ collections: mapped, total: mapped.length });
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/reference-collections', requireAuth, async (req, res, next) => {
+  try {
+    const { name, description = '', color = '#5e6ad2', icon = 'folder', projectId = null } = req.body || {};
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Collection name is required.' });
+
+    if (isDbConnected()) {
+      const col = await ReferenceCollection.create({
+        ownerId: req.user.id,
+        projectId: projectId || null,
+        name: name.trim(),
+        description: description.trim(),
+        color,
+        icon
+      });
+      const payload = col.toObject ? col.toObject() : col;
+      payload.id = payload._id.toString();
+      return res.status(201).json({ ...payload, collection: payload });
+    }
+
+    const newId = new mongoose.Types.ObjectId().toString();
+    const col = {
+      _id: newId,
+      id: newId,
+      ownerId: req.user.id,
+      projectId: projectId || null,
+      name: name.trim(),
+      description: description.trim(),
+      color,
+      icon,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
-    const formatted = formatCitationInStyle(citation, style);
-    res.json({ style, formatted });
+    memReferenceCollections.set(newId, col);
+    res.status(201).json({ ...col, collection: col });
+  } catch (e) { next(e); }
+});
+
+apiRouter.patch('/reference-collections/:id', requireAuth, async (req, res, next) => {
+  try {
+    const { name, description, color, icon } = req.body || {};
+    const updates = {};
+    if (name) updates.name = name.trim();
+    if (description !== undefined) updates.description = description.trim();
+    if (color) updates.color = color;
+    if (icon) updates.icon = icon;
+
+    if (isDbConnected()) {
+      const updated = await ReferenceCollection.findOneAndUpdate(
+        { _id: req.params.id, ownerId: req.user.id },
+        { $set: updates },
+        { new: true }
+      );
+      if (!updated) return res.status(404).json({ error: 'Collection not found.' });
+      const payload = updated.toObject ? updated.toObject() : updated;
+      payload.id = payload._id.toString();
+      return res.json({ ...payload, collection: payload });
+    }
+
+    const col = memReferenceCollections.get(req.params.id);
+    if (!col || col.ownerId !== req.user.id) return res.status(404).json({ error: 'Collection not found.' });
+    Object.assign(col, updates, { updatedAt: new Date().toISOString() });
+    col.id = col._id ? col._id.toString() : col.id;
+    res.json({ ...col, collection: col });
+  } catch (e) { next(e); }
+});
+
+apiRouter.delete('/reference-collections/:id', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const deleted = await ReferenceCollection.findOneAndDelete({ _id: req.params.id, ownerId: req.user.id });
+      if (!deleted) return res.status(404).json({ error: 'Collection not found.' });
+      // Unlink collection from references
+      await Citation.updateMany(
+        { ownerId: req.user.id, collectionIds: req.params.id },
+        { $pull: { collectionIds: req.params.id } }
+      );
+      return res.json({ deleted: true, id: req.params.id });
+    }
+
+    const col = memReferenceCollections.get(req.params.id);
+    if (!col || col.ownerId !== req.user.id) return res.status(404).json({ error: 'Collection not found.' });
+    memReferenceCollections.delete(req.params.id);
+
+    // Unlink in memory
+    for (const ref of memCitations.values()) {
+      if (ref.ownerId === req.user.id && Array.isArray(ref.collectionIds)) {
+        ref.collectionIds = ref.collectionIds.filter(cid => String(cid) !== String(req.params.id));
+      }
+    }
+    res.json({ deleted: true, id: req.params.id });
   } catch (e) { next(e); }
 });
 

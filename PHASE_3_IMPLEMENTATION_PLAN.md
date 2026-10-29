@@ -122,3 +122,4 @@ Phase 3 builds directly on this foundation to implement an Enterprise Research D
 2. **Soft Deletion**: Projects are deleted with `status: 'deleted'` and `deletedAt: new Date()` to prevent accidental data loss.
 3. **No Unauthenticated Leaks**: All dashboard and project endpoints require `requireAuth`.
 4. **Audit Logging**: Every project creation, edit, archiving, restoring, and deletion is recorded in `AuditEvent`.
+

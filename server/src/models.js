@@ -308,29 +308,86 @@ const revisionSchema = new mongoose.Schema({
 revisionSchema.index({ userId: 1, createdAt: -1 });
 revisionSchema.index({ documentId: 1, createdAt: -1 });
 
+const authorSubSchema = new mongoose.Schema({
+  given: { type: String, default: '' },
+  family: { type: String, default: '' },
+  name: { type: String, default: '' },
+  givenName: { type: String, default: '' },
+  familyName: { type: String, default: '' },
+  literalName: { type: String, default: '' },
+  orcid: { type: String, default: '', trim: true }
+}, { _id: false });
+
+const referenceCollectionSchema = new mongoose.Schema({
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null, index: true },
+  name: { type: String, required: true, trim: true, maxlength: 100 },
+  description: { type: String, default: '', maxlength: 500 },
+  color: { type: String, default: '#5e6ad2' },
+  icon: { type: String, default: 'folder' }
+}, { timestamps: true });
+referenceCollectionSchema.index({ ownerId: 1, name: 1 });
+
 const citationSchema = new mongoose.Schema({
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null, index: true },
   documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null, index: true },
-  doi: { type: String, default: '', trim: true },
   title: { type: String, required: true, trim: true },
-  authors: [{
-    given: { type: String, default: '' },
-    family: { type: String, default: '' },
-    name: { type: String, default: '' }
-  }],
+  subtitle: { type: String, default: '', trim: true },
+  authors: [authorSubSchema],
+  editors: [authorSubSchema],
+  publicationYear: { type: String, default: '' },
+  publicationDate: { type: String, default: '' },
   year: { type: String, default: '' },
+  publicationType: {
+    type: String,
+    enum: ['journal-article', 'book', 'book-chapter', 'proceedings-article', 'thesis', 'report', 'website', 'preprint', 'dataset', 'other'],
+    default: 'journal-article'
+  },
   journal: { type: String, default: '' },
+  journalTitle: { type: String, default: '' },
+  bookTitle: { type: String, default: '' },
+  publisher: { type: String, default: '' },
   volume: { type: String, default: '' },
   issue: { type: String, default: '' },
   pages: { type: String, default: '' },
-  publisher: { type: String, default: '' },
-  metadataSource: { type: String, default: 'crossref' },
-  verificationStatus: { type: String, enum: ['verified', 'unverified', 'manual'], default: 'verified' },
+  articleNumber: { type: String, default: '' },
+  doi: { type: String, default: '', trim: true },
+  normalizedDoi: { type: String, default: '', trim: true, lowercase: true },
+  isbn: { type: String, default: '', trim: true },
+  issn: { type: String, default: '', trim: true },
+  url: { type: String, default: '', trim: true },
+  abstract: { type: String, default: '' },
+  keywords: [{ type: String, trim: true }],
+  language: { type: String, default: 'en' },
+  citationKey: { type: String, default: '', trim: true },
+  sourceProvider: { type: String, default: 'manual' },
+  metadataSource: { type: String, default: 'manual' },
+  metadataStatus: {
+    type: String,
+    enum: ['verified', 'partially_verified', 'unverified', 'lookup_failed'],
+    default: 'unverified'
+  },
+  verificationStatus: { type: String, default: 'unverified' },
+  metadataLastVerifiedAt: { type: Date, default: null },
+  retractionStatus: {
+    type: String,
+    enum: ['clean', 'retracted', 'expression_of_concern', 'corrected', 'unknown'],
+    default: 'unknown'
+  },
+  tags: [{ type: String, trim: true }],
+  collectionIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'ReferenceCollection' }],
+  isFavorite: { type: Boolean, default: false },
+  notes: { type: String, default: '' },
+  deletedAt: { type: Date, default: null },
   rawMetadata: { type: mongoose.Schema.Types.Mixed, default: null }
 }, { timestamps: true });
-citationSchema.index({ ownerId: 1, updatedAt: -1 });
+
+citationSchema.index({ ownerId: 1, deletedAt: 1, updatedAt: -1 });
+citationSchema.index({ projectId: 1, deletedAt: 1 });
 citationSchema.index({ ownerId: 1, doi: 1 });
+citationSchema.index({ ownerId: 1, isFavorite: 1 });
+citationSchema.index({ collectionIds: 1 });
 
 const doiCacheSchema = new mongoose.Schema({
   doi: { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -519,6 +576,8 @@ export const IntegrityReport = mongoose.model('IntegrityReport', integrityReport
 export const AuditEvent = mongoose.model('AuditEvent', auditEventSchema);
 export const UsageRecord = mongoose.model('UsageRecord', usageRecordSchema);
 export const Citation = mongoose.model('Citation', citationSchema);
+export const Reference = Citation;
+export const ReferenceCollection = mongoose.model('ReferenceCollection', referenceCollectionSchema);
 export const DoiCache = mongoose.model('DoiCache', doiCacheSchema);
 export const UsageEvent = mongoose.model('UsageEvent', usageEventSchema);
 export const DailyUsageAggregate = mongoose.model('DailyUsageAggregate', dailyUsageAggregateSchema);

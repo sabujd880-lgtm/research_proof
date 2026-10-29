@@ -42,3 +42,4 @@ All lifecycle transitions generate immutable `AuditEvent` logs:
 - `PROJECT_ARCHIVED` & `PROJECT_RESTORED`: Logs archival events with actor attribution.
 - `PROJECT_DELETED`: Logs soft deletion event.
 - `TASK_CREATED`, `TASK_UPDATED`, `TASK_DELETED`: Tracks milestone progression.
+
