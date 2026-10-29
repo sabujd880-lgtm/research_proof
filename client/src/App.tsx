@@ -193,30 +193,36 @@ export interface NavGroupConfig {
 export const NAV_GROUPS: NavGroupConfig[] = [
   {
     id: 'workspace',
-    title: 'Research Workspace',
+    title: 'Workspace',
     path: '/dashboard',
     icon: LayoutDashboard,
     items: [
       { id: 'overview', name: 'Overview', path: '/dashboard', icon: LayoutDashboard },
       { id: 'my-projects', name: 'My Research Projects', path: '/projects', icon: FolderKanban },
-      { id: 'literature-review', name: 'Literature Review', path: '/literature', icon: BookOpen },
       {
         id: 'reference-manager',
         name: 'Reference Manager',
         path: '/reference-manager',
         icon: BookOpenCheck,
         badge: (ctx) => (ctx.citationsList.length > 0 ? ctx.citationsList.length : undefined)
-      },
-      { id: 'statistical-analysis', name: 'Statistical Analysis', path: '/statistical-analysis', icon: Activity },
-      { id: 'pdf-research-chat', name: 'PDF Research Chat', path: '/pdf-chat', icon: FileText },
-      { id: 'systematic-reviews', name: 'Systematic Reviews', path: '/systematic-reviews', icon: Layers },
-      { id: 'journal-submission', name: 'Journal Submission', path: '/journal-submission', icon: Send },
-      { id: 'research-collaboration', name: 'Research Collaboration', path: '/collaboration', icon: Users }
+      }
     ]
   },
   {
-    id: 'authoring-integrity',
-    title: 'Authoring & Integrity',
+    id: 'research',
+    title: 'Research Tools',
+    path: '/literature',
+    icon: BookOpen,
+    items: [
+      { id: 'literature-review', name: 'Literature Review', path: '/literature', icon: BookOpen },
+      { id: 'systematic-reviews', name: 'Systematic Reviews', path: '/systematic-reviews', icon: Layers },
+      { id: 'statistical-analysis', name: 'Statistical Analysis', path: '/statistical-analysis', icon: Activity },
+      { id: 'pdf-research-chat', name: 'PDF Research Chat', path: '/pdf-chat', icon: FileText }
+    ]
+  },
+  {
+    id: 'publishing',
+    title: 'Publishing & Studio',
     path: '/studio',
     icon: WandSparkles,
     items: [
@@ -226,15 +232,25 @@ export const NAV_GROUPS: NavGroupConfig[] = [
       { id: 'summarization-tool', name: 'Summarization Tool', path: '/summarize', icon: FileText },
       { id: 'grammar-fluency', name: 'Grammar & Fluency', path: '/grammar-fluency', icon: Sparkles },
       { id: 'tone-rewriting', name: 'Tone & Rewriting', path: '/tone-rewriting', icon: Sliders },
-      { id: 'research-integrity', name: 'Research Integrity', path: '/integrity', icon: ShieldCheck },
-      { id: 'plagiarism-similarity', name: 'Plagiarism & Similarity', path: '/plagiarism-similarity', icon: FileCheck2 },
-      { id: 'ai-authorship-indicators', name: 'AI-Authorship Indicators', path: '/ai-authorship', icon: ScanText },
-      { id: 'document-studio', name: 'Document Studio', path: '/document-studio', icon: Download }
+      { id: 'document-studio', name: 'Document Studio', path: '/document-studio', icon: Download },
+      { id: 'journal-submission', name: 'Journal Submission', path: '/journal-submission', icon: Send }
     ]
   },
   {
-    id: 'platform-governance',
-    title: 'Platform & History',
+    id: 'collaboration',
+    title: 'Integrity & Team',
+    path: '/integrity',
+    icon: ShieldCheck,
+    items: [
+      { id: 'research-integrity', name: 'Research Integrity', path: '/integrity', icon: ShieldCheck },
+      { id: 'plagiarism-similarity', name: 'Plagiarism & Similarity', path: '/plagiarism-similarity', icon: FileCheck2 },
+      { id: 'ai-authorship-indicators', name: 'AI-Authorship Indicators', path: '/ai-authorship', icon: ScanText },
+      { id: 'research-collaboration', name: 'Research Collaboration', path: '/collaboration', icon: Users }
+    ]
+  },
+  {
+    id: 'governance',
+    title: 'System & Governance',
     path: '/history',
     icon: History,
     items: [
@@ -247,16 +263,7 @@ export const NAV_GROUPS: NavGroupConfig[] = [
       },
       { id: 'usage-analytics', name: 'Usage Analytics', path: '/usage-analytics', icon: Activity },
       { id: 'privacy-data', name: 'Privacy & Data', path: '/privacy-data', icon: ShieldAlert },
-      { id: 'settings', name: 'Settings', path: '/settings', icon: Settings2 }
-    ]
-  },
-  {
-    id: 'administration',
-    title: 'Administration',
-    path: '/admin',
-    icon: Gauge,
-    role: 'admin',
-    items: [
+      { id: 'settings', name: 'Settings', path: '/settings', icon: Settings2 },
       { id: 'admin-overview', name: 'Admin Overview', path: '/admin/overview', icon: Gauge, role: 'admin' },
       { id: 'user-management', name: 'User Management', path: '/admin/users', icon: FolderKanban, role: 'admin' },
       { id: 'platform-audit-logs', name: 'Platform Audit Logs', path: '/admin/logs', icon: History, role: 'admin' }
@@ -324,13 +331,19 @@ export function getGroupIdForSection(sectionName: string): string {
       return group.id;
     }
   }
-  if (['Overview', 'My Research Projects', 'Literature Review', 'Reference Manager', 'Statistical Analysis', 'PDF Research Chat', 'Systematic Reviews', 'Journal Submission', 'Research Collaboration'].includes(sectionName)) {
+  if (['Overview', 'My Research Projects', 'Reference Manager', 'Citation Assistant'].includes(sectionName)) {
     return 'workspace';
   }
-  if (['Writing Studio', 'Paraphrasing Tool', 'AI Text Humanizer', 'Summarization Tool', 'Grammar & Fluency', 'Tone & Rewriting', 'Research Integrity', 'Plagiarism & Similarity', 'AI-Authorship Indicators', 'Document Studio', 'Originality Review', 'AI Assessment'].includes(sectionName)) {
-    return 'authoring-integrity';
+  if (['Literature Review', 'Systematic Reviews', 'Statistical Analysis', 'Statistical Checker', 'PDF Research Chat'].includes(sectionName)) {
+    return 'research';
   }
-  return 'platform-governance';
+  if (['Writing Studio', 'Paraphrasing Tool', 'AI Text Humanizer', 'Summarization Tool', 'Grammar & Fluency', 'Tone & Rewriting', 'Document Studio', 'DOCX / PDF Export', 'LaTeX Export Studio', 'Journal Submission', 'Journal Readiness'].includes(sectionName)) {
+    return 'publishing';
+  }
+  if (['Research Integrity', 'Plagiarism & Similarity', 'Originality Review', 'Source Verification', 'AI-Authorship Indicators', 'AI Assessment', 'Research Collaboration'].includes(sectionName)) {
+    return 'collaboration';
+  }
+  return 'governance';
 }
 
 interface TurnstileWidgetProps {
@@ -555,12 +568,26 @@ export default function App() {
     });
   };
 
-  // Keyboard shortcut Ctrl+B / Cmd+B for toggling compact sidebar
+  // Command Palette State & Keyboard Navigation
+  const [showCmdPalette, setShowCmdPalette] = useState(false);
+  const [cmdQuery, setCmdQuery] = useState('');
+  const [cmdSelectedIndex, setCmdSelectedIndex] = useState(0);
+
+  // Global Keyboard Shortcuts (Ctrl+B sidebar toggle, Ctrl+K command palette, Esc close)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
         e.preventDefault();
         toggleCompact();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setShowCmdPalette(prev => !prev);
+        setCmdQuery('');
+        setCmdSelectedIndex(0);
+      }
+      if (e.key === 'Escape') {
+        setShowCmdPalette(false);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -1500,7 +1527,7 @@ export default function App() {
 
       <main className="main-area">
         <header className="topbar">
-          <div className="topbar-left" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div className="topbar-left" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <button
               type="button"
               className="icon-button mobile-drawer-btn"
@@ -1508,7 +1535,7 @@ export default function App() {
               title="Open menu"
               aria-label="Open navigation menu"
             >
-              <Menu size={20} />
+              <Menu size={18} />
             </button>
             <button
               type="button"
@@ -1517,18 +1544,18 @@ export default function App() {
               title={isCompact ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)'}
               aria-label="Toggle compact sidebar"
             >
-              <PanelLeft size={18} />
+              <PanelLeft size={16} />
             </button>
-            <div className="breadcrumb">
-              <span>Workspace</span>
-              <span className="slash">/</span>
-              <strong>{section}</strong>
+            <div className="breadcrumb" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' }}>
+              <span style={{ color: 'var(--rp-text-muted)', fontWeight: 500 }}>Workspace</span>
+              <ChevronRight size={13} style={{ color: 'var(--rp-text-dim)' }} />
+              <strong style={{ color: 'var(--rp-text)', fontWeight: 600 }}>{section}</strong>
             </div>
 
             {/* Global Active Project Context Selector */}
-            <div className="topbar-project-context" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '8px' }}>
-              <span className="slash" style={{ color: 'var(--muted)' }}>/</span>
-              <FolderKanban size={14} style={{ color: 'var(--primary)' }} />
+            <div className="topbar-project-context" style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '10px' }}>
+              <span style={{ color: 'var(--rp-border)' }}>|</span>
+              <FolderKanban size={14} style={{ color: 'var(--rp-accent)' }} />
               <select
                 value={activeProject?._id || ''}
                 onChange={(e) => {
@@ -1537,48 +1564,62 @@ export default function App() {
                   if (found) localStorage.setItem('rp_active_project_id', found._id);
                   else localStorage.removeItem('rp_active_project_id');
                 }}
-                style={{
-                  background: 'var(--surface2, #f8fafc)',
-                  border: '1px solid var(--border-color, #cbd5e1)',
-                  borderRadius: '6px',
-                  padding: '3px 8px',
-                  fontSize: '11px',
-                  fontWeight: 600,
-                  color: 'var(--text-main, #0f172a)',
-                  cursor: 'pointer',
-                  maxWidth: '220px'
-                }}
+                className="topbar-project-select"
                 title="Select active project context"
               >
                 <option value="">(All Projects)</option>
                 {projects.map(p => (
                   <option key={p._id} value={p._id}>
-                    {p.title} ({p.workflowStage || 'literature'} · {p.completionPercentage || 0}%)
+                    {p.title}
                   </option>
                 ))}
               </select>
               {activeProject && (
-                <span style={{
-                  fontSize: '10px',
-                  padding: '2px 8px',
-                  borderRadius: '10px',
-                  background: 'var(--primary-subtle, #eff6ff)',
-                  color: 'var(--primary, #2563eb)',
-                  fontWeight: 700,
-                  textTransform: 'capitalize'
-                }}>
-                  {activeProject.workflowStage || 'literature'} ({activeProject.completionPercentage || 0}%)
+                <span className="rp-badge rp-badge-accent" style={{ fontSize: '10px' }}>
+                  {activeProject.workflowStage || 'literature'} · {activeProject.completionPercentage || 0}%
                 </span>
               )}
             </div>
           </div>
-          <div className="top-actions">
-            <div className="secure-label"><span className="green-dot"></span> Authenticated Session</div>
-            <button className="icon-button" onClick={() => setDark(!dark)} title="Toggle theme">
-              {dark ? <Sun size={18} /> : <Moon size={18} />}
+
+          <div className="top-actions" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <button
+              type="button"
+              className="rp-header-search-btn"
+              onClick={() => {
+                setShowCmdPalette(true);
+                setCmdQuery('');
+                setCmdSelectedIndex(0);
+              }}
+              title="Search tools, projects, and actions (Ctrl+K)"
+              aria-label="Open Command Palette"
+            >
+              <Search size={13} />
+              <span>Search or jump to...</span>
+              <kbd className="rp-cmd-shortcut">Ctrl+K</kbd>
             </button>
-            <button className="help-button" onClick={() => setSection('Settings')}>
-              <CircleHelp size={17} /> Help & settings
+
+            <div className="secure-label" style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--rp-text-muted)' }}>
+              <span className="green-dot"></span>
+              <span>Online</span>
+            </div>
+
+            <button
+              className="icon-button"
+              onClick={() => setDark(!dark)}
+              title={dark ? 'Switch to light theme' : 'Switch to dark theme'}
+              aria-label="Toggle theme"
+            >
+              {dark ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+
+            <button
+              className="icon-button"
+              onClick={() => setSection('Settings')}
+              title="Settings & Preferences"
+              aria-label="Open Settings"
+            >
+              <Settings2 size={16} />
             </button>
           </div>
         </header>
@@ -3314,6 +3355,7 @@ export default function App() {
               activeProject={activeProject}
               revisions={revisions}
               documents={documents}
+              citationsList={citationsList}
               setSection={setSection}
               setShowProjectForm={setShowProjectForm}
             />
@@ -3730,6 +3772,24 @@ export default function App() {
         </div>
 
       </main>
+
+      <CommandPaletteModal
+        isOpen={showCmdPalette}
+        onClose={() => setShowCmdPalette(false)}
+        onNavigate={(sec) => setSection(sec)}
+        projects={projects}
+        onSelectProject={(p) => {
+          setActiveProject(p);
+          localStorage.setItem('rp_active_project_id', p._id);
+        }}
+        dark={dark}
+        onToggleTheme={() => setDark(!dark)}
+        onCreateDoc={handleCreateNewDocument}
+        onCreateProject={() => {
+          setSection('My Research Projects');
+          setShowProjectForm(true);
+        }}
+      />
     </div>
   );
 
@@ -3743,108 +3803,295 @@ export default function App() {
   );
 }
 
-function Dashboard({ user, usage, projects, activeProject, revisions, documents, setSection, setShowProjectForm }: any) {
+interface CommandPaletteModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onNavigate: (section: string) => void;
+  projects: Project[];
+  onSelectProject: (p: Project) => void;
+  dark: boolean;
+  onToggleTheme: () => void;
+  onCreateDoc: () => void;
+  onCreateProject: () => void;
+}
+
+function CommandPaletteModal({
+  isOpen,
+  onClose,
+  onNavigate,
+  projects,
+  onSelectProject,
+  dark,
+  onToggleTheme,
+  onCreateDoc,
+  onCreateProject
+}: CommandPaletteModalProps) {
+  const [search, setSearch] = useState('');
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSearch('');
+      setSelectedIndex(0);
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const q = search.trim().toLowerCase();
+
+  // Navigation Items from NAV_GROUPS
+  const navItems = NAV_GROUPS.flatMap(g => g.items.map(it => ({
+    type: 'nav',
+    id: it.id,
+    title: it.name,
+    category: g.title,
+    icon: it.icon,
+    action: () => {
+      onNavigate(it.name);
+      onClose();
+    }
+  }))).filter(item => !q || item.title.toLowerCase().includes(q) || item.category.toLowerCase().includes(q));
+
+  // Quick Action Items
+  const actionItems = [
+    {
+      type: 'action',
+      id: 'act-new-doc',
+      title: 'New Manuscript Document',
+      category: 'Actions',
+      icon: Plus,
+      action: () => {
+        onCreateDoc();
+        onClose();
+      }
+    },
+    {
+      type: 'action',
+      id: 'act-new-proj',
+      title: 'Create New Research Project',
+      category: 'Actions',
+      icon: FolderKanban,
+      action: () => {
+        onCreateProject();
+        onClose();
+      }
+    },
+    {
+      type: 'action',
+      id: 'act-toggle-theme',
+      title: dark ? 'Switch to Light Theme' : 'Switch to Dark Theme',
+      category: 'Actions',
+      icon: dark ? Sun : Moon,
+      action: () => {
+        onToggleTheme();
+        onClose();
+      }
+    }
+  ].filter(item => !q || item.title.toLowerCase().includes(q));
+
+  // Project Items
+  const projectItems = projects.map(p => ({
+    type: 'project',
+    id: `proj-${p._id}`,
+    title: p.title,
+    category: 'Projects',
+    icon: FolderKanban,
+    action: () => {
+      onSelectProject(p);
+      onClose();
+    }
+  })).filter(item => !q || item.title.toLowerCase().includes(q));
+
+  const allItems = [...actionItems, ...projectItems, ...navItems];
+  const safeIndex = Math.min(selectedIndex, Math.max(0, allItems.length - 1));
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setSelectedIndex(prev => (prev + 1) % Math.max(1, allItems.length));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setSelectedIndex(prev => (prev - 1 + allItems.length) % Math.max(1, allItems.length));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (allItems[safeIndex]) {
+        allItems[safeIndex].action();
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      onClose();
+    }
+  };
+
+  return (
+    <div className="rp-cmd-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Command Palette">
+      <div className="rp-cmd-dialog" onClick={e => e.stopPropagation()}>
+        <div className="rp-cmd-header">
+          <Search size={16} style={{ color: 'var(--rp-text-muted)', flexShrink: 0 }} />
+          <input
+            ref={inputRef}
+            type="text"
+            className="rp-cmd-input"
+            placeholder="Type a command, tool, or project..."
+            value={search}
+            onChange={e => {
+              setSearch(e.target.value);
+              setSelectedIndex(0);
+            }}
+            onKeyDown={handleKeyDown}
+          />
+          <kbd className="rp-cmd-shortcut" onClick={onClose} style={{ cursor: 'pointer' }}>ESC</kbd>
+        </div>
+
+        <div className="rp-cmd-list">
+          {allItems.length === 0 ? (
+            <div style={{ padding: '24px 16px', textAlign: 'center', color: 'var(--rp-text-muted)', fontSize: '12px' }}>
+              No matching tools, projects, or commands.
+            </div>
+          ) : (
+            allItems.map((item, idx) => {
+              const isSelected = idx === safeIndex;
+              const IconComp = item.icon;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`rp-cmd-item ${isSelected ? 'selected' : ''}`}
+                  onClick={item.action}
+                  onMouseEnter={() => setSelectedIndex(idx)}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <IconComp size={15} style={{ color: isSelected ? 'var(--rp-accent)' : 'var(--rp-text-muted)' }} />
+                    <span style={{ fontWeight: isSelected ? 600 : 400 }}>{item.title}</span>
+                  </div>
+                  <span style={{ fontSize: '10px', color: 'var(--rp-text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    {item.category}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        <div className="rp-cmd-footer">
+          <span>Navigate with <kbd className="rp-cmd-shortcut">↑</kbd> <kbd className="rp-cmd-shortcut">↓</kbd></span>
+          <span>Select with <kbd className="rp-cmd-shortcut">↵ Enter</kbd></span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({ user, usage, projects, activeProject, revisions, documents, citationsList, setSection, setShowProjectForm }: any) {
+  const workflowStages = [
+    { id: 'literature', label: '1. Literature', section: 'Literature Review', icon: BookOpen },
+    { id: 'statistics', label: '2. Statistics', section: 'Statistical Analysis', icon: Activity },
+    { id: 'pdf-chat', label: '3. PDF Chat', section: 'PDF Research Chat', icon: FileText },
+    { id: 'writing', label: '4. Manuscript', section: 'Writing Studio', icon: WandSparkles },
+    { id: 'journal', label: '5. Submission', section: 'Journal Submission', icon: Send }
+  ];
+
   return (
     <section className="dashboard">
       <div className="welcome-row">
         <div>
-          <p className="eyebrow">RESEARCHPROOF AI 1.0 · ALL-IN-ONE RESEARCH COMMAND CENTER</p>
+          <p className="eyebrow">RESEARCH COMMAND CENTER · RIGOR & REPRODUCIBILITY</p>
           <h1>Good science starts with <span>rigor & clarity.</span></h1>
           <p className="muted">An interconnected operating system uniting literature review, statistical analysis, PDF research chat, and academic writing.</p>
         </div>
-        <div style={{ display: 'flex', gap: '10px' }}>
-          <button className="secondary" onClick={() => setSection('My Research Projects')}>
-            <FolderKanban size={16} /> All Projects
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button className="btn-secondary" onClick={() => setSection('My Research Projects')}>
+            <FolderKanban size={14} /> All Projects
           </button>
-          <button className="primary" onClick={() => setSection('Writing Studio')}>
-            <Plus size={16} /> Open Writing Studio
+          <button className="btn-primary" onClick={() => setSection('Writing Studio')}>
+            <Plus size={14} /> Open Writing Studio
           </button>
         </div>
       </div>
 
-      {/* Active Project Banner & Workflow Stage */}
+      {/* Active Project Banner & Linear Workflow Stage */}
       {activeProject && (
         <div style={{
-          background: 'var(--card-bg, #ffffff)',
-          border: '1px solid var(--border-color, #e2e8f0)',
-          borderRadius: '12px',
-          padding: '20px',
-          marginBottom: '20px'
+          background: 'var(--rp-surface)',
+          border: '1px solid var(--rp-border)',
+          borderRadius: 'var(--rp-radius-md)',
+          padding: '16px 18px',
+          margin: '18px 0 22px',
+          boxShadow: 'var(--rp-shadow-xs)'
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '14px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '12px' }}>
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                <span style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--primary)', fontWeight: 700 }}>
-                  Active Project Context
+                <span style={{ fontSize: '10.5px', textTransform: 'uppercase', letterSpacing: '0.8px', color: 'var(--rp-accent)', fontWeight: 700 }}>
+                  Active Project
                 </span>
-                <span style={{
-                  fontSize: '10px',
-                  padding: '2px 8px',
-                  borderRadius: '10px',
-                  background: 'var(--primary-subtle, #eff6ff)',
-                  color: 'var(--primary, #2563eb)',
-                  fontWeight: 700,
-                  textTransform: 'capitalize'
-                }}>
+                <span className="rp-badge rp-badge-accent">
                   {activeProject.workflowStage || 'literature'} stage
                 </span>
               </div>
-              <h2 style={{ fontSize: '18px', fontWeight: 800, margin: 0 }}>{activeProject.title}</h2>
-              <small style={{ color: 'var(--muted)' }}>{activeProject.discipline || 'General Academic'} · {activeProject.documentType || 'Manuscript'}</small>
+              <h2 style={{ fontSize: '16px', fontWeight: 700, margin: '2px 0 4px', color: 'var(--rp-text)' }}>{activeProject.title}</h2>
+              <small style={{ color: 'var(--rp-text-muted)', fontSize: '11px' }}>{activeProject.discipline || 'General Academic'} · {activeProject.documentType || 'Manuscript'}</small>
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
               <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: '11px', color: 'var(--muted)', fontWeight: 600 }}>Workflow Completion</div>
-                <div style={{ fontSize: '18px', fontWeight: 800, color: 'var(--primary)' }}>{activeProject.completionPercentage || 0}%</div>
+                <div style={{ fontSize: '10.5px', color: 'var(--rp-text-muted)', fontWeight: 600 }}>Workflow Progress</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--rp-accent)' }}>{activeProject.completionPercentage || 0}%</div>
               </div>
-              <button className="primary small" onClick={() => setSection('My Research Projects')}>
+              <button className="btn-secondary btn-sm" onClick={() => setSection('My Research Projects')}>
                 Manage Project ↗
               </button>
             </div>
           </div>
 
           {/* Workflow Progress Bar */}
-          <div style={{ height: '6px', background: 'var(--surface2, #f1f5f9)', borderRadius: '3px', overflow: 'hidden', marginBottom: '16px' }}>
+          <div style={{ height: '4px', background: 'var(--rp-surface-subtle)', borderRadius: '2px', overflow: 'hidden', marginBottom: '14px' }}>
             <div style={{
               height: '100%',
-              width: `${Math.max(activeProject.completionPercentage || 0, 10)}%`,
-              background: 'linear-gradient(90deg, #3b82f6, #10b981)',
-              transition: 'width 0.3s'
+              width: `${Math.max(activeProject.completionPercentage || 0, 8)}%`,
+              background: 'var(--rp-accent)',
+              transition: 'width 0.25s ease'
             }} />
           </div>
 
-          {/* Quick Tools Jump Bar */}
-          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', paddingTop: '10px', borderTop: '1px solid var(--border-color, #f1f5f9)' }}>
-            <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--muted)', alignSelf: 'center' }}>Quick Tools:</span>
-            <button className="filter-btn" onClick={() => setSection('Literature Review')}>
-              <BookOpen size={13} /> Review Literature
-            </button>
-            <button className="filter-btn" onClick={() => setSection('Statistical Analysis')}>
-              <Activity size={13} /> Analyze Data
-            </button>
-            <button className="filter-btn" onClick={() => setSection('PDF Research Chat')}>
-              <FileText size={13} /> Chat with PDF
-            </button>
-            <button className="filter-btn" onClick={() => setSection('Reference Manager')}>
-              <BookOpenCheck size={13} /> Manage Citations
-            </button>
-            <button className="filter-btn" onClick={() => setSection('Systematic Reviews')}>
-              <Layers size={13} /> Systematic Review
-            </button>
-            <button className="filter-btn" onClick={() => setSection('Journal Submission')}>
-              <Send size={13} /> Journal Submission
-            </button>
+          {/* Linear Workflow Step Badges */}
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', paddingTop: '10px', borderTop: '1px solid var(--rp-border-subtle)' }}>
+            <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--rp-text-muted)', alignSelf: 'center', marginRight: '4px' }}>Stage:</span>
+            {workflowStages.map(st => {
+              const isActive = (activeProject.workflowStage || 'literature').toLowerCase().includes(st.id);
+              const StepIcon = st.icon;
+              return (
+                <button
+                  key={st.id}
+                  onClick={() => setSection(st.section)}
+                  className={`btn-secondary btn-sm ${isActive ? 'btn-primary' : ''}`}
+                  style={{ gap: '5px' }}
+                >
+                  <StepIcon size={12} />
+                  <span>{st.label}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
 
-      <div className="stats-grid">
-        <Stat icon={<FileText />} label="Manuscripts & Docs" value={documents?.length || 0} note="Active studio documents" />
-        <Stat icon={<FolderKanban />} label="Research Projects" value={projects?.length || 0} note="Organised research workspaces" />
+      {/* 4 Linear Metric Cards */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+        gap: '12px',
+        margin: '18px 0 24px'
+      }}>
+        <Stat icon={<FolderKanban size={16} />} label="Research Projects" value={projects?.length || 0} note="Organised research workspaces" />
+        <Stat icon={<FileText size={16} />} label="Studio Documents" value={documents?.length || 0} note="Active drafts & manuscripts" />
+        <Stat icon={<BookOpenCheck size={16} />} label="Citations & DOIs" value={citationsList?.length || 0} note="Grounded reference items" />
         <Stat
-          icon={<Activity />}
-          label="Free AI Rewriting Quota"
+          icon={<Activity size={16} />}
+          label="AI Quota & Engine"
           value={
             usage?.rewrite?.isUnlimited || usage?.rewrite?.limit === 'Unlimited'
               ? 'Unlimited'
@@ -3854,67 +4101,67 @@ function Dashboard({ user, usage, projects, activeProject, revisions, documents,
           }
           note={
             usage?.rewrite?.isUnlimited || usage?.rewrite?.limit === 'Unlimited'
-              ? 'Unlimited revisions enabled'
+              ? 'Full unlimited mode enabled'
               : usage?.aiAvailable
                 ? 'Revisions remaining today'
-                : 'Non-AI tools active'
+                : 'Deterministic engine active'
           }
         />
       </div>
 
-      <div className="section-heading">
+      <div className="section-heading" style={{ marginBottom: '12px' }}>
         <div>
-          <h2>8 Unified Core Modules</h2>
-          <p>Scientific research, numerical statistics, and publication tools built for rigorous scholarship.</p>
+          <h2 style={{ fontSize: '15px', fontWeight: 700, margin: '0 0 3px' }}>8 Unified Core Modules</h2>
+          <p style={{ fontSize: '11px', color: 'var(--rp-text-muted)', margin: 0 }}>Scientific research, numerical statistics, and publication tools built for rigorous scholarship.</p>
         </div>
-        <span className="subtle-tag"><ShieldCheck size={14} /> Full 1.0 Production Architecture</span>
+        <span className="rp-badge rp-badge-success"><ShieldCheck size={12} /> Production Architecture</span>
       </div>
 
-      <div className="tool-grid">
-        <ToolCard icon={<BookOpen />} tone="blue" title="Literature Review Studio" description="Extract methodologies, sample sizes, and empirical findings into structured matrices with synthesis." onClick={() => setSection('Literature Review')} action="Open Literature Studio" />
-        <ToolCard icon={<Activity />} tone="green" title="Statistical Analysis Studio" description="Deterministic numerical compute (t-Test, ANOVA, Regression, Correlation) with exact APA 7 reports." onClick={() => setSection('Statistical Analysis')} action="Open Statistics" />
-        <ToolCard icon={<FileText />} tone="purple" title="PDF Research Chat" description="Interactive manuscript Q&A strictly grounded in extracted pages. Zero hallucinations." onClick={() => setSection('PDF Research Chat')} action="Open PDF Chat" />
-        <ToolCard icon={<Layers />} tone="amber" title="Systematic Reviews (PRISMA)" description="PICOS protocol definitions, candidate study screening queues, and PRISMA 2020 flow metrics." onClick={() => setSection('Systematic Reviews')} action="Open PRISMA Review" />
-        <ToolCard icon={<Send />} tone="rose" title="Journal Submission Studio" description="Journal guidelines checklist, editorial cover letter generator, and submission bundle exporter." onClick={() => setSection('Journal Submission')} action="Open Submission Studio" />
-        <ToolCard icon={<Users />} tone="blue" title="Research Collaboration" description="Multi-user role management (Owner, Editor, Reviewer, Viewer) and project task Kanban." onClick={() => setSection('Research Collaboration')} action="Open Collaboration" />
-        <ToolCard icon={<FileCheck2 />} tone="rose" title="TextGuard Plagiarism Studio" description="Interactive matched text scan, visual originality gauge, Crossref DOIs & 1-click Humanizer bridge." onClick={() => setSection('Plagiarism & Similarity')} action="Launch TextGuard" />
-        <ToolCard icon={<WandSparkles />} tone="blue" title="Academic Writing Studio" description="Full-featured 3-column workspace with live diffs and DOCX import/export." onClick={() => setSection('Writing Studio')} action="Open Studio" />
+      <div className="tool-grid" style={{ gap: '10px' }}>
+        <ToolCard icon={<BookOpen size={18} />} tone="blue" title="Literature Review Studio" description="Extract methodologies, sample sizes, and empirical findings into structured matrices with synthesis." onClick={() => setSection('Literature Review')} action="Open Literature Studio" />
+        <ToolCard icon={<Activity size={18} />} tone="green" title="Statistical Analysis Studio" description="Deterministic numerical compute (t-Test, ANOVA, Regression, Correlation) with exact APA 7 reports." onClick={() => setSection('Statistical Analysis')} action="Open Statistics" />
+        <ToolCard icon={<FileText size={18} />} tone="purple" title="PDF Research Chat" description="Interactive manuscript Q&A strictly grounded in extracted pages. Zero hallucinations." onClick={() => setSection('PDF Research Chat')} action="Open PDF Chat" />
+        <ToolCard icon={<Layers size={18} />} tone="amber" title="Systematic Reviews (PRISMA)" description="PICOS protocol definitions, candidate study screening queues, and PRISMA 2020 flow metrics." onClick={() => setSection('Systematic Reviews')} action="Open PRISMA Review" />
+        <ToolCard icon={<Send size={18} />} tone="rose" title="Journal Submission Studio" description="Journal guidelines checklist, editorial cover letter generator, and submission bundle exporter." onClick={() => setSection('Journal Submission')} action="Open Submission Studio" />
+        <ToolCard icon={<Users size={18} />} tone="blue" title="Research Collaboration" description="Multi-user role management (Owner, Editor, Reviewer, Viewer) and project task Kanban." onClick={() => setSection('Research Collaboration')} action="Open Collaboration" />
+        <ToolCard icon={<FileCheck2 size={18} />} tone="rose" title="TextGuard Plagiarism Studio" description="Interactive matched text scan, visual originality gauge, Crossref DOIs & 1-click Humanizer bridge." onClick={() => setSection('Plagiarism & Similarity')} action="Launch TextGuard" />
+        <ToolCard icon={<WandSparkles size={18} />} tone="blue" title="Academic Writing Studio" description="Full-featured 3-column workspace with live diffs and DOCX import/export." onClick={() => setSection('Writing Studio')} action="Open Studio" />
       </div>
 
-      <div className="bottom-grid">
-        <div className="panel">
-          <div className="panel-heading">
+      <div className="bottom-grid" style={{ gap: '12px', marginTop: '20px' }}>
+        <div className="panel" style={{ padding: '16px' }}>
+          <div className="panel-heading" style={{ marginBottom: '12px' }}>
             <div>
-              <h3>Recent manuscripts</h3>
-              <p>Continue editing your research.</p>
+              <h3 style={{ fontSize: '13px', fontWeight: 600 }}>Recent manuscripts</h3>
+              <p style={{ fontSize: '10.5px' }}>Continue editing your research documents.</p>
             </div>
             <button className="text-button" onClick={() => setSection('Writing Studio')}>Open Studio ↗</button>
           </div>
           {documents?.length ? documents.slice(0, 3).map((d: DocumentItem) => (
-            <div className="list-row" key={d._id} onClick={() => setSection('Writing Studio')} style={{ cursor: 'pointer' }}>
-              <div className="mini-icon"><FileText size={17} /></div>
+            <div className="list-row" key={d._id} onClick={() => setSection('Writing Studio')} style={{ cursor: 'pointer', padding: '10px 0' }}>
+              <div className="mini-icon"><FileText size={16} /></div>
               <div className="list-main">
-                <strong>{d.title}</strong>
-                <small>{d.wordCount} words · v{d.version || 1} · Updated {new Date(d.updatedAt).toLocaleDateString()}</small>
+                <strong style={{ fontSize: '12px' }}>{d.title}</strong>
+                <small style={{ fontSize: '10px', color: 'var(--rp-text-muted)' }}>{d.wordCount} words · v{d.version || 1} · Updated {new Date(d.updatedAt).toLocaleDateString()}</small>
               </div>
               <span className="row-arrow">↗</span>
             </div>
           )) : (
-            <div className="empty-state">
-              <FileText size={22} />
-              <strong>No manuscripts yet</strong>
-              <p>Create or import a document in the Academic Writing Studio.</p>
+            <div className="empty-state" style={{ padding: '20px 10px' }}>
+              <FileText size={20} />
+              <strong style={{ fontSize: '12px', margin: '6px 0 2px' }}>No manuscripts yet</strong>
+              <p style={{ fontSize: '11px' }}>Create or import a document in the Academic Writing Studio.</p>
             </div>
           )}
         </div>
 
-        <div className="panel integrity-panel">
-          <div className="panel-heading">
+        <div className="panel integrity-panel" style={{ padding: '16px' }}>
+          <div className="panel-heading" style={{ marginBottom: '12px' }}>
             <div>
-              <h3>Research integrity checklist</h3>
-              <p>Key standards before submission</p>
+              <h3 style={{ fontSize: '13px', fontWeight: 600 }}>Research integrity checklist</h3>
+              <p style={{ fontSize: '10.5px' }}>Key verification standards before peer review</p>
             </div>
-            <ShieldCheck size={20} />
+            <ShieldCheck size={18} />
           </div>
           {[
             'Deterministic meaning audit: Check negations and findings',
@@ -3922,9 +4169,9 @@ function Dashboard({ user, usage, projects, activeProject, revisions, documents,
             'No silent overwrite: Revisions require explicit user acceptance',
             'Safe export: Clean Office Open XML generation with references'
           ].map((s, i) => (
-            <div className="check-row" key={s}>
-              <span>{i + 1}</span>
-              <p>{s}</p>
+            <div className="check-row" key={s} style={{ margin: '10px 0' }}>
+              <span style={{ fontSize: '10px', width: '20px', height: '20px' }}>{i + 1}</span>
+              <p style={{ fontSize: '11px', margin: 0 }}>{s}</p>
             </div>
           ))}
         </div>
@@ -3935,13 +4182,13 @@ function Dashboard({ user, usage, projects, activeProject, revisions, documents,
 
 function Stat({ icon, label, value, note }: any) {
   return (
-    <div className="stat-card">
-      <div className="stat-top">
+    <div className="rp-metric-card">
+      <div className="rp-metric-card-top">
         <span>{label}</span>
-        <span className="stat-icon">{icon}</span>
+        <span style={{ color: 'var(--rp-accent)' }}>{icon}</span>
       </div>
-      <strong>{value}</strong>
-      <small>{note}</small>
+      <div className="rp-metric-card-val">{value}</div>
+      <div className="rp-metric-card-sub">{note}</div>
     </div>
   );
 }
