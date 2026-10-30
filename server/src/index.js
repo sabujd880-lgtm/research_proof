@@ -1707,7 +1707,13 @@ apiRouter.get(['/auth/me', '/me'], requireAuth, async (req, res) => {
     const sessionToken = req.cookies?.[SESSION_COOKIE_NAME] || req.cookies?.rp_session || req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
     if (isDbConnected()) {
       const user = await User.findById(req.user.id).select('-passwordHash').lean();
-      if (!user) return res.status(404).json({ error: 'User not found.' });
+      if (!user) {
+        res.clearCookie(SESSION_COOKIE_NAME);
+        res.clearCookie('rp_token');
+        res.clearCookie('researchproof_session');
+        res.clearCookie('rp_session');
+        return res.status(404).json({ error: 'User account not found.' });
+      }
       const token = sessionToken || jwt.sign({ id: user._id.toString(), email: user.email, tokenVersion: user.tokenVersion || 1, role: user.role }, jwtSecret, { expiresIn: `${SESSION_TTL_HOURS}h` });
       return res.json({
         token,
@@ -1724,7 +1730,13 @@ apiRouter.get(['/auth/me', '/me'], requireAuth, async (req, res) => {
     }
 
     const user = [...memUsers.values()].find(u => (u._id === req.user.id || u.id === req.user.id));
-    if (!user) return res.status(404).json({ error: 'User not found.' });
+    if (!user) {
+      res.clearCookie(SESSION_COOKIE_NAME);
+      res.clearCookie('rp_token');
+      res.clearCookie('researchproof_session');
+      res.clearCookie('rp_session');
+      return res.status(404).json({ error: 'User account not found.' });
+    }
     const token = sessionToken || jwt.sign({ id: user._id || user.id, email: user.email, tokenVersion: user.tokenVersion || 1, role: user.role }, jwtSecret, { expiresIn: `${SESSION_TTL_HOURS}h` });
     res.json({
       token,

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
+import './styles.css';
 import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
 import {
   Activity, ArrowRight, BookOpen, BookOpenCheck, Check, ChevronDown, ChevronRight, ChevronLeft,
@@ -154,7 +155,12 @@ async function request(path: string, token: string, body?: unknown, method = 'PO
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  if (!response.ok) {
+    if (response.status === 401 && typeof window !== 'undefined') {
+      localStorage.removeItem('rp_token');
+    }
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
   return data;
 }
 
@@ -678,6 +684,8 @@ export default function App() {
             setAuthMode('login');
             if (emailParam) setEmail(emailParam);
             setAuthError('An account with this email already exists using password authentication. Please sign in with your password to link your Google account.');
+          } else if (authErr.includes('not found') || authErr.includes('deleted')) {
+            setAuthError('Your previous session has expired. Please sign in or create an account.');
           } else {
             setAuthError(decodeURIComponent(authErr));
           }

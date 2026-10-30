@@ -26,13 +26,19 @@ export async function requireAuth(req, res, next) {
     let userRole = decoded.role || 'researcher';
     if (mongoose.connection.readyState === 1) {
       const user = await User.findById(decoded.id).select('tokenVersion status role').lean();
-      if (!user) {
-        return res.status(401).json({ error: 'User account not found.' });
+      if (!user || user.status === 'deleted') {
+        res.clearCookie('rp_token');
+        res.clearCookie('researchproof_session');
+        res.clearCookie('rp_session');
+        return res.status(401).json({ error: 'User account not found or has been deleted.' });
       }
       if (user.status === 'suspended') {
         return res.status(403).json({ error: 'Account is suspended. Please contact your administrator.' });
       }
       if (decoded.tokenVersion && user.tokenVersion && decoded.tokenVersion < user.tokenVersion) {
+        res.clearCookie('rp_token');
+        res.clearCookie('researchproof_session');
+        res.clearCookie('rp_session');
         return res.status(401).json({ error: 'Session has been invalidated. Please sign in again.' });
       }
       if (user.role) userRole = user.role;
@@ -40,12 +46,18 @@ export async function requireAuth(req, res, next) {
       const user = req.app.locals.memUsers.get(decoded.email) ||
         [...req.app.locals.memUsers.values()].find(u => u._id === decoded.id || u.id === decoded.id);
       if (!user || user.status === 'deleted') {
+        res.clearCookie('rp_token');
+        res.clearCookie('researchproof_session');
+        res.clearCookie('rp_session');
         return res.status(401).json({ error: 'User account not found or has been deleted.' });
       }
       if (user.status === 'suspended') {
         return res.status(403).json({ error: 'Account is suspended. Please contact your administrator.' });
       }
       if (decoded.tokenVersion && user.tokenVersion && decoded.tokenVersion < user.tokenVersion) {
+        res.clearCookie('rp_token');
+        res.clearCookie('researchproof_session');
+        res.clearCookie('rp_session');
         return res.status(401).json({ error: 'Session has been invalidated. Please sign in again.' });
       }
       if (user.role) userRole = user.role;
