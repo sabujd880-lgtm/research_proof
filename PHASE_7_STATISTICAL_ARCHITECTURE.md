@@ -97,3 +97,4 @@ Following the Linear-inspired Minimal Enterprise UI principles from Phase 2:
 - High information density with clean monochrome borders and precise color accents.
 - Pure SVG charts without heavy canvas or webgl runtime dependencies.
 - Zero external Python dependencies: the entire engine runs natively in Node.js, ensuring 100% cloud reliability on Render.
+

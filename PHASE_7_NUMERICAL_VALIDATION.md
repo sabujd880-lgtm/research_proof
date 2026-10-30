@@ -38,3 +38,4 @@ To ensure that ResearchProof AI 1.0 provides publication-grade statistical resul
 2. **Singular Predictor Matrices**: Gauss-Jordan matrix inversion verifies pivot non-degeneracy ($|\text{pivot}| > 10^{-12}$) and reports numerical collinearity.
 3. **Empty / Missing Data**: Complete listwise deletion filters non-numeric entries prior to computing degrees of freedom.
 4. **Zero Hallucination Verification**: All test statistics match closed-form mathematical equations.
+

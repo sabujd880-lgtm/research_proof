@@ -494,11 +494,49 @@ const documentProcessingJobSchema = new mongoose.Schema({
   completedAt: { type: Date }
 }, { timestamps: true });
 
-// Systematic Review & Screening Models (PRISMA 2020)
+// Systematic Review & Screening Models (PRISMA 2020 & Phase 8 Assistant)
 const systematicReviewSchema = new mongoose.Schema({
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   title: { type: String, required: true, trim: true },
+  reviewType: {
+    type: String,
+    enum: ['systematic_review', 'scoping_review', 'rapid_review', 'meta_analysis_linked'],
+    default: 'systematic_review',
+    index: true
+  },
+  researchQuestion: { type: String, default: '' },
+  objective: { type: String, default: '' },
+  protocolId: { type: mongoose.Schema.Types.ObjectId, ref: 'ReviewProtocol' },
+  status: {
+    type: String,
+    enum: ['draft', 'active', 'completed', 'archived'],
+    default: 'active',
+    index: true
+  },
+  currentStage: {
+    type: String,
+    enum: [
+      'protocol',
+      'search',
+      'deduplication',
+      'title_abstract_screening',
+      'full_text_screening',
+      'data_extraction',
+      'risk_of_bias',
+      'prisma_synthesis'
+    ],
+    default: 'protocol',
+    index: true
+  },
+  registrationIdentifier: { type: String, default: '' }, // e.g. PROSPERO CRD42023...
+  registrationURL: { type: String, default: '' },
+  screeningSettings: {
+    dualReview: { type: Boolean, default: false },
+    blindReview: { type: Boolean, default: false },
+    requireExclusionReason: { type: Boolean, default: true }
+  },
   protocol: {
     population: { type: String, default: '' },
     intervention: { type: String, default: '' },
@@ -512,41 +550,237 @@ const systematicReviewSchema = new mongoose.Schema({
   },
   prismaMetrics: {
     identified: { type: Number, default: 0 },
+    identifiedDatabases: { type: Number, default: 0 },
+    identifiedRegisters: { type: Number, default: 0 },
+    identifiedOther: { type: Number, default: 0 },
     duplicatesRemoved: { type: Number, default: 0 },
+    ineligibleBeforeScreening: { type: Number, default: 0 },
     screenedTitleAbstract: { type: Number, default: 0 },
     excludedTitleAbstract: { type: Number, default: 0 },
+    soughtFullText: { type: Number, default: 0 },
+    notRetrievedFullText: { type: Number, default: 0 },
     assessedFullText: { type: Number, default: 0 },
     excludedFullText: { type: Number, default: 0 },
-    includedInSynthesis: { type: Number, default: 0 }
+    includedInSynthesis: { type: Number, default: 0 },
+    includedStudies: { type: Number, default: 0 },
+    includedReports: { type: Number, default: 0 }
   },
   searchQueries: [{
     database: { type: String, default: 'PubMed' },
     queryString: { type: String, default: '' },
-    dateRun: { type: Date, default: Date.now }
-  }]
+    dateRun: { type: Date, default: Date.now },
+    recordsCount: { type: Number, default: 0 }
+  }],
+  deletedAt: { type: Date, default: null, index: true }
 }, { timestamps: true });
 systematicReviewSchema.index({ projectId: 1, createdAt: -1 });
+
+const reviewProtocolSchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  versionNumber: { type: Number, default: 1 },
+  framework: { type: String, enum: ['PICO', 'PICOS', 'PECO', 'SPIDER', 'Custom'], default: 'PICO' },
+  population: { type: String, default: '' },
+  intervention: { type: String, default: '' },
+  comparator: { type: String, default: '' },
+  outcomes: { type: String, default: '' },
+  studyDesigns: [{ type: String }],
+  eligibilityCriteria: {
+    inclusion: [{ type: String }],
+    exclusion: [{ type: String }]
+  },
+  informationSources: [{
+    database: { type: String, default: 'PubMed' },
+    notes: { type: String, default: '' }
+  }],
+  searchStrategyText: { type: String, default: '' },
+  screeningProcedure: { type: String, default: 'Two reviewers independently screen titles and abstracts.' },
+  dataExtractionPlan: { type: String, default: '' },
+  riskOfBiasPlan: { type: String, default: 'RoB 2 for randomized trials; ROBINS-I for non-randomized studies.' },
+  synthesisPlan: { type: String, default: '' },
+  registrationDetails: { type: String, default: '' },
+  amendments: [{
+    version: { type: Number },
+    rationale: { type: String },
+    date: { type: Date, default: Date.now },
+    author: { type: String, default: '' }
+  }],
+  approvedAt: { type: Date, default: null }
+}, { timestamps: true });
+reviewProtocolSchema.index({ reviewId: 1, versionNumber: -1 });
+
+const searchStrategySchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  sourceName: { type: String, required: true }, // e.g. 'PubMed', 'Crossref', 'OpenAlex', 'Scopus'
+  sourceType: { type: String, enum: ['database', 'register', 'other_methods'], default: 'database' },
+  queryString: { type: String, required: true },
+  searchDate: { type: Date, default: Date.now },
+  limits: { type: String, default: '' },
+  filters: [{ type: String }],
+  searcher: { type: String, default: '' },
+  recordsRetrieved: { type: Number, default: 0 },
+  exportSource: { type: String, default: '' },
+  notes: { type: String, default: '' }
+}, { timestamps: true });
+searchStrategySchema.index({ reviewId: 1, createdAt: -1 });
 
 const studyRecordSchema = new mongoose.Schema({
   reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  searchRunId: { type: mongoose.Schema.Types.ObjectId, ref: 'SearchStrategy' },
   title: { type: String, required: true, trim: true },
   authors: [{ type: String }],
   year: { type: String, default: '' },
   journal: { type: String, default: '' },
-  doi: { type: String, default: '' },
+  doi: { type: String, default: '', index: true },
+  pmid: { type: String, default: '', index: true },
+  url: { type: String, default: '' },
   abstract: { type: String, default: '' },
+  sourceDatabases: [{ type: String }], // provenance tracking
+  sourceType: { type: String, enum: ['database', 'register', 'other_methods'], default: 'database' },
+  deduplicationStatus: {
+    type: String,
+    enum: ['unique', 'canonical', 'duplicate'],
+    default: 'unique',
+    index: true
+  },
+  duplicateGroupId: { type: mongoose.Schema.Types.ObjectId, ref: 'DuplicateGroup' },
+  canonicalRecordId: { type: mongoose.Schema.Types.ObjectId, ref: 'StudyRecord' },
   screeningStage: {
     type: String,
     enum: ['title_abstract', 'full_text', 'included', 'excluded'],
     default: 'title_abstract',
     index: true
   },
-  decision: { type: String, enum: ['included', 'excluded', 'pending'], default: 'pending', index: true },
+  decision: {
+    type: String,
+    enum: ['included', 'excluded', 'pending', 'unclear'],
+    default: 'pending',
+    index: true
+  },
   exclusionReason: { type: String, default: '' },
-  screenerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+  exclusionNotes: { type: String, default: '' },
+  screenerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  fullTextStatus: {
+    type: String,
+    enum: ['not_sought', 'sought', 'retrieved', 'not_retrieved', 'assessed', 'excluded'],
+    default: 'not_sought'
+  },
+  pdfDocumentId: { type: mongoose.Schema.Types.ObjectId, ref: 'ResearchDocument' },
+  pdfUrl: { type: String, default: '' },
+  deletedAt: { type: Date, default: null }
 }, { timestamps: true });
 studyRecordSchema.index({ reviewId: 1, decision: 1 });
+studyRecordSchema.index({ reviewId: 1, screeningStage: 1 });
+
+const duplicateGroupSchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  canonicalRecordId: { type: mongoose.Schema.Types.ObjectId, ref: 'StudyRecord' },
+  recordIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'StudyRecord' }],
+  matchType: { type: String, enum: ['exact', 'probable', 'possible'], default: 'exact' },
+  similarityScore: { type: Number, default: 1.0 },
+  resolved: { type: Boolean, default: false },
+  resolutionDecision: { type: String, enum: ['merged', 'separated', 'retained'], default: 'merged' },
+  resolverId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  resolvedAt: { type: Date }
+}, { timestamps: true });
+
+const screeningDecisionSchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  recordId: { type: mongoose.Schema.Types.ObjectId, ref: 'StudyRecord', required: true, index: true },
+  reviewerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  reviewerName: { type: String, default: '' },
+  stage: { type: String, enum: ['title_abstract', 'full_text'], required: true },
+  decision: { type: String, enum: ['include', 'exclude', 'unclear'], required: true },
+  exclusionReason: { type: String, default: '' },
+  exclusionNotes: { type: String, default: '' },
+  criteriaEvaluated: [{ type: String }],
+  blind: { type: Boolean, default: false }
+}, { timestamps: true });
+screeningDecisionSchema.index({ reviewId: 1, recordId: 1, reviewerId: 1, stage: 1 });
+
+const reviewConflictSchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  recordId: { type: mongoose.Schema.Types.ObjectId, ref: 'StudyRecord', required: true, index: true },
+  stage: { type: String, enum: ['title_abstract', 'full_text'], required: true },
+  reviewerDecisions: [{
+    reviewerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    reviewerName: { type: String, default: '' },
+    decision: { type: String },
+    reason: { type: String },
+    timestamp: { type: Date, default: Date.now }
+  }],
+  status: { type: String, enum: ['pending', 'resolved'], default: 'pending', index: true },
+  adjudicatorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  adjudicatedDecision: { type: String, enum: ['include', 'exclude'] },
+  adjudicatedReason: { type: String, default: '' },
+  resolvedAt: { type: Date }
+}, { timestamps: true });
+
+const extractionTemplateSchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  name: { type: String, default: 'Standard Extraction Template' },
+  fields: [{
+    key: { type: String, required: true },
+    label: { type: String, required: true },
+    type: { type: String, enum: ['text', 'number', 'date', 'select', 'multi_select', 'boolean', 'evidence_link'], default: 'text' },
+    options: [{ type: String }],
+    required: { type: Boolean, default: false }
+  }]
+}, { timestamps: true });
+
+const studyExtractionSchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  recordId: { type: mongoose.Schema.Types.ObjectId, ref: 'StudyRecord', required: true, index: true },
+  templateId: { type: mongoose.Schema.Types.ObjectId, ref: 'ExtractionTemplate' },
+  extractedData: { type: mongoose.Schema.Types.Mixed, default: {} },
+  evidencePassages: [{
+    field: { type: String },
+    passage: { type: String },
+    page: { type: Number, default: 1 }
+  }],
+  verified: { type: Boolean, default: false },
+  verifierId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  version: { type: Number, default: 1 }
+}, { timestamps: true });
+studyExtractionSchema.index({ reviewId: 1, recordId: 1 });
+
+const riskOfBiasAssessmentSchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  recordId: { type: mongoose.Schema.Types.ObjectId, ref: 'StudyRecord', required: true, index: true },
+  toolName: { type: String, enum: ['RoB 2', 'ROBINS-I', 'QUADAS-2', 'Custom'], default: 'RoB 2' },
+  domains: [{
+    domain: { type: String, required: true },
+    judgment: { type: String, enum: ['low', 'some_concerns', 'high', 'critical', 'unclear'], default: 'low' },
+    rationale: { type: String, default: '' },
+    quotes: { type: String, default: '' }
+  }],
+  overallJudgment: { type: String, enum: ['low', 'some_concerns', 'high', 'critical', 'unclear'], default: 'low' },
+  assessorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  assessorName: { type: String, default: '' }
+}, { timestamps: true });
+riskOfBiasAssessmentSchema.index({ reviewId: 1, recordId: 1 });
+
+const prismaFlowSnapshotSchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  variant: { type: String, enum: ['PRISMA_2020', 'PRISMA_ScR'], default: 'PRISMA_2020' },
+  counts: { type: mongoose.Schema.Types.Mixed, required: true },
+  isReconciled: { type: Boolean, default: true },
+  reconciliationNotes: [{ type: String }],
+  snapshotDate: { type: Date, default: Date.now }
+}, { timestamps: true });
+
+const reviewAuditEventSchema = new mongoose.Schema({
+  reviewId: { type: mongoose.Schema.Types.ObjectId, ref: 'SystematicReview', required: true, index: true },
+  actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  action: { type: String, required: true },
+  entityType: { type: String, default: 'SystematicReview' },
+  entityId: { type: String, default: '' },
+  details: { type: mongoose.Schema.Types.Mixed, default: {} },
+  createdAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+reviewAuditEventSchema.index({ reviewId: 1, createdAt: -1 });
 
 // Journal Submission Model
 const journalSubmissionSchema = new mongoose.Schema({
@@ -916,6 +1150,17 @@ export const CitationEvidence = mongoose.model('CitationEvidence', citationEvide
 export const DocumentProcessingJob = mongoose.model('DocumentProcessingJob', documentProcessingJobSchema);
 export const SystematicReview = mongoose.model('SystematicReview', systematicReviewSchema);
 export const StudyRecord = mongoose.model('StudyRecord', studyRecordSchema);
+export const ReviewRecord = StudyRecord; // Alias for Systematic Review Records
+export const ReviewProtocol = mongoose.model('ReviewProtocol', reviewProtocolSchema);
+export const SearchStrategy = mongoose.model('SearchStrategy', searchStrategySchema);
+export const DuplicateGroup = mongoose.model('DuplicateGroup', duplicateGroupSchema);
+export const ScreeningDecision = mongoose.model('ScreeningDecision', screeningDecisionSchema);
+export const ReviewConflict = mongoose.model('ReviewConflict', reviewConflictSchema);
+export const ExtractionTemplate = mongoose.model('ExtractionTemplate', extractionTemplateSchema);
+export const StudyExtraction = mongoose.model('StudyExtraction', studyExtractionSchema);
+export const RiskOfBiasAssessment = mongoose.model('RiskOfBiasAssessment', riskOfBiasAssessmentSchema);
+export const PRISMAFlowSnapshot = mongoose.model('PRISMAFlowSnapshot', prismaFlowSnapshotSchema);
+export const ReviewAuditEvent = mongoose.model('ReviewAuditEvent', reviewAuditEventSchema);
 export const JournalSubmission = mongoose.model('JournalSubmission', journalSubmissionSchema);
 
 

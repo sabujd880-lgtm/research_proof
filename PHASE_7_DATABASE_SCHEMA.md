@@ -163,3 +163,4 @@ interface IAnalysisResult {
 - `dataset_variables`: `{ datasetId: 1, name: 1 }` (unique compound)
 - `analyses`: `{ projectId: 1, deletedAt: 1 }`, `{ userId: 1, deletedAt: 1 }`
 - `analysis_results`: `{ analysisId: 1 }` (unique)
+

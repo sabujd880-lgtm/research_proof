@@ -71,8 +71,32 @@ import {
   DocumentProcessingJob,
   SystematicReview,
   StudyRecord,
+  ReviewProtocol,
+  SearchStrategy,
+  DuplicateGroup,
+  ScreeningDecision,
+  ReviewConflict,
+  ExtractionTemplate,
+  StudyExtraction,
+  RiskOfBiasAssessment,
+  PRISMAFlowSnapshot,
+  ReviewAuditEvent,
   JournalSubmission
 } from './models.js';
+import {
+  normalizePmid,
+  normalizeTitle,
+  identifyReviewDuplicates,
+  classifyDuplicateMatch,
+  parseCsvStudyRecords,
+  reconcilePrisma2020Metrics,
+  RISK_OF_BIAS_TEMPLATES,
+  computeOverallRiskOfBias,
+  PRISMA_2020_CHECKLIST_ITEMS,
+  generatePrismaSvg
+} from './systematicReviewService.js';
+
+
 import {
   searchScholarlyReferences,
   detectReferenceDuplicates,
@@ -380,6 +404,16 @@ const memDocumentProcessingJobs = new Map();
 const memDocumentStorage = new Map();
 const memSystematicReviews = new Map();
 const memStudyRecords = new Map();
+const memReviewProtocols = new Map();
+const memSearchStrategies = new Map();
+const memDuplicateGroups = new Map();
+const memScreeningDecisions = new Map();
+const memReviewConflicts = new Map();
+const memExtractionTemplates = new Map();
+const memStudyExtractions = new Map();
+const memRiskOfBiasAssessments = new Map();
+const memPrismaSnapshots = new Map();
+const memReviewAuditEvents = new Map();
 const memJournalSubmissions = new Map();
 const isDbConnected = () => mongoose.connection.readyState === 1;
 app.locals.memUsers = memUsers;
@@ -416,6 +450,16 @@ app.locals.memDocumentProcessingJobs = memDocumentProcessingJobs;
 app.locals.memDocumentStorage = memDocumentStorage;
 app.locals.memSystematicReviews = memSystematicReviews;
 app.locals.memStudyRecords = memStudyRecords;
+app.locals.memReviewProtocols = memReviewProtocols;
+app.locals.memSearchStrategies = memSearchStrategies;
+app.locals.memDuplicateGroups = memDuplicateGroups;
+app.locals.memScreeningDecisions = memScreeningDecisions;
+app.locals.memReviewConflicts = memReviewConflicts;
+app.locals.memExtractionTemplates = memExtractionTemplates;
+app.locals.memStudyExtractions = memStudyExtractions;
+app.locals.memRiskOfBiasAssessments = memRiskOfBiasAssessments;
+app.locals.memPrismaSnapshots = memPrismaSnapshots;
+app.locals.memReviewAuditEvents = memReviewAuditEvents;
 app.locals.memJournalSubmissions = memJournalSubmissions;
 app.locals.latexArtifactCache = latexArtifactCache;
 app.locals.memTextGuardScans = memTextGuardScans;
@@ -6698,38 +6742,152 @@ apiRouter.delete('/statistics/analyses/:analysisId', requireAuth, async (req, re
   } catch (e) { next(e); }
 });
 
-// Systematic Review Assistant (Module 6 - PRISMA 2020)
-apiRouter.get('/projects/:id/systematic-reviews', requireAuth, async (req, res, next) => {
+// Systematic Review Assistant (Module 6 & Phase 8 - PRISMA 2020 Enterprise Suite)
+
+async function recordReviewAudit(reviewId, userId, eventType, description, details = {}) {
+  const auditData = {
+    reviewId: reviewId?.toString(),
+    userId: userId?.toString(),
+    eventType,
+    description,
+    details,
+    timestamp: new Date()
+  };
+  if (isDbConnected()) {
+    try {
+      await ReviewAuditEvent.create(auditData);
+    } catch {}
+  } else {
+    const id = new mongoose.Types.ObjectId().toString();
+    memReviewAuditEvents.set(id, { _id: id, ...auditData, timestamp: auditData.timestamp.toISOString() });
+  }
+}
+
+// 1. List Systematic Reviews (supports user-level and project-level queries)
+apiRouter.get('/systematic-reviews', requireAuth, async (req, res, next) => {
   try {
+    const { projectId } = req.query;
     if (isDbConnected()) {
-      const reviews = await SystematicReview.find({ projectId: req.params.id }).sort({ createdAt: -1 }).lean();
+      const filter = { deletedAt: null };
+      if (projectId) filter.projectId = projectId;
+      else filter.userId = req.user.id;
+      const reviews = await SystematicReview.find(filter).sort({ updatedAt: -1, createdAt: -1 }).lean();
       return res.json(reviews);
     }
-    const reviews = [...memSystematicReviews.values()].filter(s => s.projectId === req.params.id);
+    const reviews = [...memSystematicReviews.values()].filter(r => {
+      if (r.deletedAt) return false;
+      if (projectId) return r.projectId === projectId;
+      return !r.userId || r.userId === req.user.id;
+    });
     res.json(reviews);
   } catch (e) { next(e); }
 });
 
+// Backward-compatible project-level list
+apiRouter.get('/projects/:id/systematic-reviews', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const reviews = await SystematicReview.find({ projectId: req.params.id, deletedAt: null }).sort({ createdAt: -1 }).lean();
+      return res.json(reviews);
+    }
+    const reviews = [...memSystematicReviews.values()].filter(s => s.projectId === req.params.id && !s.deletedAt);
+    res.json(reviews);
+  } catch (e) { next(e); }
+});
+
+// 2. Create Systematic Review
+apiRouter.post('/systematic-reviews', requireAuth, async (req, res, next) => {
+  try {
+    const {
+      title,
+      projectId,
+      reviewType = 'systematic_review',
+      registration,
+      picosFramework,
+      eligibility,
+      screeningSettings
+    } = req.body || {};
+
+    if (!title || !title.trim()) {
+      return res.status(400).json({ error: 'Systematic review title is required.' });
+    }
+
+    const reviewData = {
+      projectId: projectId || null,
+      userId: req.user.id,
+      title: title.trim(),
+      reviewType,
+      status: 'protocol_drafting',
+      currentStage: 'protocol',
+      registration: registration || { registered: false, registryName: '', registrationNumber: '', protocolUrl: '' },
+      picosFramework: picosFramework || { framework: 'PICO', population: '', intervention: '', comparator: '', outcomes: '', studyDesign: '' },
+      eligibility: eligibility || { inclusionCriteria: [], exclusionCriteria: [] },
+      screeningSettings: screeningSettings || {
+        dualReviewerMode: false,
+        blindScreening: true,
+        adjudicationMethod: 'third_reviewer',
+        minimumReviewersPerRecord: 1,
+        conflictResolutionPolicy: 'consensus'
+      },
+      prismaMetrics: {
+        identified: 0,
+        duplicatesRemoved: 0,
+        ineligibleBeforeScreening: 0,
+        screenedTitleAbstract: 0,
+        excludedTitleAbstract: 0,
+        soughtFullText: 0,
+        notRetrievedFullText: 0,
+        assessedFullText: 0,
+        excludedFullText: 0,
+        includedInSynthesis: 0
+      },
+      deletedAt: null
+    };
+
+    if (isDbConnected()) {
+      const review = await SystematicReview.create(reviewData);
+      await recordReviewAudit(review._id, req.user.id, 'review_created', `Review "${review.title}" initialized.`);
+      return res.status(201).json(review);
+    }
+
+    const rId = new mongoose.Types.ObjectId().toString();
+    const newRev = { _id: rId, ...reviewData, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    memSystematicReviews.set(rId, newRev);
+    await recordReviewAudit(rId, req.user.id, 'review_created', `Review "${newRev.title}" initialized.`);
+    res.status(201).json(newRev);
+  } catch (e) { next(e); }
+});
+
+// Backward-compatible project-level create
 apiRouter.post('/projects/:id/systematic-reviews', requireAuth, async (req, res, next) => {
   try {
-    const { title, protocol, eligibility } = req.body || {};
+    const { title, protocol, eligibility, reviewType, picosFramework } = req.body || {};
     if (!title || !title.trim()) return res.status(400).json({ error: 'Systematic review title is required.' });
 
     const reviewData = {
       projectId: req.params.id,
       userId: req.user.id,
       title: title.trim(),
+      reviewType: reviewType || 'systematic_review',
+      status: 'protocol_drafting',
+      currentStage: 'protocol',
       protocol: protocol || {},
+      picosFramework: picosFramework || { framework: 'PICO' },
       eligibility: eligibility || { inclusionCriteria: [], exclusionCriteria: [] },
+      screeningSettings: { dualReviewerMode: false, blindScreening: true, minimumReviewersPerRecord: 1 },
       prismaMetrics: {
         identified: 0,
         duplicatesRemoved: 0,
+        ineligibleBeforeScreening: 0,
         screenedTitleAbstract: 0,
         excludedTitleAbstract: 0,
+        soughtFullText: 0,
+        notRetrievedFullText: 0,
         assessedFullText: 0,
         excludedFullText: 0,
         includedInSynthesis: 0
-      }
+      },
+      deletedAt: null
     };
 
     if (isDbConnected()) {
@@ -6738,12 +6896,475 @@ apiRouter.post('/projects/:id/systematic-reviews', requireAuth, async (req, res,
     }
 
     const rId = new mongoose.Types.ObjectId().toString();
-    const newRev = { _id: rId, ...reviewData, createdAt: new Date().toISOString() };
+    const newRev = { _id: rId, ...reviewData, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     memSystematicReviews.set(rId, newRev);
     res.status(201).json(newRev);
   } catch (e) { next(e); }
 });
 
+// 3. Get Single Systematic Review
+apiRouter.get('/systematic-reviews/:reviewId', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    let review;
+    if (isDbConnected()) {
+      review = await SystematicReview.findOne({ _id: reviewId, deletedAt: null }).lean();
+    } else {
+      review = memSystematicReviews.get(reviewId);
+      if (review?.deletedAt) review = null;
+    }
+    if (!review) return res.status(404).json({ error: 'Systematic review not found.' });
+
+    // Fetch records to reconcile PRISMA
+    let records = [];
+    let searchRuns = [];
+    if (isDbConnected()) {
+      records = await StudyRecord.find({ reviewId }).lean();
+      searchRuns = await SearchStrategy.find({ reviewId }).lean();
+    } else {
+      records = [...memStudyRecords.values()].filter(s => s.reviewId === reviewId);
+      searchRuns = [...memSearchStrategies.values()].filter(s => s.reviewId === reviewId);
+    }
+
+    const prismaReconciled = reconcilePrisma2020Metrics(review, records, searchRuns);
+    res.json({ ...review, prismaReconciled, recordCount: records.length });
+  } catch (e) { next(e); }
+});
+
+// 4. Update Review Details & Screening Settings
+apiRouter.patch('/systematic-reviews/:reviewId', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const allowed = ['title', 'reviewType', 'status', 'currentStage', 'registration', 'picosFramework', 'eligibility', 'screeningSettings'];
+    const updates = {};
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+    updates.updatedAt = new Date();
+
+    if (isDbConnected()) {
+      const updated = await SystematicReview.findOneAndUpdate({ _id: reviewId, deletedAt: null }, { $set: updates }, { new: true }).lean();
+      if (!updated) return res.status(404).json({ error: 'Review not found.' });
+      await recordReviewAudit(reviewId, req.user.id, 'review_updated', 'Review configuration updated.');
+      return res.json(updated);
+    }
+
+    const rev = memSystematicReviews.get(reviewId);
+    if (!rev || rev.deletedAt) return res.status(404).json({ error: 'Review not found.' });
+    Object.assign(rev, updates, { updatedAt: new Date().toISOString() });
+    await recordReviewAudit(reviewId, req.user.id, 'review_updated', 'Review configuration updated.');
+    res.json(rev);
+  } catch (e) { next(e); }
+});
+
+// 5. Delete Systematic Review (Soft Delete)
+apiRouter.delete('/systematic-reviews/:reviewId', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    if (isDbConnected()) {
+      const review = await SystematicReview.findOne({ _id: reviewId, deletedAt: null });
+      if (!review) return res.status(404).json({ error: 'Review not found.' });
+      review.deletedAt = new Date();
+      await review.save();
+      await recordReviewAudit(reviewId, req.user.id, 'review_deleted', 'Review moved to trash.');
+      return res.json({ success: true, deleted: true });
+    }
+    const rev = memSystematicReviews.get(reviewId);
+    if (!rev || rev.deletedAt) return res.status(404).json({ error: 'Review not found.' });
+    rev.deletedAt = new Date().toISOString();
+    await recordReviewAudit(reviewId, req.user.id, 'review_deleted', 'Review moved to trash.');
+    res.json({ success: true, deleted: true });
+  } catch (e) { next(e); }
+});
+
+// 6. Protocol Management (GET & PUT)
+apiRouter.get('/systematic-reviews/:reviewId/protocol', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    if (isDbConnected()) {
+      const proto = await ReviewProtocol.findOne({ reviewId }).lean();
+      if (proto) return res.json(proto);
+      const rev = await SystematicReview.findById(reviewId).select('title picosFramework eligibility').lean();
+      return res.json({
+        reviewId,
+        title: rev?.title || '',
+        framework: rev?.picosFramework?.framework || 'PICO',
+        picoElements: rev?.picosFramework || {},
+        inclusionCriteria: rev?.eligibility?.inclusionCriteria || [],
+        exclusionCriteria: rev?.eligibility?.exclusionCriteria || [],
+        version: 1,
+        amendments: []
+      });
+    }
+
+    const proto = memReviewProtocols.get(reviewId);
+    if (proto) return res.json(proto);
+    const rev = memSystematicReviews.get(reviewId);
+    res.json({
+      reviewId,
+      title: rev?.title || '',
+      framework: rev?.picosFramework?.framework || 'PICO',
+      picoElements: rev?.picosFramework || {},
+      inclusionCriteria: rev?.eligibility?.inclusionCriteria || [],
+      exclusionCriteria: rev?.eligibility?.exclusionCriteria || [],
+      version: 1,
+      amendments: []
+    });
+  } catch (e) { next(e); }
+});
+
+apiRouter.put('/systematic-reviews/:reviewId/protocol', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const {
+      title,
+      framework,
+      background,
+      objectives,
+      picoElements,
+      inclusionCriteria,
+      exclusionCriteria,
+      searchStrategySummary,
+      dataExtractionPlan,
+      riskOfBiasTool,
+      synthesisPlan,
+      registrationNumber,
+      registryName,
+      amendmentNote
+    } = req.body || {};
+
+    let existing;
+    if (isDbConnected()) {
+      existing = await ReviewProtocol.findOne({ reviewId });
+    } else {
+      existing = memReviewProtocols.get(reviewId);
+    }
+
+    const newVersion = (existing?.version || 1) + (amendmentNote ? 1 : 0);
+    const amendments = [...(existing?.amendments || [])];
+    if (amendmentNote) {
+      amendments.push({
+        version: newVersion,
+        date: new Date(),
+        reason: amendmentNote.trim(),
+        authorId: req.user.id
+      });
+    }
+
+    const protoData = {
+      reviewId,
+      title: title || existing?.title || 'Systematic Review Protocol',
+      framework: framework || existing?.framework || 'PICO',
+      background: background || existing?.background || '',
+      objectives: objectives || existing?.objectives || '',
+      picoElements: picoElements || existing?.picoElements || {},
+      inclusionCriteria: Array.isArray(inclusionCriteria) ? inclusionCriteria : (existing?.inclusionCriteria || []),
+      exclusionCriteria: Array.isArray(exclusionCriteria) ? exclusionCriteria : (existing?.exclusionCriteria || []),
+      searchStrategySummary: searchStrategySummary || existing?.searchStrategySummary || '',
+      dataExtractionPlan: dataExtractionPlan || existing?.dataExtractionPlan || '',
+      riskOfBiasTool: riskOfBiasTool || existing?.riskOfBiasTool || 'RoB 2',
+      synthesisPlan: synthesisPlan || existing?.synthesisPlan || '',
+      registrationNumber: registrationNumber || existing?.registrationNumber || '',
+      registryName: registryName || existing?.registryName || '',
+      version: newVersion,
+      amendments,
+      updatedAt: new Date()
+    };
+
+    if (isDbConnected()) {
+      const saved = await ReviewProtocol.findOneAndUpdate({ reviewId }, { $set: protoData }, { upsert: true, new: true });
+      await recordReviewAudit(reviewId, req.user.id, 'protocol_updated', `Protocol updated to version ${newVersion}.`);
+      return res.json(saved);
+    }
+
+    const saved = { _id: existing?._id || new mongoose.Types.ObjectId().toString(), ...protoData };
+    memReviewProtocols.set(reviewId, saved);
+    await recordReviewAudit(reviewId, req.user.id, 'protocol_updated', `Protocol updated to version ${newVersion}.`);
+    res.json(saved);
+  } catch (e) { next(e); }
+});
+
+// 7. Search Strategies Logging
+apiRouter.get('/systematic-reviews/:reviewId/search-strategies', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    if (isDbConnected()) {
+      const strategies = await SearchStrategy.find({ reviewId }).sort({ searchDate: -1, createdAt: -1 }).lean();
+      return res.json(strategies);
+    }
+    const strategies = [...memSearchStrategies.values()].filter(s => s.reviewId === reviewId);
+    res.json(strategies);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/systematic-reviews/:reviewId/search-strategies', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const {
+      databaseName,
+      sourceType = 'database',
+      searchString,
+      searchDate,
+      filtersApplied = [],
+      recordsRetrieved = 0,
+      notes = ''
+    } = req.body || {};
+
+    if (!databaseName || !databaseName.trim()) {
+      return res.status(400).json({ error: 'Database or information source name is required.' });
+    }
+
+    const stratData = {
+      reviewId,
+      databaseName: databaseName.trim(),
+      sourceType,
+      searchString: searchString || '',
+      searchDate: searchDate ? new Date(searchDate) : new Date(),
+      filtersApplied,
+      recordsRetrieved: Number(recordsRetrieved) || 0,
+      notes,
+      userId: req.user.id
+    };
+
+    if (isDbConnected()) {
+      const doc = await SearchStrategy.create(stratData);
+      await recordReviewAudit(reviewId, req.user.id, 'search_run_logged', `Search executed on ${doc.databaseName} retrieving ${doc.recordsRetrieved} records.`);
+      return res.status(201).json(doc);
+    }
+
+    const id = new mongoose.Types.ObjectId().toString();
+    const doc = { _id: id, ...stratData, createdAt: new Date().toISOString() };
+    memSearchStrategies.set(id, doc);
+    await recordReviewAudit(reviewId, req.user.id, 'search_run_logged', `Search executed on ${doc.databaseName} retrieving ${doc.recordsRetrieved} records.`);
+    res.status(201).json(doc);
+  } catch (e) { next(e); }
+});
+
+// 8. Multi-Source Study Records Import (RIS, BibTeX, CSV, Reference Manager)
+apiRouter.post('/systematic-reviews/:reviewId/import', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const {
+      format = 'json',
+      content = '',
+      records = [],
+      referenceIds = [],
+      sourceDatabase = 'Direct Import',
+      sourceType = 'database',
+      searchRunId = null
+    } = req.body || {};
+
+    let parsedRecords = [];
+
+    if (format === 'ris' && typeof content === 'string') {
+      const rawParsed = parseRis(content);
+      parsedRecords = rawParsed.map(r => ({
+        title: r.title || 'Untitled Record',
+        authors: Array.isArray(r.authors) ? r.authors : [r.authors || 'Unknown'],
+        year: r.year || '',
+        journal: r.journal || '',
+        doi: normalizeDoi(r.doi || ''),
+        pmid: normalizePmid(r.pmid || ''),
+        abstract: r.abstract || '',
+        sourceDatabase,
+        sourceType
+      }));
+    } else if (format === 'bibtex' && typeof content === 'string') {
+      const rawParsed = parseBibtex(content);
+      parsedRecords = rawParsed.map(r => ({
+        title: r.title || 'Untitled Record',
+        authors: Array.isArray(r.authors) ? r.authors : [r.authors || 'Unknown'],
+        year: r.year || '',
+        journal: r.journal || '',
+        doi: normalizeDoi(r.doi || ''),
+        pmid: normalizePmid(r.pmid || ''),
+        abstract: r.abstract || '',
+        sourceDatabase,
+        sourceType
+      }));
+    } else if (format === 'csv' && typeof content === 'string') {
+      parsedRecords = parseCsvStudyRecords(content).map(r => ({ ...r, sourceDatabase, sourceType }));
+    } else if (Array.isArray(records) && records.length > 0) {
+      parsedRecords = records.map(r => ({
+        title: r.title || 'Untitled Record',
+        authors: Array.isArray(r.authors) ? r.authors : [r.authors || 'Unknown'],
+        year: r.year ? String(r.year) : '',
+        journal: r.journal || '',
+        doi: normalizeDoi(r.doi || ''),
+        pmid: normalizePmid(r.pmid || ''),
+        abstract: r.abstract || '',
+        sourceDatabase: r.sourceDatabase || sourceDatabase,
+        sourceType: r.sourceType || sourceType
+      }));
+    } else if (Array.isArray(referenceIds) && referenceIds.length > 0) {
+      // Import from Reference Manager
+      if (isDbConnected()) {
+        const refs = await Reference.find({ _id: { $in: referenceIds } }).lean();
+        parsedRecords = refs.map(r => ({
+          title: r.title,
+          authors: r.authors?.map(a => typeof a === 'string' ? a : `${a.given || ''} ${a.family || ''}`.trim()) || ['Unknown'],
+          year: r.year ? String(r.year) : '',
+          journal: r.journal || r.publisher || '',
+          doi: normalizeDoi(r.doi || ''),
+          abstract: r.abstract || '',
+          sourceDatabase: 'Reference Manager',
+          sourceType: 'other_methods'
+        }));
+      } else {
+        const allRefs = [...(app.locals.memReferences?.values() || [])];
+        const matched = allRefs.filter(r => referenceIds.includes(r._id));
+        parsedRecords = matched.map(r => ({
+          title: r.title,
+          authors: r.authors || ['Unknown'],
+          year: r.year ? String(r.year) : '',
+          journal: r.journal || '',
+          doi: normalizeDoi(r.doi || ''),
+          abstract: r.abstract || '',
+          sourceDatabase: 'Reference Manager',
+          sourceType: 'other_methods'
+        }));
+      }
+    }
+
+    if (!parsedRecords.length) {
+      return res.status(400).json({ error: 'No valid study records could be parsed from input.' });
+    }
+
+    // Retrieve existing records to test for duplicates
+    let existingRecords = [];
+    if (isDbConnected()) {
+      existingRecords = await StudyRecord.find({ reviewId }).lean();
+    } else {
+      existingRecords = [...memStudyRecords.values()].filter(s => s.reviewId === reviewId);
+    }
+
+    const insertedDocs = [];
+    let exactDupes = 0;
+
+    for (const rec of parsedRecords) {
+      // Test match against existing records
+      let matchedExisting = null;
+      let highestMatch = { isDuplicate: false, matchType: 'none', similarityScore: 0 };
+
+      for (const ex of existingRecords) {
+        const match = classifyDuplicateMatch(rec, ex);
+        if (match.isDuplicate && match.similarityScore > highestMatch.similarityScore) {
+          highestMatch = match;
+          matchedExisting = ex;
+        }
+      }
+
+      const isDupe = highestMatch.isDuplicate;
+      if (isDupe && highestMatch.matchType === 'exact') exactDupes++;
+
+      const studyPayload = {
+        reviewId,
+        searchRunId,
+        title: rec.title,
+        authors: rec.authors,
+        year: rec.year,
+        journal: rec.journal,
+        doi: rec.doi,
+        pmid: rec.pmid,
+        abstract: rec.abstract,
+        sourceDatabase: rec.sourceDatabase,
+        sourceType: rec.sourceType,
+        screeningStage: isDupe ? 'pre_screen' : 'title_abstract',
+        decision: isDupe ? 'excluded' : 'pending',
+        deduplicationStatus: isDupe ? 'duplicate' : 'unique',
+        duplicateOfRecordId: isDupe && matchedExisting ? matchedExisting._id : null,
+        fullTextStatus: 'not_sought',
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+
+      if (isDbConnected()) {
+        const created = await StudyRecord.create(studyPayload);
+        insertedDocs.push(created);
+        existingRecords.push(created.toObject());
+      } else {
+        const id = new mongoose.Types.ObjectId().toString();
+        const created = { _id: id, ...studyPayload };
+        memStudyRecords.set(id, created);
+        insertedDocs.push(created);
+        existingRecords.push(created);
+      }
+    }
+
+    await recordReviewAudit(
+      reviewId,
+      req.user.id,
+      'records_imported',
+      `Imported ${insertedDocs.length} records (${exactDupes} identified as duplicates).`
+    );
+
+    res.status(201).json({
+      success: true,
+      importedCount: insertedDocs.length,
+      duplicateCount: exactDupes,
+      uniqueCount: insertedDocs.length - exactDupes,
+      records: insertedDocs
+    });
+  } catch (e) { next(e); }
+});
+
+// 9. Records List with Filtering, Searching, & Pagination
+apiRouter.get('/systematic-reviews/:reviewId/records', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const {
+      stage,
+      decision,
+      deduplicationStatus,
+      search,
+      page = 1,
+      limit = 50
+    } = req.query;
+
+    const p = Math.max(1, parseInt(page, 10));
+    const lim = Math.max(1, Math.min(200, parseInt(limit, 10)));
+
+    if (isDbConnected()) {
+      const filter = { reviewId };
+      if (stage && stage !== 'all') filter.screeningStage = stage;
+      if (decision && decision !== 'all') filter.decision = decision;
+      if (deduplicationStatus && deduplicationStatus !== 'all') filter.deduplicationStatus = deduplicationStatus;
+      if (search && search.trim()) {
+        const rx = new RegExp(search.trim(), 'i');
+        filter.$or = [{ title: rx }, { abstract: rx }, { journal: rx }, { doi: rx }, { authors: rx }];
+      }
+
+      const total = await StudyRecord.countDocuments(filter);
+      const records = await StudyRecord.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((p - 1) * lim)
+        .limit(lim)
+        .lean();
+
+      return res.json({ total, page: p, limit: lim, records });
+    }
+
+    let records = [...memStudyRecords.values()].filter(s => s.reviewId === reviewId);
+    if (stage && stage !== 'all') records = records.filter(s => s.screeningStage === stage);
+    if (decision && decision !== 'all') records = records.filter(s => s.decision === decision);
+    if (deduplicationStatus && deduplicationStatus !== 'all') records = records.filter(s => s.deduplicationStatus === deduplicationStatus);
+    if (search && search.trim()) {
+      const q = search.trim().toLowerCase();
+      records = records.filter(s =>
+        (s.title && s.title.toLowerCase().includes(q)) ||
+        (s.abstract && s.abstract.toLowerCase().includes(q)) ||
+        (s.journal && s.journal.toLowerCase().includes(q)) ||
+        (s.doi && s.doi.toLowerCase().includes(q))
+      );
+    }
+
+    const total = records.length;
+    const paginated = records.slice((p - 1) * lim, p * lim);
+    res.json({ total, page: p, limit: lim, records: paginated });
+  } catch (e) { next(e); }
+});
+
+// Backward-compatible studies route
 apiRouter.get('/projects/:id/systematic-reviews/:reviewId/studies', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
@@ -6755,6 +7376,7 @@ apiRouter.get('/projects/:id/systematic-reviews/:reviewId/studies', requireAuth,
   } catch (e) { next(e); }
 });
 
+// Backward-compatible bulk insert studies
 apiRouter.post('/projects/:id/systematic-reviews/:reviewId/studies', requireAuth, async (req, res, next) => {
   try {
     const { studies = [] } = req.body || {};
@@ -6772,7 +7394,9 @@ apiRouter.post('/projects/:id/systematic-reviews/:reviewId/studies', requireAuth
         doi: s.doi || '',
         abstract: s.abstract || '',
         screeningStage: 'title_abstract',
-        decision: 'pending'
+        decision: 'pending',
+        deduplicationStatus: 'unique',
+        fullTextStatus: 'not_sought'
       };
 
       if (isDbConnected()) {
@@ -6786,17 +7410,264 @@ apiRouter.post('/projects/:id/systematic-reviews/:reviewId/studies', requireAuth
       }
     }
 
-    // Update PRISMA identified count
-    if (isDbConnected()) {
-      await SystematicReview.findByIdAndUpdate(req.params.reviewId, {
-        $inc: { 'prismaMetrics.identified': inserted.length }
-      });
-    }
-
     res.status(201).json({ addedCount: inserted.length, studies: inserted });
   } catch (e) { next(e); }
 });
 
+// 10. Deduplication Management & Automated Candidate Detection
+apiRouter.get('/systematic-reviews/:reviewId/duplicates', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    let records = [];
+    if (isDbConnected()) {
+      records = await StudyRecord.find({ reviewId }).lean();
+    } else {
+      records = [...memStudyRecords.values()].filter(s => s.reviewId === reviewId);
+    }
+
+    const { duplicateGroups, duplicateCount } = identifyReviewDuplicates(records);
+    res.json({ totalRecords: records.length, duplicateCount, duplicateGroups });
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/systematic-reviews/:reviewId/duplicates/resolve', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const { canonicalRecordId, duplicateRecordIds = [], action = 'merge' } = req.body || {};
+
+    if (!canonicalRecordId || !Array.isArray(duplicateRecordIds)) {
+      return res.status(400).json({ error: 'canonicalRecordId and duplicateRecordIds array are required.' });
+    }
+
+    if (isDbConnected()) {
+      if (action === 'merge' || action === 'mark_duplicate') {
+        await StudyRecord.updateMany(
+          { _id: { $in: duplicateRecordIds }, reviewId },
+          {
+            $set: {
+              deduplicationStatus: 'duplicate',
+              decision: 'excluded',
+              screeningStage: 'pre_screen',
+              duplicateOfRecordId: canonicalRecordId,
+              exclusionReason: 'Duplicate record removed'
+            }
+          }
+        );
+        await StudyRecord.updateOne(
+          { _id: canonicalRecordId, reviewId },
+          { $set: { deduplicationStatus: 'canonical' } }
+        );
+      } else if (action === 'keep_separate') {
+        await StudyRecord.updateMany(
+          { _id: { $in: [...duplicateRecordIds, canonicalRecordId] }, reviewId },
+          { $set: { deduplicationStatus: 'unique' } }
+        );
+      }
+    } else {
+      for (const id of duplicateRecordIds) {
+        const rec = memStudyRecords.get(id);
+        if (rec && rec.reviewId === reviewId) {
+          if (action === 'merge' || action === 'mark_duplicate') {
+            rec.deduplicationStatus = 'duplicate';
+            rec.decision = 'excluded';
+            rec.screeningStage = 'pre_screen';
+            rec.duplicateOfRecordId = canonicalRecordId;
+            rec.exclusionReason = 'Duplicate record removed';
+          } else {
+            rec.deduplicationStatus = 'unique';
+          }
+        }
+      }
+      const can = memStudyRecords.get(canonicalRecordId);
+      if (can && can.reviewId === reviewId) {
+        can.deduplicationStatus = action === 'keep_separate' ? 'unique' : 'canonical';
+      }
+    }
+
+    await recordReviewAudit(
+      reviewId,
+      req.user.id,
+      'duplicates_resolved',
+      `Resolved ${duplicateRecordIds.length} duplicates against canonical ${canonicalRecordId} (${action}).`
+    );
+
+    res.json({ success: true, resolvedCount: duplicateRecordIds.length, action });
+  } catch (e) { next(e); }
+});
+
+// 11. Screening Queue (Returns records pending screening for current user)
+apiRouter.get('/systematic-reviews/:reviewId/screening-queue', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const { stage = 'title_abstract', limit = 20 } = req.query;
+
+    let review;
+    let records = [];
+    let decisions = [];
+
+    if (isDbConnected()) {
+      review = await SystematicReview.findById(reviewId).lean();
+      records = await StudyRecord.find({
+        reviewId,
+        screeningStage: stage,
+        deduplicationStatus: { $ne: 'duplicate' }
+      }).limit(Number(limit) * 3).lean();
+      decisions = await ScreeningDecision.find({ reviewId, reviewerId: req.user.id }).lean();
+    } else {
+      review = memSystematicReviews.get(reviewId);
+      records = [...memStudyRecords.values()].filter(s =>
+        s.reviewId === reviewId &&
+        s.screeningStage === stage &&
+        s.deduplicationStatus !== 'duplicate'
+      );
+      decisions = [...memScreeningDecisions.values()].filter(d =>
+        d.reviewId === reviewId && d.reviewerId === req.user.id
+      );
+    }
+
+    const reviewedRecordIds = new Set(decisions.map(d => d.recordId.toString()));
+    const queue = records.filter(r => !reviewedRecordIds.has(r._id.toString())).slice(0, Number(limit));
+
+    res.json({
+      reviewId,
+      stage,
+      dualReviewerMode: review?.screeningSettings?.dualReviewerMode || false,
+      blindScreening: review?.screeningSettings?.blindScreening ?? true,
+      pendingCount: queue.length,
+      queue
+    });
+  } catch (e) { next(e); }
+});
+
+// 12. Record Screening Decision & Blind Conflict Detection
+apiRouter.post('/systematic-reviews/:reviewId/screening-decisions', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const { recordId, stage = 'title_abstract', decision, reason = '', confidenceScore, criteriaEvaluation } = req.body || {};
+
+    if (!recordId || !['included', 'excluded', 'unclear'].includes(decision)) {
+      return res.status(400).json({ error: 'recordId and valid decision (included, excluded, unclear) are required.' });
+    }
+
+    let review;
+    let record;
+    if (isDbConnected()) {
+      review = await SystematicReview.findById(reviewId);
+      record = await StudyRecord.findOne({ _id: recordId, reviewId });
+    } else {
+      review = memSystematicReviews.get(reviewId);
+      record = memStudyRecords.get(recordId);
+    }
+
+    if (!record) return res.status(404).json({ error: 'Record not found in review.' });
+
+    const decPayload = {
+      reviewId,
+      recordId,
+      reviewerId: req.user.id,
+      stage,
+      decision,
+      reason,
+      confidenceScore: confidenceScore || 1.0,
+      criteriaEvaluation: criteriaEvaluation || {},
+      decidedAt: new Date()
+    };
+
+    let savedDecision;
+    if (isDbConnected()) {
+      savedDecision = await ScreeningDecision.findOneAndUpdate(
+        { reviewId, recordId, reviewerId: req.user.id, stage },
+        { $set: decPayload },
+        { upsert: true, new: true }
+      );
+    } else {
+      const existingDecId = [...memScreeningDecisions.entries()]
+        .find(([_, d]) => d.reviewId === reviewId && d.recordId === recordId && d.reviewerId === req.user.id && d.stage === stage)?.[0];
+      const decId = existingDecId || new mongoose.Types.ObjectId().toString();
+      savedDecision = { _id: decId, ...decPayload };
+      memScreeningDecisions.set(decId, savedDecision);
+    }
+
+    // Check dual-reviewer policy & conflict detection
+    const isDual = review?.screeningSettings?.dualReviewerMode;
+    let allDecisionsForRecord = [];
+    if (isDbConnected()) {
+      allDecisionsForRecord = await ScreeningDecision.find({ reviewId, recordId, stage }).lean();
+    } else {
+      allDecisionsForRecord = [...memScreeningDecisions.values()].filter(d => d.reviewId === reviewId && d.recordId === recordId && d.stage === stage);
+    }
+
+    let conflictCreated = false;
+    if (isDual && allDecisionsForRecord.length >= 2) {
+      const distinctDecisions = new Set(allDecisionsForRecord.map(d => d.decision));
+      if (distinctDecisions.size > 1) {
+        // We have a disagreement between reviewers!
+        const conflictPayload = {
+          reviewId,
+          recordId,
+          stage,
+          decisions: allDecisionsForRecord.map(d => ({
+            reviewerId: d.reviewerId,
+            decision: d.decision,
+            reason: d.reason || '',
+            decidedAt: d.decidedAt
+          })),
+          status: 'pending'
+        };
+
+        if (isDbConnected()) {
+          await ReviewConflict.findOneAndUpdate({ reviewId, recordId, stage }, { $set: conflictPayload }, { upsert: true });
+        } else {
+          const exConflictId = [...memReviewConflicts.entries()].find(([_, c]) => c.reviewId === reviewId && c.recordId === recordId && c.stage === stage)?.[0];
+          const cId = exConflictId || new mongoose.Types.ObjectId().toString();
+          memReviewConflicts.set(cId, { _id: cId, ...conflictPayload });
+        }
+        conflictCreated = true;
+      } else {
+        // Both reviewers agree! Apply consensus to record
+        const agreedDecision = allDecisionsForRecord[0].decision;
+        if (agreedDecision === 'included') {
+          record.screeningStage = stage === 'title_abstract' ? 'full_text' : 'included';
+          record.decision = 'included';
+          record.fullTextStatus = stage === 'title_abstract' ? 'sought' : record.fullTextStatus;
+        } else {
+          record.decision = 'excluded';
+          record.exclusionReason = reason;
+        }
+        if (isDbConnected()) await record.save();
+      }
+    } else if (!isDual) {
+      // Single reviewer mode: decision immediately advances or excludes record
+      if (decision === 'included') {
+        record.screeningStage = stage === 'title_abstract' ? 'full_text' : 'included';
+        record.decision = 'included';
+        record.fullTextStatus = stage === 'title_abstract' ? 'sought' : record.fullTextStatus;
+      } else if (decision === 'excluded') {
+        record.decision = 'excluded';
+        record.exclusionReason = reason;
+      } else {
+        record.decision = 'unclear';
+      }
+      if (isDbConnected()) await record.save();
+    }
+
+    await recordReviewAudit(
+      reviewId,
+      req.user.id,
+      'screening_decision_recorded',
+      `Screened record ${record.title?.slice(0, 40)}... as "${decision}" (${stage}).`
+    );
+
+    res.json({
+      success: true,
+      decision: savedDecision,
+      conflictDetected: conflictCreated,
+      dualReviewerMode: Boolean(isDual)
+    });
+  } catch (e) { next(e); }
+});
+
+// Backward-compatible screen endpoint
 apiRouter.post('/projects/:id/systematic-reviews/:reviewId/studies/:studyId/screen', requireAuth, async (req, res, next) => {
   try {
     const { decision, reason = '' } = req.body || {};
@@ -6807,26 +7678,18 @@ apiRouter.post('/projects/:id/systematic-reviews/:reviewId/studies/:studyId/scre
     if (isDbConnected()) {
       const study = await StudyRecord.findByIdAndUpdate(
         req.params.studyId,
-        { $set: { decision, exclusionReason: reason, screenerId: req.user.id } },
+        {
+          $set: {
+            decision,
+            exclusionReason: reason,
+            screenerId: req.user.id,
+            screeningStage: decision === 'included' ? 'full_text' : 'title_abstract',
+            fullTextStatus: decision === 'included' ? 'sought' : 'not_sought'
+          }
+        },
         { new: true }
       );
       if (!study) return res.status(404).json({ error: 'Study not found.' });
-
-      // Re-aggregate PRISMA metrics
-      const totalIdentified = await StudyRecord.countDocuments({ reviewId: req.params.reviewId });
-      const screened = await StudyRecord.countDocuments({ reviewId: req.params.reviewId, decision: { $ne: 'pending' } });
-      const excluded = await StudyRecord.countDocuments({ reviewId: req.params.reviewId, decision: 'excluded' });
-      const included = await StudyRecord.countDocuments({ reviewId: req.params.reviewId, decision: 'included' });
-
-      await SystematicReview.findByIdAndUpdate(req.params.reviewId, {
-        $set: {
-          'prismaMetrics.identified': totalIdentified,
-          'prismaMetrics.screenedTitleAbstract': screened,
-          'prismaMetrics.excludedTitleAbstract': excluded,
-          'prismaMetrics.includedInSynthesis': included
-        }
-      });
-
       return res.json(study);
     }
 
@@ -6834,22 +7697,462 @@ apiRouter.post('/projects/:id/systematic-reviews/:reviewId/studies/:studyId/scre
     if (!s) return res.status(404).json({ error: 'Study not found.' });
     s.decision = decision;
     s.exclusionReason = reason;
+    s.screeningStage = decision === 'included' ? 'full_text' : 'title_abstract';
+    s.fullTextStatus = decision === 'included' ? 'sought' : 'not_sought';
     res.json(s);
   } catch (e) { next(e); }
 });
 
-apiRouter.get('/projects/:id/systematic-reviews/:reviewId/prisma', requireAuth, async (req, res, next) => {
+// 13. Conflicts Management & Adjudication
+apiRouter.get('/systematic-reviews/:reviewId/conflicts', requireAuth, async (req, res, next) => {
   try {
+    const { reviewId } = req.params;
+    let conflicts = [];
     if (isDbConnected()) {
-      const rev = await SystematicReview.findById(req.params.reviewId).select('prismaMetrics title').lean();
-      if (!rev) return res.status(404).json({ error: 'Review not found.' });
-      return res.json(rev.prismaMetrics || {});
+      conflicts = await ReviewConflict.find({ reviewId }).populate('recordId').sort({ createdAt: -1 }).lean();
+    } else {
+      conflicts = [...memReviewConflicts.values()].filter(c => c.reviewId === reviewId);
     }
-    const rev = memSystematicReviews.get(req.params.reviewId);
-    if (!rev) return res.status(404).json({ error: 'Review not found.' });
-    res.json(rev.prismaMetrics || {});
+    res.json(conflicts);
   } catch (e) { next(e); }
 });
+
+apiRouter.post('/systematic-reviews/:reviewId/conflicts/:conflictId/resolve', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId, conflictId } = req.params;
+    const { finalDecision, resolutionNotes = '', stage = 'title_abstract' } = req.body || {};
+
+    if (!['included', 'excluded'].includes(finalDecision)) {
+      return res.status(400).json({ error: 'Final decision must be "included" or "excluded".' });
+    }
+
+    let conflict;
+    let record;
+    if (isDbConnected()) {
+      conflict = await ReviewConflict.findById(conflictId);
+      if (!conflict) return res.status(404).json({ error: 'Conflict record not found.' });
+      record = await StudyRecord.findById(conflict.recordId);
+    } else {
+      conflict = memReviewConflicts.get(conflictId);
+      if (!conflict) return res.status(404).json({ error: 'Conflict record not found.' });
+      record = memStudyRecords.get(conflict.recordId);
+    }
+
+    conflict.status = 'resolved';
+    conflict.adjudicatorId = req.user.id;
+    conflict.finalDecision = finalDecision;
+    conflict.resolutionNotes = resolutionNotes;
+    conflict.resolvedAt = new Date();
+
+    if (record) {
+      if (finalDecision === 'included') {
+        record.decision = 'included';
+        record.screeningStage = stage === 'title_abstract' ? 'full_text' : 'included';
+        record.fullTextStatus = stage === 'title_abstract' ? 'sought' : record.fullTextStatus;
+      } else {
+        record.decision = 'excluded';
+        record.exclusionReason = resolutionNotes || 'Adjudicated exclusion';
+      }
+    }
+
+    if (isDbConnected()) {
+      await conflict.save();
+      if (record) await record.save();
+    }
+
+    await recordReviewAudit(
+      reviewId,
+      req.user.id,
+      'conflict_adjudicated',
+      `Conflict for record resolved as "${finalDecision}".`
+    );
+
+    res.json({ success: true, conflict, record });
+  } catch (e) { next(e); }
+});
+
+// 14. Full-Text Eligibility Assessment & Retrieval Status
+apiRouter.post('/systematic-reviews/:reviewId/full-text', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const {
+      recordId,
+      fullTextStatus, // 'sought', 'not_retrieved', 'retrieved', 'assessed'
+      fullTextPdfUrl,
+      decision, // 'included', 'excluded'
+      exclusionReason = '',
+      notes = ''
+    } = req.body || {};
+
+    if (!recordId) return res.status(400).json({ error: 'recordId is required.' });
+
+    let record;
+    if (isDbConnected()) {
+      record = await StudyRecord.findOne({ _id: recordId, reviewId });
+    } else {
+      record = memStudyRecords.get(recordId);
+    }
+    if (!record) return res.status(404).json({ error: 'Study record not found.' });
+
+    if (fullTextStatus) record.fullTextStatus = fullTextStatus;
+    if (fullTextPdfUrl) record.fullTextPdfUrl = fullTextPdfUrl;
+
+    if (decision === 'excluded') {
+      if (!exclusionReason || !exclusionReason.trim()) {
+        return res.status(400).json({ error: 'A structured exclusion reason is mandatory when excluding full-text reports under PRISMA 2020.' });
+      }
+      record.screeningStage = 'full_text';
+      record.decision = 'excluded';
+      record.exclusionReason = exclusionReason.trim();
+    } else if (decision === 'included') {
+      record.screeningStage = 'included';
+      record.decision = 'included';
+      record.exclusionReason = '';
+    }
+
+    if (isDbConnected()) {
+      await record.save();
+    }
+
+    await recordReviewAudit(
+      reviewId,
+      req.user.id,
+      'full_text_assessed',
+      `Full-text assessment for "${record.title?.slice(0, 40)}...": status=${fullTextStatus || 'updated'}, decision=${decision || 'pending'}.`
+    );
+
+    res.json({ success: true, record });
+  } catch (e) { next(e); }
+});
+
+// 15. Extraction Templates & Structured Study Extraction
+apiRouter.get('/systematic-reviews/:reviewId/extraction-templates', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    if (isDbConnected()) {
+      const templates = await ExtractionTemplate.find({ reviewId }).lean();
+      return res.json(templates);
+    }
+    const templates = [...memExtractionTemplates.values()].filter(t => t.reviewId === reviewId);
+    res.json(templates);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/systematic-reviews/:reviewId/extraction-templates', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const { templateName, fields = [] } = req.body || {};
+    if (!templateName) return res.status(400).json({ error: 'templateName is required.' });
+
+    const tmplData = {
+      reviewId,
+      templateName,
+      fields: fields.length ? fields : [
+        { key: 'sampleSize', label: 'Sample Size (N)', type: 'number', required: true },
+        { key: 'studyDesign', label: 'Study Design', type: 'text', required: true },
+        { key: 'interventionGroup', label: 'Intervention Details', type: 'text', required: true },
+        { key: 'controlGroup', label: 'Control / Comparator', type: 'text', required: false },
+        { key: 'primaryOutcome', label: 'Primary Outcome Measure', type: 'text', required: true },
+        { key: 'effectSize', label: 'Effect Estimate (e.g. RR, MD, OR)', type: 'text', required: false }
+      ]
+    };
+
+    if (isDbConnected()) {
+      const created = await ExtractionTemplate.create(tmplData);
+      return res.status(201).json(created);
+    }
+
+    const id = new mongoose.Types.ObjectId().toString();
+    const created = { _id: id, ...tmplData, createdAt: new Date().toISOString() };
+    memExtractionTemplates.set(id, created);
+    res.status(201).json(created);
+  } catch (e) { next(e); }
+});
+
+apiRouter.get('/systematic-reviews/:reviewId/extractions', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    if (isDbConnected()) {
+      const extractions = await StudyExtraction.find({ reviewId }).populate('recordId').lean();
+      return res.json(extractions);
+    }
+    const extractions = [...memStudyExtractions.values()].filter(e => e.reviewId === reviewId);
+    res.json(extractions);
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/systematic-reviews/:reviewId/extractions', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const { recordId, templateId, extractedFields = {}, provenanceQuotes = [], status = 'draft' } = req.body || {};
+    if (!recordId) return res.status(400).json({ error: 'recordId is required.' });
+
+    const extPayload = {
+      reviewId,
+      recordId,
+      templateId,
+      extractorId: req.user.id,
+      extractedFields,
+      provenanceQuotes,
+      status,
+      updatedAt: new Date()
+    };
+
+    if (isDbConnected()) {
+      const ext = await StudyExtraction.findOneAndUpdate({ reviewId, recordId }, { $set: extPayload }, { upsert: true, new: true });
+      await recordReviewAudit(reviewId, req.user.id, 'data_extracted', `Data extraction saved for study.`);
+      return res.json(ext);
+    }
+
+    const exId = [...memStudyExtractions.entries()].find(([_, e]) => e.reviewId === reviewId && e.recordId === recordId)?.[0];
+    const id = exId || new mongoose.Types.ObjectId().toString();
+    const ext = { _id: id, ...extPayload };
+    memStudyExtractions.set(id, ext);
+    await recordReviewAudit(reviewId, req.user.id, 'data_extracted', `Data extraction saved for study.`);
+    res.json(ext);
+  } catch (e) { next(e); }
+});
+
+// 16. Methodological Risk of Bias Assessment (RoB 2, ROBINS-I, QUADAS-2)
+apiRouter.get('/systematic-reviews/:reviewId/risk-of-bias', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const { toolName } = req.query;
+
+    let assessments = [];
+    if (isDbConnected()) {
+      assessments = await RiskOfBiasAssessment.find({ reviewId }).populate('recordId').lean();
+    } else {
+      assessments = [...memRiskOfBiasAssessments.values()].filter(r => r.reviewId === reviewId);
+    }
+
+    res.json({
+      templates: RISK_OF_BIAS_TEMPLATES,
+      assessments
+    });
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/systematic-reviews/:reviewId/risk-of-bias', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const { recordId, toolName = 'RoB 2', domainAssessments = [], consensusReached = true } = req.body || {};
+    if (!recordId) return res.status(400).json({ error: 'recordId is required.' });
+
+    const overallJudgment = computeOverallRiskOfBias(toolName, domainAssessments);
+
+    const robPayload = {
+      reviewId,
+      recordId,
+      toolName,
+      assessorId: req.user.id,
+      domainAssessments,
+      overallJudgment,
+      consensusReached,
+      updatedAt: new Date()
+    };
+
+    if (isDbConnected()) {
+      const assessment = await RiskOfBiasAssessment.findOneAndUpdate(
+        { reviewId, recordId, toolName },
+        { $set: robPayload },
+        { upsert: true, new: true }
+      );
+      await recordReviewAudit(reviewId, req.user.id, 'risk_of_bias_assessed', `Risk of bias (${toolName}) assessed as "${overallJudgment}".`);
+      return res.json(assessment);
+    }
+
+    const exId = [...memRiskOfBiasAssessments.entries()].find(([_, r]) => r.reviewId === reviewId && r.recordId === recordId && r.toolName === toolName)?.[0];
+    const id = exId || new mongoose.Types.ObjectId().toString();
+    const assessment = { _id: id, ...robPayload };
+    memRiskOfBiasAssessments.set(id, assessment);
+    await recordReviewAudit(reviewId, req.user.id, 'risk_of_bias_assessed', `Risk of bias (${toolName}) assessed as "${overallJudgment}".`);
+    res.json(assessment);
+  } catch (e) { next(e); }
+});
+
+// 17. Reconciled PRISMA 2020 Flow Calculation & SVG Diagram
+apiRouter.get('/systematic-reviews/:reviewId/prisma', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    let review;
+    let records = [];
+    let searchRuns = [];
+
+    if (isDbConnected()) {
+      review = await SystematicReview.findById(reviewId).lean();
+      if (!review) return res.status(404).json({ error: 'Review not found.' });
+      records = await StudyRecord.find({ reviewId }).lean();
+      searchRuns = await SearchStrategy.find({ reviewId }).lean();
+    } else {
+      review = memSystematicReviews.get(reviewId);
+      if (!review) return res.status(404).json({ error: 'Review not found.' });
+      records = [...memStudyRecords.values()].filter(s => s.reviewId === reviewId);
+      searchRuns = [...memSearchStrategies.values()].filter(s => s.reviewId === reviewId);
+    }
+
+    const reconciliation = reconcilePrisma2020Metrics(review, records, searchRuns);
+    const svgDiagram = generatePrismaSvg(reconciliation.counts);
+
+    res.json({
+      reviewId,
+      title: review.title,
+      reviewType: review.reviewType,
+      prisma2020: reconciliation,
+      svgDiagram
+    });
+  } catch (e) { next(e); }
+});
+
+// Backward-compatible project-level PRISMA route
+apiRouter.get('/projects/:id/systematic-reviews/:reviewId/prisma', requireAuth, async (req, res, next) => {
+  try {
+    let review;
+    let records = [];
+    let searchRuns = [];
+    if (isDbConnected()) {
+      review = await SystematicReview.findById(req.params.reviewId).lean();
+      if (!review) return res.status(404).json({ error: 'Review not found.' });
+      records = await StudyRecord.find({ reviewId: req.params.reviewId }).lean();
+      searchRuns = await SearchStrategy.find({ reviewId: req.params.reviewId }).lean();
+    } else {
+      review = memSystematicReviews.get(req.params.reviewId);
+      if (!review) return res.status(404).json({ error: 'Review not found.' });
+      records = [...memStudyRecords.values()].filter(s => s.reviewId === req.params.reviewId);
+      searchRuns = [...memSearchStrategies.values()].filter(s => s.reviewId === req.params.reviewId);
+    }
+
+    const reconciliation = reconcilePrisma2020Metrics(review, records, searchRuns);
+    res.json({ ...reconciliation.counts, reconciliation });
+  } catch (e) { next(e); }
+});
+
+// 18. PRISMA 2020 27-Item Checklist Tracking
+apiRouter.get('/systematic-reviews/:reviewId/prisma/checklist', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    let review;
+    if (isDbConnected()) {
+      review = await SystematicReview.findById(reviewId).select('checklistStatus').lean();
+    } else {
+      review = memSystematicReviews.get(reviewId);
+    }
+
+    const savedStatus = review?.checklistStatus || {};
+    const checklist = PRISMA_2020_CHECKLIST_ITEMS.map(item => ({
+      ...item,
+      status: savedStatus[item.item]?.status || 'unreported',
+      location: savedStatus[item.item]?.location || '',
+      notes: savedStatus[item.item]?.notes || ''
+    }));
+
+    res.json({ reviewId, checklist });
+  } catch (e) { next(e); }
+});
+
+apiRouter.put('/systematic-reviews/:reviewId/prisma/checklist', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const { item, status, location = '', notes = '' } = req.body || {};
+    if (!item) return res.status(400).json({ error: 'Checklist item identifier is required.' });
+
+    const key = `checklistStatus.${item}`;
+    const value = { status: status || 'reported', location, notes, updatedAt: new Date() };
+
+    if (isDbConnected()) {
+      const updated = await SystematicReview.findByIdAndUpdate(
+        reviewId,
+        { $set: { [key]: value } },
+        { new: true }
+      );
+      return res.json({ success: true, item, ...value });
+    }
+
+    const rev = memSystematicReviews.get(reviewId);
+    if (!rev) return res.status(404).json({ error: 'Review not found.' });
+    if (!rev.checklistStatus) rev.checklistStatus = {};
+    rev.checklistStatus[item] = value;
+    res.json({ success: true, item, ...value });
+  } catch (e) { next(e); }
+});
+
+// 19. Methodological Audit Trail
+apiRouter.get('/systematic-reviews/:reviewId/audit-trail', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    let events = [];
+    if (isDbConnected()) {
+      events = await ReviewAuditEvent.find({ reviewId }).populate('userId', 'name email').sort({ timestamp: -1 }).lean();
+    } else {
+      events = [...memReviewAuditEvents.values()]
+        .filter(e => e.reviewId === reviewId)
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    }
+    res.json(events);
+  } catch (e) { next(e); }
+});
+
+// 20. Reproducible Review Evidence Export (CSV & JSON)
+apiRouter.get('/systematic-reviews/:reviewId/export', requireAuth, async (req, res, next) => {
+  try {
+    const { reviewId } = req.params;
+    const { format = 'json' } = req.query;
+
+    let review;
+    let records = [];
+    let searchRuns = [];
+    let extractions = [];
+    let robAssessments = [];
+
+    if (isDbConnected()) {
+      review = await SystematicReview.findById(reviewId).lean();
+      if (!review) return res.status(404).json({ error: 'Review not found.' });
+      records = await StudyRecord.find({ reviewId }).lean();
+      searchRuns = await SearchStrategy.find({ reviewId }).lean();
+      extractions = await StudyExtraction.find({ reviewId }).lean();
+      robAssessments = await RiskOfBiasAssessment.find({ reviewId }).lean();
+    } else {
+      review = memSystematicReviews.get(reviewId);
+      if (!review) return res.status(404).json({ error: 'Review not found.' });
+      records = [...memStudyRecords.values()].filter(s => s.reviewId === reviewId);
+      searchRuns = [...memSearchStrategies.values()].filter(s => s.reviewId === reviewId);
+      extractions = [...memStudyExtractions.values()].filter(e => e.reviewId === reviewId);
+      robAssessments = [...memRiskOfBiasAssessments.values()].filter(r => r.reviewId === reviewId);
+    }
+
+    const reconciliation = reconcilePrisma2020Metrics(review, records, searchRuns);
+
+    if (format === 'csv') {
+      // Export included studies as CSV
+      const included = records.filter(r => r.screeningStage === 'included' || (r.decision === 'included' && r.screeningStage !== 'title_abstract'));
+      const header = 'Study ID,Title,Authors,Year,Journal,DOI,Screening Stage,Decision\n';
+      const rows = included.map(r =>
+        `"${r._id}","${(r.title || '').replace(/"/g, '""')}","${(r.authors || []).join('; ').replace(/"/g, '""')}","${r.year || ''}","${(r.journal || '').replace(/"/g, '""')}","${r.doi || ''}","${r.screeningStage}","${r.decision}"`
+      ).join('\n');
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="included_studies_${reviewId}.csv"`);
+      return res.send(header + rows);
+    }
+
+    res.json({
+      exportedAt: new Date().toISOString(),
+      review,
+      prisma2020: reconciliation,
+      searchStrategies: searchRuns,
+      recordSummary: {
+        total: records.length,
+        included: records.filter(r => r.screeningStage === 'included').length,
+        excludedFullText: records.filter(r => r.screeningStage === 'full_text' && r.decision === 'excluded').length,
+        duplicates: records.filter(r => r.deduplicationStatus === 'duplicate').length
+      },
+      records,
+      extractions,
+      riskOfBiasAssessments: robAssessments
+    });
+  } catch (e) { next(e); }
+});
+
 
 // Journal Submission Studio Endpoints (Module 7)
 apiRouter.get('/projects/:id/submission', requireAuth, async (req, res, next) => {
