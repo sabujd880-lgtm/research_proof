@@ -138,3 +138,4 @@ Stores formal methodological bias assessments using Cochrane RoB 2, ROBINS-I, or
 | `domainAssessments` | Array[Object] | Domain ID, judgment (`low`, `some_concerns`, `high`), and supporting quotation |
 | `overallJudgment` | String | Deterministic overall risk of bias judgment |
 | `consensusReached` | Boolean | True if peer-agreed |
+

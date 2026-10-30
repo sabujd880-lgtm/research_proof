@@ -39,3 +39,4 @@ Phase 8 has been audited for multi-tenant safety, cross-user isolation, authoriz
 3. **Audit Trail Immutability**:
    - Screening decisions and conflict resolutions generate append-only `ReviewAuditEvent` entries.
    - No review history can be silently purged or modified out of order.
+

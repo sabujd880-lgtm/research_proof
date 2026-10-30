@@ -62,3 +62,4 @@ flowchart TD
 1. Retrieval status is tracked (`sought`, `not_retrieved`, `assessed`).
 2. Reports assessed for eligibility require a mandatory, structured exclusion reason if rejected (e.g., Wrong Population, Wrong Intervention, Ineligible Study Design).
 3. Records meeting all criteria advance to the **Included** stage for data extraction and synthesis.
+

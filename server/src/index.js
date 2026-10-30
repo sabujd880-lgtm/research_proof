@@ -302,6 +302,7 @@ function clearSessionCookie(res, req) {
 
 // Google OAuth Verification (Section 2)
 const getGoogleClientId = () => (process.env.GOOGLE_CLIENT_ID || '').trim();
+const getGoogleClientSecret = () => (process.env.GOOGLE_CLIENT_SECRET || '').trim();
 
 async function verifyGoogleToken(idToken) {
   const expectedClientId = getGoogleClientId();
@@ -1139,9 +1140,10 @@ async function handleGoogleOAuthCallback(req, res, next) {
       grant_type: 'authorization_code',
       code_verifier: codeVerifier
     });
-    const clientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+    const clientSecret = getGoogleClientSecret();
     if (!clientSecret) {
       console.warn('[Google OAuth Token Exchange] WARNING: GOOGLE_CLIENT_SECRET is missing from environment. Google Web Client token exchange may fail with invalid_client.');
+      return sendAuthError('Google authentication failed: GOOGLE_CLIENT_SECRET is not configured on this server. Please configure it in your deployment settings.');
     } else {
       tokenParams.set('client_secret', clientSecret);
     }
@@ -10651,8 +10653,8 @@ function validateStartupConfiguration() {
   if (isTest) return;
 
   const isProd = process.env.NODE_ENV === 'production';
-  const gClientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
-  const gClientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+  const gClientId = getGoogleClientId();
+  const gClientSecret = getGoogleClientSecret();
   const { uri: mongoUri, sourceKey: mongoSourceKey } = resolveMongoUri();
   const mongoDiag = getSanitizedMongoDiagnostics(mongoUri, mongoSourceKey);
   const jwtSecretEnv = (process.env.JWT_SECRET || '').trim();

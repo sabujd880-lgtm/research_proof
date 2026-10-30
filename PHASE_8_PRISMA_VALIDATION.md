@@ -79,3 +79,4 @@ The PRISMA Reconciliation Engine (`reconcilePrisma2020Metrics`) runs the followi
 3. **Retrieval Accounting**: Reports assessed must equal reports sought minus reports not retrieved.
 4. **Inclusion Parity**: Studies included must strictly equal reports assessed minus reports excluded at full text.
 5. **Reason Completeness**: The sum of reports in the exclusion reasons breakdown must exactly equal the total full-text excluded count.
+
