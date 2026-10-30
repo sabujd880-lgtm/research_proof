@@ -1292,19 +1292,20 @@ export default function App() {
   // Auth Screen
   if (!user || authState === 'unauthenticated') {
     const authContent = (
-      <div className="auth-card">
-        <div className="brand-mark"><ShieldCheck size={25} /></div>
-        <p className="eyebrow">ACADEMIC WORKSPACE</p>
-        <h1>ResearchProof <span>AI</span></h1>
-        <p className="muted">Rigorous scientific writing assistance and research integrity platform.</p>
+      <div className="auth-card" style={{ width: '100%', maxWidth: '440px', margin: '0 auto' }}>
+        <div className="brand-mark auth-brand-badge"><ShieldCheck size={26} /></div>
+        <p className="eyebrow auth-eyebrow">ACADEMIC WORKSPACE</p>
+        <h1 className="auth-title">ResearchProof <span>AI</span></h1>
+        <p className="muted auth-subtitle">Rigorous scientific writing assistance and research integrity platform.</p>
 
         {/* Google Authentication Section */}
         {isGoogleConfigured ? (
           <>
-            <div className="google-btn-wrap">
+            <div className="google-btn-wrap" style={{ width: '100%' }}>
               <button
                 type="button"
-                className="google-oauth-redirect-btn"
+                className="google-oauth-redirect-btn auth-google-btn"
+                style={{ width: '100%' }}
                 onClick={() => {
                   const returnTo = encodeURIComponent(window.location.origin);
                   window.location.href = `${API}/auth/google/start?return_to=${returnTo}`;
@@ -1319,13 +1320,36 @@ export default function App() {
                 <span>Continue with Google</span>
               </button>
             </div>
-            <div className="auth-divider">or continue with email</div>
+            <div className="auth-divider"><span>or continue with email</span></div>
           </>
         ) : null}
 
-        <form onSubmit={authenticate} className="auth-form">
-          <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@university.edu" /></label>
-          <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} required minLength={10} placeholder="At least 10 characters" /></label>
+        <form onSubmit={authenticate} className="auth-form" style={{ display: 'flex', flexDirection: 'column', gap: '16px', width: '100%' }}>
+          <label className="auth-field-label" style={{ display: 'flex', flexDirection: 'column', gap: '6px', textAlign: 'left', width: '100%' }}>
+            <span>Email address</span>
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              required
+              placeholder="you@university.edu"
+              className="auth-input"
+              style={{ width: '100%', boxSizing: 'border-box' }}
+            />
+          </label>
+          <label className="auth-field-label" style={{ display: 'flex', flexDirection: 'column', gap: '6px', textAlign: 'left', width: '100%' }}>
+            <span>Password</span>
+            <input
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              required
+              minLength={10}
+              placeholder="At least 10 characters"
+              className="auth-input"
+              style={{ width: '100%', boxSizing: 'border-box' }}
+            />
+          </label>
 
           {/* Turnstile verification widget rendered if active for registration or flagged for login */}
           {((authMode === 'register' && Boolean(turnstileSiteKey)) || (authMode === 'login' && requiresTurnstile && Boolean(turnstileSiteKey))) && (
@@ -1351,10 +1375,14 @@ export default function App() {
           )}
 
           {authError && <div className="alert error">{authError}</div>}
-          <button className="primary full" type="submit">{authMode === 'register' ? 'Create secure account' : 'Sign in'} <span>→</span></button>
+          <button className="primary full auth-submit-btn" type="submit" style={{ width: '100%', boxSizing: 'border-box' }}>
+            <span>{authMode === 'register' ? 'Create secure account' : 'Sign in'}</span>
+            <ArrowRight size={15} />
+          </button>
         </form>
-        <p className="switch-auth">
-          {authMode === 'register' ? 'Already registered?' : 'New to ResearchProof?'} <button className="text-button" type="button" onClick={() => {
+        <p className="switch-auth auth-switch">
+          {authMode === 'register' ? 'Already registered?' : 'New to ResearchProof?'}{' '}
+          <button className="text-button auth-text-btn" type="button" onClick={() => {
             const nextMode = authMode === 'register' ? 'login' : 'register';
             setAuthMode(nextMode);
             setAuthError('');
@@ -1362,16 +1390,20 @@ export default function App() {
             setTurnstileResetCount(c => c + 1);
           }}>{authMode === 'register' ? 'Sign in' : 'Create account'}</button>
         </p>
-        <div className="privacy-note"><ShieldCheck size={16} /> Your research manuscripts are never persisted without your consent.</div>
+        <div className="privacy-note auth-privacy-note">
+          <ShieldCheck size={16} />
+          <span>Your research manuscripts are never persisted without your consent.</span>
+        </div>
       </div>
     );
 
     const canInitializeGoogle = Boolean(isGoogleConfigured && isOriginSupportedByGoogle && googleClientId);
     return (
-      <div className={`auth-page ${dark ? 'dark' : ''}`}>
+      <div className={`auth-page ${dark ? 'dark' : ''}`} style={{ minHeight: '100vh', width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
         <button
           type="button"
           className="auth-theme-toggle"
+          style={{ position: 'absolute', top: '24px', right: '24px' }}
           onClick={() => setDark(!dark)}
           title={`Switch to ${dark ? 'Light' : 'Dark'} theme`}
           aria-label="Toggle theme"
@@ -4637,7 +4669,9 @@ function Dashboard({
               </div>
             ) : (
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <span style={{ fontSize: '13px', color: 'var(--rp-text-muted)' }}>No research project created yet.</span>
+                <span style={{ fontSize: '13px', color: 'var(--rp-text-muted)' }}>
+                  No research projects yet. Create your first project to start managing research tasks and milestones.
+                </span>
                 <button className="btn-secondary btn-sm" onClick={() => setShowProjectForm(true)}>
                   <Plus size={12} /> Create First Project
                 </button>
@@ -4669,22 +4703,24 @@ function Dashboard({
         </div>
 
         {/* Linear Workflow Step Badges */}
-        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', paddingTop: '10px', borderTop: '1px solid var(--rp-border-subtle)' }}>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', paddingTop: '10px', borderTop: '1px solid var(--rp-border-subtle)', alignItems: 'center' }}>
           <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--rp-text-muted)', alignSelf: 'center', marginRight: '4px' }}>
             Stage Modules:
           </span>
           {workflowStages.map(st => {
-            const isActive = (activeProject?.workflowStage || 'literature').toLowerCase().includes(st.id);
+            const isActive = Boolean(activeProject && (activeProject.workflowStage || 'literature').toLowerCase().includes(st.id));
             const StepIcon = st.icon;
             return (
               <button
                 key={st.id}
+                type="button"
                 onClick={() => setSection(st.section)}
-                className={`btn-secondary btn-sm ${isActive ? 'btn-primary' : ''}`}
-                style={{ gap: '5px', fontSize: '11px' }}
+                className={`stage-module-btn ${isActive ? 'active' : ''}`}
+                title={`Open ${st.label}`}
+                aria-label={`Open stage ${st.label}`}
               >
-                <StepIcon size={12} />
-                <span>{st.label}</span>
+                <StepIcon size={12} className="stage-icon" />
+                <span className="stage-label">{st.label}</span>
               </button>
             );
           })}
@@ -4884,7 +4920,30 @@ function Dashboard({
                   </div>
                 );
               })
-            ) : (
+            ) : projects.length === 0 ? (
+              <div style={{
+                textAlign: 'center',
+                padding: '30px 14px',
+                color: 'var(--rp-text-muted)',
+                fontSize: '12px',
+                background: 'var(--rp-surface-subtle)',
+                borderRadius: 'var(--rp-radius-sm)',
+                border: '1px dashed var(--rp-border)'
+              }}>
+                <FolderKanban size={24} style={{ margin: '0 auto 8px', color: 'var(--rp-accent)', opacity: 0.7 }} />
+                <p style={{ margin: '0 0 6px', fontWeight: 600, color: 'var(--rp-text)' }}>
+                  No research projects yet. Create your first project to start managing research tasks and milestones.
+                </p>
+                <button
+                  type="button"
+                  className="btn-primary btn-sm"
+                  onClick={() => setShowProjectForm(true)}
+                  style={{ marginTop: '4px' }}
+                >
+                  <Plus size={12} /> Create First Project
+                </button>
+              </div>
+            ) : (tasksTotal > 0 && tasksCompleted === tasksTotal) ? (
               <div style={{
                 textAlign: 'center',
                 padding: '30px 10px',
@@ -4894,6 +4953,17 @@ function Dashboard({
                 <CheckCircle2 size={24} style={{ margin: '0 auto 8px', color: 'var(--rp-accent)', opacity: 0.6 }} />
                 <p style={{ margin: 0, fontWeight: 600 }}>All milestones complete!</p>
                 <small style={{ fontSize: '10.5px' }}>Add next steps using the input above.</small>
+              </div>
+            ) : (
+              <div style={{
+                textAlign: 'center',
+                padding: '30px 10px',
+                color: 'var(--rp-text-muted)',
+                fontSize: '12px'
+              }}>
+                <CheckSquare size={24} style={{ margin: '0 auto 8px', color: 'var(--rp-text-muted)', opacity: 0.5 }} />
+                <p style={{ margin: 0, fontWeight: 600 }}>No pending milestones</p>
+                <small style={{ fontSize: '10.5px' }}>Add milestones for this project using the input above.</small>
               </div>
             )}
           </div>
@@ -5058,7 +5128,7 @@ function Dashboard({
       )}
 
       {/* 8 UNIFIED CORE MODULES */}
-      <div className="section-heading" style={{ marginBottom: '12px' }}>
+      <div className="section-heading" style={{ marginBottom: '14px' }}>
         <div>
           <h2 style={{ fontSize: '15px', fontWeight: 700, margin: '0 0 3px' }}>8 Unified Core Modules</h2>
           <p style={{ fontSize: '11px', color: 'var(--rp-text-muted)', margin: 0 }}>Scientific research, numerical statistics, and publication tools built for rigorous scholarship.</p>
@@ -5066,18 +5136,74 @@ function Dashboard({
         <span className="rp-badge rp-badge-success"><ShieldCheck size={12} /> Production Architecture</span>
       </div>
 
-      <div className="tool-grid" style={{ gap: '10px' }}>
-        <ToolCard icon={<BookOpen size={18} />} tone="blue" title="Literature Review Studio" description="Extract methodologies, sample sizes, and empirical findings into structured matrices with synthesis." onClick={() => setSection('Literature Review')} action="Open Literature Studio" />
-        <ToolCard icon={<Activity size={18} />} tone="green" title="Statistical Analysis Studio" description="Deterministic numerical compute (t-Test, ANOVA, Regression, Correlation) with exact APA 7 reports." onClick={() => setSection('Statistical Analysis')} action="Open Statistics" />
-        <ToolCard icon={<FileText size={18} />} tone="purple" title="PDF Research Chat" description="Interactive manuscript Q&A strictly grounded in extracted pages. Zero hallucinations." onClick={() => setSection('PDF Research Chat')} action="Open PDF Chat" />
-        <ToolCard icon={<Layers size={18} />} tone="amber" title="Systematic Reviews (PRISMA)" description="PICOS protocol definitions, candidate study screening queues, and PRISMA 2020 flow metrics." onClick={() => setSection('Systematic Reviews')} action="Open PRISMA Review" />
-        <ToolCard icon={<Send size={18} />} tone="rose" title="Journal Submission Studio" description="Journal guidelines checklist, editorial cover letter generator, and submission bundle exporter." onClick={() => setSection('Journal Submission')} action="Open Submission Studio" />
-        <ToolCard icon={<Users size={18} />} tone="blue" title="Research Collaboration" description="Multi-user role management (Owner, Editor, Reviewer, Viewer) and project task Kanban." onClick={() => setSection('Research Collaboration')} action="Open Collaboration" />
-        <ToolCard icon={<FileCheck2 size={18} />} tone="rose" title="TextGuard Plagiarism Studio" description="Interactive matched text scan, visual originality gauge, Crossref DOIs & 1-click Humanizer bridge." onClick={() => setSection('Plagiarism & Similarity')} action="Launch TextGuard" />
-        <ToolCard icon={<WandSparkles size={18} />} tone="blue" title="Academic Writing Studio" description="Full-featured 3-column workspace with live diffs and DOCX import/export." onClick={() => setSection('Writing Studio')} action="Open Studio" />
+      <div className="research-module-grid tool-grid">
+        <ResearchModuleCard
+          icon={<BookOpen size={18} />}
+          tone="blue"
+          title="Literature Review Studio"
+          description="Extract methodologies, sample sizes, and empirical findings into structured matrices with synthesis."
+          onClick={() => setSection('Literature Review')}
+          action="Open Literature Studio"
+        />
+        <ResearchModuleCard
+          icon={<Activity size={18} />}
+          tone="green"
+          title="Statistical Analysis Studio"
+          description="Deterministic numerical compute (t-Test, ANOVA, Regression, Correlation) with exact APA 7 reports."
+          onClick={() => setSection('Statistical Analysis')}
+          action="Open Statistics"
+        />
+        <ResearchModuleCard
+          icon={<FileText size={18} />}
+          tone="purple"
+          title="PDF Research Chat"
+          description="Interactive manuscript Q&A strictly grounded in extracted pages. Zero hallucinations."
+          onClick={() => setSection('PDF Research Chat')}
+          action="Open PDF Chat"
+        />
+        <ResearchModuleCard
+          icon={<Layers size={18} />}
+          tone="amber"
+          title="Systematic Reviews (PRISMA)"
+          description="PICOS protocol definitions, candidate study screening queues, and PRISMA 2020 flow metrics."
+          onClick={() => setSection('Systematic Reviews')}
+          action="Open PRISMA Review"
+        />
+        <ResearchModuleCard
+          icon={<Send size={18} />}
+          tone="rose"
+          title="Journal Submission Studio"
+          description="Journal guidelines checklist, editorial cover letter generator, and submission bundle exporter."
+          onClick={() => setSection('Journal Submission')}
+          action="Open Submission Studio"
+        />
+        <ResearchModuleCard
+          icon={<Users size={18} />}
+          tone="blue"
+          title="Research Collaboration"
+          description="Multi-user role management (Owner, Editor, Reviewer, Viewer) and project task Kanban."
+          onClick={() => setSection('Research Collaboration')}
+          action="Open Collaboration"
+        />
+        <ResearchModuleCard
+          icon={<FileCheck2 size={18} />}
+          tone="rose"
+          title="TextGuard Plagiarism Studio"
+          description="Interactive matched text scan, visual originality gauge, Crossref DOIs & 1-click Humanizer bridge."
+          onClick={() => setSection('Plagiarism & Similarity')}
+          action="Launch TextGuard"
+        />
+        <ResearchModuleCard
+          icon={<WandSparkles size={18} />}
+          tone="blue"
+          title="Academic Writing Studio"
+          description="Full-featured 3-column workspace with live diffs and DOCX import/export."
+          onClick={() => setSection('Writing Studio')}
+          action="Open Writing Studio"
+        />
       </div>
 
-      <div className="bottom-grid" style={{ gap: '12px', marginTop: '20px' }}>
+      <div className="bottom-grid" style={{ gap: '14px', marginTop: '20px' }}>
         <div className="panel" style={{ padding: '16px' }}>
           <div className="panel-heading" style={{ marginBottom: '12px' }}>
             <div>
@@ -5142,15 +5268,49 @@ function Stat({ icon, label, value, note }: any) {
   );
 }
 
-function ToolCard({ icon, tone, title, description, onClick, action }: any) {
+interface ResearchModuleCardProps {
+  icon: React.ReactNode;
+  tone: 'blue' | 'green' | 'purple' | 'amber' | 'rose';
+  title: string;
+  description: string;
+  action: string;
+  onClick: () => void;
+  badge?: string;
+}
+
+function ResearchModuleCard({ icon, tone, title, description, action, onClick, badge }: ResearchModuleCardProps) {
   return (
-    <button className="tool-card" onClick={onClick}>
-      <div className={`tool-icon ${tone}`}>{icon}</div>
-      <h3>{title}</h3>
-      <p>{description}</p>
-      <span className="tool-action">{action} <span>→</span></span>
-    </button>
+    <div
+      role="button"
+      tabIndex={0}
+      className="research-module-card tool-card"
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      aria-label={`${title}: ${action}`}
+    >
+      <div className="research-module-card-header">
+        <div className={`tool-icon ${tone}`} aria-hidden="true">
+          {icon}
+        </div>
+        {badge && <span className="rp-badge rp-badge-muted">{badge}</span>}
+      </div>
+      <h3 className="research-module-card-title">{title}</h3>
+      <p className="research-module-card-desc">{description}</p>
+      <div className="research-module-card-action tool-action">
+        <span>{action}</span>
+        <ArrowRight size={14} className="action-arrow" />
+      </div>
+    </div>
   );
+}
+
+function ToolCard(props: any) {
+  return <ResearchModuleCard {...props} />;
 }
 
 function CitationAssistantPage({
