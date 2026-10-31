@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from 'react';
+import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import './styles.css';
 import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
 import {
@@ -11,6 +11,7 @@ import {
   Archive, RotateCcw, Calendar, CheckSquare, Square, Filter, Grid, List, Tag, Target,
   CheckCircle2, MoreVertical
 } from 'lucide-react';
+import { notify, useNotification } from './components/NotificationCenter';
 
 import LiteratureReview from './modules/LiteratureReview';
 import StatisticalAnalysis from './modules/StatisticalAnalysis';
@@ -158,6 +159,13 @@ async function request(path: string, token: string, body?: unknown, method = 'PO
   if (!response.ok) {
     if (response.status === 401 && typeof window !== 'undefined') {
       localStorage.removeItem('rp_token');
+      localStorage.removeItem('rp_active_project_id');
+      window.dispatchEvent(new CustomEvent('rp_auth_invalidated', {
+        detail: {
+          message: data.error || 'Your session has expired. Please sign in again.',
+          code: data.code || 'UNAUTHORIZED'
+        }
+      }));
     }
     throw new Error(data.error || `Request failed (${response.status})`);
   }
@@ -655,8 +663,46 @@ export default function App() {
   const [rewriteMode, setRewriteMode] = useState('academic-clarity');
   const [preserveTerms, setPreserveTerms] = useState('');
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState('');
+  const [message, setMessageState] = useState('');
+  const [error, setErrorState] = useState('');
+
+  const setError = useCallback((val: string) => {
+    setErrorState(val);
+    if (val) {
+      notify.error(val);
+    }
+  }, []);
+
+  const setMessage = useCallback((val: string) => {
+    setMessageState(val);
+    if (val) {
+      notify.success(val);
+    }
+  }, []);
+
+  // Listen for global session invalidation to safely return user to sign in
+  useEffect(() => {
+    const handleAuthInvalidated = (e: any) => {
+      const detail = e.detail || {};
+      setUser(null);
+      setToken('');
+      setAuthState('unauthenticated');
+      setErrorState('');
+      const msg = detail.message || 'Your session has expired. Please sign in again.';
+      notify.error(msg, {
+        title: 'Authentication Required',
+        persistent: true,
+        action: {
+          label: 'Sign In Again',
+          onClick: () => {
+            setAuthMode('login');
+          }
+        }
+      });
+    };
+    window.addEventListener('rp_auth_invalidated' as any, handleAuthInvalidated);
+    return () => window.removeEventListener('rp_auth_invalidated' as any, handleAuthInvalidated);
+  }, []);
   const [inspectorTab, setInspectorTab] = useState<'warnings' | 'diff' | 'similarity' | 'ai-authorship' | 'citations' | 'history'>('warnings');
   const [proposedText, setProposedText] = useState('');
   const [currentWarnings, setCurrentWarnings] = useState<MeaningWarning[]>([]);
@@ -768,14 +814,26 @@ export default function App() {
           }
         }
 
-        // 5. Unauthenticated session
+        // 5. Unauthenticated session or expired token
         if (isMounted) {
+          const errData = await meRes.json().catch(() => ({}));
           if (authStatus === 'google_success') {
             setAuthError('Google authentication succeeded, but an active application session could not be established. Please ensure cookies are allowed and try signing in again.');
+          } else if (storedToken && (meRes.status === 401 || errData.code === 'ACCOUNT_NOT_FOUND' || errData.error?.includes('not found') || errData.error?.includes('deleted'))) {
+            setAuthError('Your previous session has expired or the account was not found. Please sign in or create an account.');
+            notify.info('Your previous session has expired. Please sign in or register.', {
+              title: 'Session Expired'
+            });
+          } else if (meRes.status === 503) {
+            setAuthError('The database service is currently initializing. Please refresh in a moment.');
+            notify.warning('The service is temporarily initializing. Please refresh in a moment.', {
+              title: 'Service Initializing'
+            });
           }
           setUser(null);
           setToken('');
           localStorage.removeItem('rp_token');
+          localStorage.removeItem('rp_active_project_id');
           setAuthState('unauthenticated');
         }
       } catch (err) {
@@ -783,6 +841,7 @@ export default function App() {
           setUser(null);
           setToken('');
           localStorage.removeItem('rp_token');
+          localStorage.removeItem('rp_active_project_id');
           setAuthState('unauthenticated');
         }
       }
@@ -1391,7 +1450,23 @@ export default function App() {
             </div>
           )}
 
-          {authError && <div className="alert error">{authError}</div>}
+          {authError && (
+            <div className="alert error" role="alert">
+              <div className="alert-content">
+                <AlertCircle size={16} aria-hidden="true" />
+                <span>{authError}</span>
+              </div>
+              <button
+                type="button"
+                className="alert-dismiss-btn"
+                onClick={() => setAuthError('')}
+                aria-label="Dismiss alert"
+                title="Dismiss alert"
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          )}
           <button className="primary full auth-submit-btn" type="submit" style={{ width: '100%', boxSizing: 'border-box' }}>
             <span>{authMode === 'register' ? 'Create secure account' : 'Sign in'}</span>
             <ArrowRight size={15} />
@@ -1755,8 +1830,40 @@ export default function App() {
         </header>
 
         <div className="page-content">
-          {error && <div className="alert error">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
-          {message && <div className="alert success"><Check size={16} />{message}<button onClick={() => setMessage('')}>Dismiss</button></div>}
+          {error && (
+            <div className="alert error" role="alert">
+              <div className="alert-content">
+                <AlertCircle size={16} aria-hidden="true" />
+                <span>{error}</span>
+              </div>
+              <button
+                type="button"
+                className="alert-dismiss-btn"
+                onClick={() => setErrorState('')}
+                aria-label="Dismiss alert"
+                title="Dismiss alert"
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          )}
+          {message && (
+            <div className="alert success" role="status">
+              <div className="alert-content">
+                <CheckCircle2 size={16} aria-hidden="true" />
+                <span>{message}</span>
+              </div>
+              <button
+                type="button"
+                className="alert-dismiss-btn"
+                onClick={() => setMessageState('')}
+                aria-label="Dismiss notification"
+                title="Dismiss notification"
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          )}
 
           {/* ACADEMIC WRITING STUDIO VIEW */}
           {section === 'Writing Studio' && (
@@ -4643,29 +4750,30 @@ function Dashboard({
 
       {/* ERROR BANNER IF OVERVIEW FAILS */}
       {overviewError && (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '12px 16px',
-          background: '#fef2f2',
-          color: '#991b1b',
-          border: '1px solid #fecaca',
-          borderRadius: 'var(--rp-radius-md)',
-          margin: '16px 0',
-          fontSize: '12.5px'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <AlertCircle size={16} />
+        <div className="alert error" role="alert" style={{ margin: '16px 0' }}>
+          <div className="alert-content">
+            <AlertCircle size={16} aria-hidden="true" />
             <span>{overviewError}</span>
           </div>
-          <button
-            className="btn-secondary btn-sm"
-            onClick={fetchOverview}
-            style={{ fontSize: '11px', height: '28px' }}
-          >
-            <RefreshCw size={12} /> Retry
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={fetchOverview}
+              style={{ fontSize: '11px', height: '28px' }}
+            >
+              <RefreshCw size={12} /> Retry
+            </button>
+            <button
+              type="button"
+              className="alert-dismiss-btn"
+              onClick={() => setOverviewError('')}
+              aria-label="Dismiss error"
+              title="Dismiss error"
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          </div>
         </div>
       )}
 

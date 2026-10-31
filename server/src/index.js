@@ -1736,13 +1736,19 @@ apiRouter.get(['/auth/me', '/me'], requireAuth, async (req, res) => {
   try {
     const sessionToken = req.cookies?.[SESSION_COOKIE_NAME] || req.cookies?.rp_session || req.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
     if (isDbConnected()) {
-      const user = await User.findById(req.user.id).select('-passwordHash').lean();
+      let user = null;
+      if (req.user.id && mongoose.Types.ObjectId.isValid(req.user.id)) {
+        user = await User.findById(req.user.id).select('-passwordHash').lean();
+      }
+      if (!user && req.user.id) {
+        user = await User.findOne({ googleId: req.user.id }).select('-passwordHash').lean();
+      }
+      if (!user && req.user.email) {
+        user = await User.findOne({ email: req.user.email.toLowerCase() }).select('-passwordHash').lean();
+      }
       if (!user) {
-        res.clearCookie(SESSION_COOKIE_NAME);
-        res.clearCookie('rp_token');
-        res.clearCookie('researchproof_session');
-        res.clearCookie('rp_session');
-        return res.status(404).json({ error: 'User account not found.' });
+        clearSessionCookie(res, req);
+        return res.status(404).json({ error: 'User account not found.', code: 'ACCOUNT_NOT_FOUND' });
       }
       const token = sessionToken || jwt.sign({ id: user._id.toString(), email: user.email, tokenVersion: user.tokenVersion || 1, role: user.role }, jwtSecret, { expiresIn: `${SESSION_TTL_HOURS}h` });
       return res.json({
@@ -1759,13 +1765,11 @@ apiRouter.get(['/auth/me', '/me'], requireAuth, async (req, res) => {
       });
     }
 
-    const user = [...memUsers.values()].find(u => (u._id === req.user.id || u.id === req.user.id));
+    const user = memUsers.get(req.user.email) ||
+      [...memUsers.values()].find(u => (u._id === req.user.id || u.id === req.user.id || u.googleId === req.user.id));
     if (!user) {
-      res.clearCookie(SESSION_COOKIE_NAME);
-      res.clearCookie('rp_token');
-      res.clearCookie('researchproof_session');
-      res.clearCookie('rp_session');
-      return res.status(404).json({ error: 'User account not found.' });
+      clearSessionCookie(res, req);
+      return res.status(404).json({ error: 'User account not found.', code: 'ACCOUNT_NOT_FOUND' });
     }
     const token = sessionToken || jwt.sign({ id: user._id || user.id, email: user.email, tokenVersion: user.tokenVersion || 1, role: user.role }, jwtSecret, { expiresIn: `${SESSION_TTL_HOURS}h` });
     res.json({

@@ -2,6 +2,7 @@ import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 import './styles.css';
+import { NotificationProvider } from './components/NotificationCenter';
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -94,7 +95,9 @@ class RootErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <RootErrorBoundary>
-      <App />
+      <NotificationProvider>
+        <App />
+      </NotificationProvider>
     </RootErrorBoundary>
   </React.StrictMode>
 );
