@@ -10180,6 +10180,95 @@ apiRouter.get('/latex/jobs/:id/download-pdf', requireAuth, async (req, res, next
 // PILLAR 1: TextGuard Plagiarism & Authenticity Studio
 // ==========================================
 
+// 0. Import Paper for TextGuard Manuscript Inspector (PDF, DOCX, TXT)
+apiRouter.post('/textguard/import-paper', requireAuth, upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: 'No manuscript file uploaded. Please select a PDF, DOCX, or TXT file.' });
+    }
+
+    // Size limit check (25MB)
+    if (req.file.size > 25 * 1024 * 1024) {
+      return res.status(413).json({ error: 'File size exceeds 25MB limit. Please upload a smaller manuscript.' });
+    }
+
+    const originalname = req.file.originalname || 'manuscript.txt';
+    const extMatch = originalname.match(/\.([a-zA-Z0-9]+)$/);
+    const ext = extMatch ? extMatch[1].toLowerCase() : '';
+    const allowed = ['pdf', 'docx', 'txt', 'md'];
+
+    if (!allowed.includes(ext)) {
+      return res.status(400).json({
+        error: `Unsupported file format (.${ext || 'unknown'}). Supported formats are PDF, DOCX, and TXT.`,
+        supportedFormats: ['pdf', 'docx', 'txt']
+      });
+    }
+
+    let extractedText = '';
+    let derivedTitle = originalname.replace(/\.[^/.]+$/, '').replace(/[_-]/g, ' ');
+
+    if (ext === 'docx') {
+      const docxResult = await importDocxFromBuffer(req.file.buffer, originalname);
+      extractedText = (docxResult.text || docxResult.content || '').trim();
+      if (docxResult.title) derivedTitle = docxResult.title;
+    } else if (ext === 'pdf') {
+      const pdfResult = extractPagesFromPdf(req.file.buffer, originalname);
+      const pages = pdfResult.pages || [];
+      extractedText = pages.map(p => p.text).filter(Boolean).join('\n\n').trim();
+      if (pdfResult.metadata?.title) derivedTitle = pdfResult.metadata.title;
+    } else {
+      // txt or md
+      extractedText = req.file.buffer.toString('utf8').trim();
+      const firstLine = extractedText.split('\n').map(l => l.trim()).filter(Boolean)[0];
+      if (firstLine && firstLine.length < 120 && !/^(abstract|keywords|contents|introduction)/i.test(firstLine)) {
+        derivedTitle = firstLine;
+      }
+    }
+
+    // Security challenge check: ensure Cloudflare or bot challenge text is rejected
+    if (isBotProtectionChallenge(extractedText)) {
+      return res.status(400).json({
+        error: 'Security verification challenge detected on input text.',
+        isBotChallenge: true,
+        message: 'The submitted document appears to contain a bot-protection challenge ("Performing security verification"). This cannot be processed as manuscript content.'
+      });
+    }
+
+    if (!extractedText || extractedText.length < 5) {
+      return res.status(400).json({ error: 'No readable text content could be extracted from this document.' });
+    }
+
+    const wordCount = extractedText.split(/\s+/).filter(Boolean).length;
+    const characterCount = extractedText.length;
+    const paragraphs = extractedText.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+    const paragraphCount = paragraphs.length;
+
+    // Explicitly isolated from user's saved Document corpus - do NOT overwrite active documents
+    if (isDbConnected()) {
+      await recordAudit(req.user.id, 'TEXTGUARD_PAPER_IMPORTED', 'TextGuard', null, {
+        filename: originalname,
+        fileSize: req.file.size,
+        wordCount,
+        characterCount
+      });
+    }
+
+    return res.json({
+      success: true,
+      filename: originalname,
+      fileSize: req.file.size,
+      fileType: ext,
+      title: derivedTitle,
+      text: extractedText,
+      wordCount,
+      characterCount,
+      paragraphCount
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // 1. Run TextGuard Scan
 apiRouter.post('/textguard/scan', requireAuth, async (req, res, next) => {
   try {
@@ -10607,7 +10696,11 @@ app.get('*', (req, res, next) => {
 
 // Global Error Handler
 app.use((err, req, res, _next) => {
-  const status = err.status || 500;
+  let status = err.status || 500;
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    status = 413;
+    err.message = 'File size exceeds 25MB limit. Please upload a smaller document.';
+  }
   // Structured safe logging without exposing credentials, tokens, or body text
   console.error('[API Error]', {
     timestamp: new Date().toISOString(),

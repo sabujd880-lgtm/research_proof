@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useRef } from 'react';
 import './styles.css';
 import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
 import {
-  Activity, ArrowRight, BookOpen, BookOpenCheck, Check, ChevronDown, ChevronRight, ChevronLeft,
+  Activity, ArrowRight, BookOpen, BookOpenCheck, Check, ChevronDown, ChevronRight, ChevronLeft, ChevronUp,
   CircleHelp, Clock3, Copy, Download, FileCheck2, FileText, FolderKanban, Gauge, History,
   LayoutDashboard, LogOut, Menu, Moon, PanelLeft, Plus, RefreshCw, ScanText, Settings2,
   ShieldAlert, ShieldCheck, Sliders, Sparkles, Sun, Trash2, Upload, WandSparkles, X,
@@ -560,6 +560,23 @@ export default function App() {
     }
   });
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleUserMenuOutside(e: MouseEvent) {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    }
+    if (userMenuOpen) {
+      document.addEventListener('mousedown', handleUserMenuOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleUserMenuOutside);
+    };
+  }, [userMenuOpen]);
+
   const [expandedGroup, setExpandedGroup] = useState<string>(() => {
     return getGroupIdForSection('Writing Studio');
   });
@@ -1569,11 +1586,19 @@ export default function App() {
               <p>Empirical facts, p-values, sample sizes, and citations are deterministically validated.</p>
             </div>
           )}
-          <div className="user-row">
+          <div className="user-profile-container" ref={userMenuRef}>
             <div
-              onClick={() => setSection('Settings')}
-              style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', flex: 1, minWidth: 0 }}
-              title="Open Settings & Preferences"
+              className={`user-row ${userMenuOpen ? 'menu-active' : ''}`}
+              onClick={() => setUserMenuOpen(prev => !prev)}
+              title={isCompact ? `${user.displayName || user.email} — Click for account menu` : 'Account menu'}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setUserMenuOpen(prev => !prev);
+                }
+              }}
             >
               {user.avatarUrl ? (
                 <img src={user.avatarUrl} alt={user.displayName || user.email} className="avatar-img" />
@@ -1583,16 +1608,49 @@ export default function App() {
               {!isCompact && (
                 <div className="user-meta">
                   <strong>{user.displayName || user.email.split('@')[0]}</strong>
-                  <small>{user.email}</small>
+                  <small title={user.email}>{user.email}</small>
+                </div>
+              )}
+              {!isCompact && (
+                <div className="user-chevron">
+                  <ChevronUp size={13} style={{ transform: userMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }} />
                 </div>
               )}
             </div>
-            <button className="icon-button" onClick={() => setSection('Settings')} title="Settings & Preferences" aria-label="Open Settings">
-              <Settings2 size={17} />
-            </button>
-            <button className="icon-button" onClick={logout} title="Sign out" aria-label="Sign out">
-              <LogOut size={17} />
-            </button>
+
+            {userMenuOpen && (
+              <div className="user-menu-dropdown" role="menu">
+                <div className="user-menu-header">
+                  <strong>{user.displayName || user.email.split('@')[0]}</strong>
+                  <small title={user.email}>{user.email}</small>
+                </div>
+                <div className="user-menu-divider" />
+                <button
+                  type="button"
+                  className="user-menu-item"
+                  onClick={() => {
+                    setSection('Settings');
+                    setUserMenuOpen(false);
+                  }}
+                  role="menuitem"
+                >
+                  <Settings2 size={13} />
+                  <span>Settings & Preferences</span>
+                </button>
+                <button
+                  type="button"
+                  className="user-menu-item danger"
+                  onClick={() => {
+                    setUserMenuOpen(false);
+                    logout();
+                  }}
+                  role="menuitem"
+                >
+                  <LogOut size={13} />
+                  <span>Sign out</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </aside>
@@ -7717,6 +7775,131 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
   const [resolveState, setResolveState] = useState<{ matchId: string; passage: string; mode: string; busy: boolean; proposed: string | null } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Manuscript Upload & Automatic Processing State
+  interface ImportedFileInfo {
+    name: string;
+    size: number;
+    sizeFormatted: string;
+    fileType: string;
+    title: string;
+    wordCount: number;
+    characterCount: number;
+  }
+  const [importedFile, setImportedFile] = useState<ImportedFileInfo | null>(null);
+  const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'processing' | 'success' | 'error'>('idle');
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
+
+  function formatFileSize(bytes: number): string {
+    if (!bytes || bytes <= 0) return '0 B';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  async function handleManuscriptUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (!ext || !['pdf', 'docx', 'txt', 'md'].includes(ext)) {
+      setUploadState('error');
+      setUploadError(`Unsupported file format (.${ext || 'unknown'}). Supported formats: PDF, DOCX, TXT.`);
+      if (onError) onError(`Unsupported file format (.${ext || 'unknown'}). Supported formats: PDF, DOCX, TXT.`);
+      return;
+    }
+
+    if (file.size > 25 * 1024 * 1024) {
+      setUploadState('error');
+      setUploadError(`File too large (${formatFileSize(file.size)}). Maximum supported file size is 25MB.`);
+      if (onError) onError(`File too large (${formatFileSize(file.size)}). Maximum supported file size is 25MB.`);
+      return;
+    }
+
+    setUploadState('uploading');
+    setUploadProgress(15);
+    setUploadError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `${API}/textguard/import-paper`);
+        if (token) {
+          xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        }
+
+        xhr.upload.onprogress = (evt) => {
+          if (evt.lengthComputable) {
+            const percent = Math.min(90, Math.round((evt.loaded / evt.total) * 90));
+            setUploadProgress(percent);
+            if (percent >= 90) {
+              setUploadState('processing');
+            }
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const res = JSON.parse(xhr.responseText);
+              if (res.success && res.text) {
+                setUploadProgress(100);
+                setUploadState('success');
+                setImportedFile({
+                  name: res.filename || file.name,
+                  size: res.fileSize || file.size,
+                  sizeFormatted: formatFileSize(res.fileSize || file.size),
+                  fileType: res.fileType || ext,
+                  title: res.title || file.name.replace(/\.[^/.]+$/, ''),
+                  wordCount: res.wordCount,
+                  characterCount: res.characterCount
+                });
+                setManuscript(res.text);
+                setText(res.text);
+                if (onSuccess) {
+                  onSuccess(`Successfully imported "${res.filename || file.name}" (${res.wordCount} words, ${formatFileSize(res.fileSize || file.size)}).`);
+                }
+                resolve();
+              } else {
+                reject(new Error(res.error || 'Failed to extract text from manuscript.'));
+              }
+            } catch {
+              reject(new Error('Invalid response from server during document extraction.'));
+            }
+          } else {
+            try {
+              const errRes = JSON.parse(xhr.responseText);
+              reject(new Error(errRes.error || `Upload failed with status ${xhr.status}`));
+            } catch {
+              reject(new Error(`Upload failed with status ${xhr.status}`));
+            }
+          }
+        };
+
+        xhr.onerror = () => {
+          reject(new Error('Network error during manuscript upload.'));
+        };
+
+        xhr.send(formData);
+      });
+    } catch (err: any) {
+      setUploadState('error');
+      setUploadError(err.message || 'Processing failed. Please check file format.');
+      if (onError) onError(err.message);
+    }
+  }
+
+  function handleRemoveImportedFile() {
+    setImportedFile(null);
+    setUploadState('idle');
+    setUploadError(null);
+    setUploadProgress(0);
+  }
+
   // Advanced Filter System State
   const [filterDrawerOpen, setFilterDrawerOpen] = useState<boolean>(false);
   const [filterSearch, setFilterSearch] = useState<string>('');
@@ -8424,17 +8607,57 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
             type="file"
             ref={fileInputRef}
             style={{ display: 'none' }}
-            accept=".docx,.txt"
-            onChange={onImportFile}
+            accept=".pdf,.docx,.txt"
+            onChange={handleManuscriptUpload}
           />
-          <button
-            className="secondary"
-            onClick={() => fileInputRef.current?.click()}
-            title="Upload DOCX or paper draft"
-            style={{ fontSize: '11px' }}
-          >
-            <Upload size={13} /> Import Paper
-          </button>
+
+          {importedFile ? (
+            <div className="tg-imported-file-pill" title={`Imported from ${importedFile.name} (${importedFile.sizeFormatted})`}>
+              <FileText size={13} color="#6366f1" />
+              <span className="tg-imported-filename">{importedFile.name}</span>
+              <span className="tg-imported-filesize">({importedFile.sizeFormatted})</span>
+              <button
+                type="button"
+                className="tg-file-pill-action replace"
+                onClick={() => fileInputRef.current?.click()}
+                title="Replace manuscript with another file"
+              >
+                Replace
+              </button>
+              <button
+                type="button"
+                className="tg-file-pill-action remove"
+                onClick={handleRemoveImportedFile}
+                title="Remove imported file"
+              >
+                <X size={11} />
+              </button>
+            </div>
+          ) : uploadState === 'uploading' || uploadState === 'processing' ? (
+            <div className="tg-upload-progress-pill">
+              <RefreshCw size={12} className="spin" />
+              <span>{uploadState === 'uploading' ? `Uploading ${uploadProgress}%` : 'Processing text...'}</span>
+            </div>
+          ) : (
+            <button
+              className="secondary"
+              onClick={() => fileInputRef.current?.click()}
+              title="Upload PDF, DOCX, or TXT manuscript draft"
+              style={{ fontSize: '11px' }}
+            >
+              <Upload size={13} /> Import Paper
+            </button>
+          )}
+
+          {uploadState === 'error' && uploadError && (
+            <div className="tg-upload-error-pill" title={uploadError}>
+              <AlertCircle size={12} style={{ flexShrink: 0 }} />
+              <span style={{ maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{uploadError}</span>
+              <button type="button" onClick={() => { setUploadState('idle'); setUploadError(null); }} title="Dismiss error">
+                <X size={10} />
+              </button>
+            </div>
+          )}
 
           {scanResult && (
             <button
@@ -8492,11 +8715,16 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
         {/* Left Pane: Interactive Manuscript Inspector */}
         <div className="tg-pane">
           <div className="tg-pane-head">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <span>MANUSCRIPT INSPECTOR</span>
-              {activeDoc && (
-                <span style={{ fontSize: '11px', color: 'var(--muted)', fontWeight: 600 }}>({activeDoc.title})</span>
-              )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+              <span style={{ whiteSpace: 'nowrap' }}>MANUSCRIPT INSPECTOR</span>
+              {importedFile ? (
+                <span className="tg-inspector-doc-badge" title={importedFile.title}>
+                  <FileCheck2 size={11} style={{ display: 'inline', marginRight: '4px', verticalAlign: '-1px' }} />
+                  {importedFile.title} ({importedFile.sizeFormatted})
+                </span>
+              ) : activeDoc ? (
+                <span style={{ fontSize: '11px', color: 'var(--muted)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>({activeDoc.title})</span>
+              ) : null}
             </div>
 
             <div className="tg-view-toggle">
@@ -8681,11 +8909,12 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
                   className={`tg-metric-card ${activeDetailTab === 'doi' ? 'active' : ''}`}
                   onClick={() => setActiveDetailTab('doi')}
                   title="Click to view DOI Reference Verification table"
+                  style={{ cursor: 'pointer' }}
                 >
                   <div className="tg-metric-header">
-                    <span className="tg-metric-label">Ref Verification</span>
+                    <span className="tg-metric-label">Reference Verification</span>
                     <span className={`tg-metric-badge ${hasNoDoi ? 'neutral' : doiVerified === doiTotal ? 'clean' : 'moderate'}`}>
-                      {hasNoDoi ? 'No DOI refs' : `${doiVerified}/${doiTotal} Valid`}
+                      {hasNoDoi ? '0 DOIs' : `${doiVerified}/${doiTotal} Valid`}
                     </span>
                   </div>
                   <div className="tg-metric-main">
@@ -8704,7 +8933,7 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
                     />
                   </div>
                   <div className="tg-metric-footer">
-                    <span>{hasNoDoi ? 'No DOI references' : `${doiTotal} scholarly items`}</span>
+                    <span>{hasNoDoi ? 'No DOI references detected' : `${doiTotal} scholarly items`}</span>
                     <button
                       type="button"
                       className="tg-metric-action-link"
@@ -9837,10 +10066,9 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
                 <div className="tg-advisory-banner warning">
                   <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
                   <div>
-                    <strong>Critical Advisory Notice:</strong>
-                    <p style={{ margin: '4px 0 0', fontSize: '10.5px', lineHeight: '1.5' }}>
-                      {scanResult?.aiAssessment?.advisoryNotice ||
-                       'Statistical indicators cannot definitively prove human vs. AI authorship. Text generated by non-native English speakers or highly structured academic writing can produce false positives. Never use this score as sole proof of academic misconduct.'}
+                    <strong style={{ fontSize: '12px' }}>Critical Advisory Notice:</strong>
+                    <p style={{ margin: '4px 0 0', fontSize: '11px', lineHeight: '1.5' }}>
+                      Statistical indicators cannot definitively prove human vs. AI authorship. Text generated by non-native English speakers or highly structured academic writing can produce false positives. Never use this score as sole proof of academic misconduct.
                     </p>
                   </div>
                 </div>
@@ -9848,10 +10076,9 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
                 <div className="tg-advisory-banner info">
                   <CircleHelp size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
                   <div>
-                    <strong>Methodology & Limitations:</strong>
-                    <p style={{ margin: '4px 0 0', fontSize: '10.5px', lineHeight: '1.5' }}>
-                      {scanResult?.aiAssessment?.limitations ||
-                       'Analysis is heuristic-based, examining sentence length variance (burstiness), vocabulary distribution, and formulaic AI transition patterns. No external commercial detector database is queried.'}
+                    <strong style={{ fontSize: '12px' }}>Methodology & Limitations:</strong>
+                    <p style={{ margin: '4px 0 0', fontSize: '11px', lineHeight: '1.5' }}>
+                      Analysis is heuristic-based, examining sentence length variance (burstiness), vocabulary distribution, and formulaic AI transition patterns. No external commercial detector database is queried.
                     </p>
                   </div>
                 </div>
