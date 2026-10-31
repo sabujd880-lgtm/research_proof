@@ -787,10 +787,13 @@ const journalSubmissionSchema = new mongoose.Schema({
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   targetJournal: { type: String, required: true, trim: true },
+  selectedJournalId: { type: String, default: '' },
   publisher: { type: String, default: '' },
   aimsAndScope: { type: String, default: '' },
+  manuscriptTitle: { type: String, default: '' },
+  manuscriptId: { type: String, default: '' },
   wordLimit: { type: Number, default: 8000 },
-  citationStyle: { type: String, default: 'apa' },
+  citationStyle: { type: String, default: 'apa7' },
   guidelinesChecklist: [{
     item: { type: String, required: true },
     compliant: { type: Boolean, default: false },
@@ -802,14 +805,117 @@ const journalSubmissionSchema = new mongoose.Schema({
     fileType: { type: String },
     urlOrPath: { type: String }
   }],
+  packageManifest: { type: mongoose.Schema.Types.Mixed, default: null },
+  complianceReport: { type: mongoose.Schema.Types.Mixed, default: null },
+  submissionDate: { type: Date, default: null },
+  decisionDate: { type: Date, default: null },
+  revisionDeadline: { type: Date, default: null },
+  notes: { type: String, default: '' },
+  events: [{
+    status: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now },
+    note: { type: String, default: '' },
+    author: { type: String, default: '' }
+  }],
   status: {
     type: String,
-    enum: ['drafting', 'under_review', 'revision_requested', 'accepted', 'rejected'],
-    default: 'drafting',
+    enum: [
+      'draft', 'drafting', 'ready_for_submission', 'submitted',
+      'editorial_review', 'peer_review', 'under_review',
+      'revision_requested', 'revised_submission', 'accepted',
+      'rejected', 'withdrawn'
+    ],
+    default: 'draft',
     index: true
   }
 }, { timestamps: true });
 journalSubmissionSchema.index({ projectId: 1, createdAt: -1 });
+
+// Phase 10: Research Collaboration Studio Schemas
+const projectInvitationSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  email: { type: String, required: true, lowercase: true, trim: true, index: true },
+  role: { type: String, enum: ['owner', 'editor', 'reviewer', 'viewer'], default: 'editor' },
+  inviterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  tokenHash: { type: String, required: true, unique: true, index: true },
+  expiresAt: { type: Date, required: true, index: true },
+  status: { type: String, enum: ['pending', 'accepted', 'declined', 'expired'], default: 'pending', index: true },
+  metadata: { type: mongoose.Schema.Types.Mixed, default: {} }
+}, { timestamps: true });
+projectInvitationSchema.index({ projectId: 1, email: 1 });
+
+const documentCommentSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  selectedText: { type: String, default: '', trim: true },
+  position: { type: mongoose.Schema.Types.Mixed, default: {} },
+  content: { type: String, required: true, trim: true, maxlength: 4000 },
+  resolved: { type: Boolean, default: false, index: true },
+  resolvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  resolvedAt: { type: Date, default: null },
+  replies: [{
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    content: { type: String, required: true, trim: true, maxlength: 4000 },
+    createdAt: { type: Date, default: Date.now }
+  }]
+}, { timestamps: true });
+documentCommentSchema.index({ documentId: 1, resolved: 1 });
+
+const reviewRequestSchema = new mongoose.Schema({
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
+  documentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', required: true, index: true },
+  requesterId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  reviewerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+  versionNumber: { type: Number, default: 1 },
+  status: {
+    type: String,
+    enum: ['draft', 'submitted_for_review', 'under_review', 'changes_requested', 'revised', 'approved', 'rejected'],
+    default: 'submitted_for_review',
+    index: true
+  },
+  decision: {
+    type: String,
+    enum: ['pending', 'accept', 'minor_revisions', 'major_revisions', 'reject'],
+    default: 'pending'
+  },
+  decisionNotes: { type: String, default: '' },
+  score: { type: Number, min: 0, max: 100, default: null },
+  criteriaScores: {
+    methodologicalRigor: { type: Number, min: 0, max: 10, default: null },
+    academicClarity: { type: Number, min: 0, max: 10, default: null },
+    citationEvidence: { type: Number, min: 0, max: 10, default: null },
+    originality: { type: Number, min: 0, max: 10, default: null }
+  },
+  timeline: [{
+    event: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now },
+    actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    note: { type: String, default: '' }
+  }]
+}, { timestamps: true });
+reviewRequestSchema.index({ projectId: 1, status: 1 });
+
+const collaborationNotificationSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null, index: true },
+  type: {
+    type: String,
+    enum: [
+      'invitation_received', 'invitation_accepted', 'invitation_declined',
+      'review_assigned', 'review_decision', 'review_submitted',
+      'comment_added', 'comment_resolved',
+      'task_assigned', 'task_status_changed'
+    ],
+    required: true,
+    index: true
+  },
+  title: { type: String, required: true, trim: true },
+  message: { type: String, required: true, trim: true },
+  read: { type: Boolean, default: false, index: true },
+  link: { type: String, default: '' }
+}, { timestamps: true });
+collaborationNotificationSchema.index({ userId: 1, read: 1, createdAt: -1 });
 
 const documentSchema = new mongoose.Schema({
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -1162,6 +1268,10 @@ export const RiskOfBiasAssessment = mongoose.model('RiskOfBiasAssessment', riskO
 export const PRISMAFlowSnapshot = mongoose.model('PRISMAFlowSnapshot', prismaFlowSnapshotSchema);
 export const ReviewAuditEvent = mongoose.model('ReviewAuditEvent', reviewAuditEventSchema);
 export const JournalSubmission = mongoose.model('JournalSubmission', journalSubmissionSchema);
+export const ProjectInvitation = mongoose.model('ProjectInvitation', projectInvitationSchema);
+export const DocumentComment = mongoose.model('DocumentComment', documentCommentSchema);
+export const ReviewRequest = mongoose.model('ReviewRequest', reviewRequestSchema);
+export const CollaborationNotification = mongoose.model('CollaborationNotification', collaborationNotificationSchema);
 
 
 

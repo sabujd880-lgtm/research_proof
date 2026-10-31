@@ -161,3 +161,4 @@ dist/assets/index-BpXlpaCL.js   799.75 kB │ gzip: 186.88 kB
 | `client/src/App.tsx` | Added `handleManuscriptUpload` with XHR progress tracking, imported file pill, replace/remove buttons; updated Reference Verification card; added AI Advisory notice copy; integrated compact sidebar profile with dropdown menu |
 | `client/src/styles.css` | Added styles for `.user-profile-container`, `.user-menu-dropdown`, `.user-chevron`, `.avatar` (30px circular); updated `.tg-metrics-grid` to responsive `auto-fit`; added `.tg-imported-file-pill`, progress and error pills; overflow prevention |
 | `server/test/textguard_upload_ui.test.js` | Created full unit & integration test suite covering PDF/DOCX/TXT extraction, rejection rules, non-persistence, card formatting, and advisory copy |
+

@@ -81,8 +81,25 @@ import {
   RiskOfBiasAssessment,
   PRISMAFlowSnapshot,
   ReviewAuditEvent,
-  JournalSubmission
+  JournalSubmission,
+  ProjectInvitation,
+  DocumentComment,
+  ReviewRequest,
+  CollaborationNotification
 } from './models.js';
+import {
+  createProjectInvitation,
+  acceptProjectInvitation,
+  createNotification,
+  hasPermission,
+  calculateReviewScore,
+  REVIEW_STATUSES,
+  REVIEW_DECISIONS,
+  memInvitations,
+  memComments,
+  memReviewRequests,
+  memNotifications
+} from './collaborationService.js';
 import {
   normalizePmid,
   normalizeTitle,
@@ -176,6 +193,18 @@ import {
   chunkDocumentPages,
   validateMessageCitations
 } from './pdfChatService.js';
+import {
+  VERIFIED_JOURNALS,
+  searchJournals,
+  getJournalById,
+  matchManuscriptToJournals,
+  getJournalGuidelines,
+  checkManuscriptCompliance,
+  generateAcademicCoverLetter,
+  buildSubmissionPackage,
+  SUBMISSION_STATUSES,
+  validateSubmissionStatus
+} from './journalSubmissionService.js';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -422,6 +451,7 @@ const memRiskOfBiasAssessments = new Map();
 const memPrismaSnapshots = new Map();
 const memReviewAuditEvents = new Map();
 const memJournalSubmissions = new Map();
+const memSubmissionPackages = new Map();
 const isDbConnected = () => mongoose.connection.readyState === 1;
 app.locals.memUsers = memUsers;
 app.locals.memProjects = memProjects;
@@ -2755,11 +2785,67 @@ apiRouter.post('/projects/:id/members', requireAuth, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+apiRouter.patch('/projects/:id/members/:memberId', requireAuth, async (req, res, next) => {
+  try {
+    const { role } = req.body || {};
+    if (!role || !['owner', 'editor', 'reviewer', 'viewer'].includes(role)) {
+      return res.status(400).json({ error: 'Valid role is required (owner, editor, reviewer, viewer).' });
+    }
+
+    if (isDbConnected()) {
+      const member = await ProjectMember.findById(req.params.memberId);
+      if (!member) return res.status(404).json({ error: 'Member not found.' });
+
+      // Prevent demoting the last owner
+      if (member.role === 'owner' && role !== 'owner') {
+        const ownerCount = await ProjectMember.countDocuments({ projectId: req.params.id, role: 'owner' });
+        if (ownerCount <= 1) {
+          return res.status(400).json({ error: 'Cannot demote the last project owner.' });
+        }
+      }
+
+      member.role = role;
+      await member.save();
+      return res.json(member);
+    }
+
+    const member = memProjectMembers.get(req.params.memberId);
+    if (!member) return res.status(404).json({ error: 'Member not found.' });
+    if (member.role === 'owner' && role !== 'owner') {
+      const ownerCount = [...memProjectMembers.values()].filter(m => m.projectId === req.params.id && m.role === 'owner').length;
+      if (ownerCount <= 1) {
+        return res.status(400).json({ error: 'Cannot demote the last project owner.' });
+      }
+    }
+    member.role = role;
+    res.json(member);
+  } catch (e) { next(e); }
+});
+
 apiRouter.delete('/projects/:id/members/:memberId', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
+      const member = await ProjectMember.findById(req.params.memberId);
+      if (!member) return res.status(404).json({ error: 'Member not found.' });
+
+      // Prevent removing the last owner
+      if (member.role === 'owner') {
+        const ownerCount = await ProjectMember.countDocuments({ projectId: req.params.id, role: 'owner' });
+        if (ownerCount <= 1) {
+          return res.status(400).json({ error: 'Cannot remove the last project owner.' });
+        }
+      }
+
       await ProjectMember.findByIdAndDelete(req.params.memberId);
       return res.json({ removed: true });
+    }
+
+    const member = memProjectMembers.get(req.params.memberId);
+    if (member && member.role === 'owner') {
+      const ownerCount = [...memProjectMembers.values()].filter(m => m.projectId === req.params.id && m.role === 'owner').length;
+      if (ownerCount <= 1) {
+        return res.status(400).json({ error: 'Cannot remove the last project owner.' });
+      }
     }
     memProjectMembers.delete(req.params.memberId);
     res.json({ removed: true });
@@ -8174,31 +8260,160 @@ apiRouter.get('/systematic-reviews/:reviewId/export', requireAuth, async (req, r
 });
 
 
-// Journal Submission Studio Endpoints (Module 7)
+// ==========================================
+// PILLAR: Journal Submission Studio (Phase 9)
+// ==========================================
+
+// 1. Journal Discovery Search
+apiRouter.get('/journals/search', requireAuth, async (req, res, next) => {
+  try {
+    const { q = '', discipline = 'all', publisher = 'all', openAccess = 'all', articleType = 'all' } = req.query;
+    const results = searchJournals({
+      query: String(q),
+      discipline: String(discipline),
+      publisher: String(publisher),
+      openAccess: String(openAccess),
+      articleType: String(articleType)
+    });
+    res.json({
+      success: true,
+      count: results.length,
+      journals: results
+    });
+  } catch (e) { next(e); }
+});
+
+// 2. Journal Details
+apiRouter.get('/journals/:id', requireAuth, async (req, res, next) => {
+  try {
+    const journal = getJournalById(req.params.id);
+    if (!journal) {
+      return res.status(404).json({ error: `Journal with ID "${req.params.id}" not found in verified registry.` });
+    }
+    res.json({ success: true, journal });
+  } catch (e) { next(e); }
+});
+
+// 3. Multi-Attribute Journal Matching
+apiRouter.post('/journals/match', requireAuth, async (req, res, next) => {
+  try {
+    const { title = '', abstract = '', keywords = [], discipline = 'all', studyType = 'empirical', wordCount = 0 } = req.body || {};
+    if (!title && !abstract) {
+      return res.status(400).json({ error: 'Manuscript title or abstract is required for journal matching.' });
+    }
+    const matches = matchManuscriptToJournals({
+      title,
+      abstract,
+      keywords,
+      discipline,
+      studyType,
+      wordCount: Number(wordCount) || 0
+    });
+    res.json({
+      success: true,
+      count: matches.length,
+      matches,
+      disclaimer: 'Journal suitability scores reflect scope and structural alignment; they do not represent probability of editorial acceptance.'
+    });
+  } catch (e) { next(e); }
+});
+
+// 4. Author Guidelines Retrieval
+apiRouter.get('/journals/:id/guidelines', requireAuth, async (req, res, next) => {
+  try {
+    const guidelines = getJournalGuidelines(req.params.id);
+    res.json({ success: true, guidelines });
+  } catch (e) { next(e); }
+});
+
+// 5. Manuscript Compliance Checker
+apiRouter.post('/journals/check-compliance', requireAuth, async (req, res, next) => {
+  try {
+    const { manuscriptText = '', journalId = null, guidelines = null } = req.body || {};
+    if (!manuscriptText || !manuscriptText.trim()) {
+      return res.status(400).json({ error: 'Manuscript text is required to evaluate compliance.' });
+    }
+    let targetGuidelines = guidelines;
+    if (!targetGuidelines && journalId) {
+      try {
+        targetGuidelines = getJournalGuidelines(journalId);
+      } catch {
+        targetGuidelines = VERIFIED_JOURNALS[0];
+      }
+    }
+    const report = checkManuscriptCompliance(manuscriptText, targetGuidelines);
+    res.json({ success: true, report });
+  } catch (e) { next(e); }
+});
+
+// 6. Get Project Submission Record
 apiRouter.get('/projects/:id/submission', requireAuth, async (req, res, next) => {
   try {
     if (isDbConnected()) {
       const sub = await JournalSubmission.findOne({ projectId: req.params.id }).lean();
-      return res.json(sub || { targetJournal: '', guidelinesChecklist: [], coverLetter: '', status: 'drafting' });
+      return res.json(sub || {
+        projectId: req.params.id,
+        targetJournal: 'Journal of Cognitive Neuroscience',
+        guidelinesChecklist: [],
+        coverLetter: '',
+        status: 'draft',
+        events: []
+      });
     }
     const sub = memJournalSubmissions.get(req.params.id);
-    res.json(sub || { targetJournal: '', guidelinesChecklist: [], coverLetter: '', status: 'drafting' });
+    res.json(sub || {
+      projectId: req.params.id,
+      targetJournal: 'Journal of Cognitive Neuroscience',
+      guidelinesChecklist: [],
+      coverLetter: '',
+      status: 'draft',
+      events: []
+    });
   } catch (e) { next(e); }
 });
 
+// 7. Save / Update Project Submission Record
 apiRouter.post('/projects/:id/submission', requireAuth, async (req, res, next) => {
   try {
-    const { targetJournal, publisher, wordLimit, citationStyle, guidelinesChecklist, coverLetter, status } = req.body || {};
+    const {
+      targetJournal,
+      selectedJournalId,
+      publisher,
+      aimsAndScope,
+      manuscriptTitle,
+      manuscriptId,
+      wordLimit,
+      citationStyle,
+      guidelinesChecklist,
+      coverLetter,
+      complianceReport,
+      status = 'draft',
+      notes,
+      submissionDate,
+      decisionDate,
+      revisionDeadline
+    } = req.body || {};
+
     const payload = {
       projectId: req.params.id,
       userId: req.user.id,
       targetJournal: targetJournal || 'Target Academic Journal',
+      selectedJournalId: selectedJournalId || '',
       publisher: publisher || '',
+      aimsAndScope: aimsAndScope || '',
+      manuscriptTitle: manuscriptTitle || '',
+      manuscriptId: manuscriptId || '',
       wordLimit: wordLimit || 8000,
-      citationStyle: citationStyle || 'apa',
+      citationStyle: citationStyle || 'apa7',
       guidelinesChecklist: guidelinesChecklist || [],
       coverLetter: coverLetter || '',
-      status: status || 'drafting'
+      complianceReport: complianceReport || null,
+      status: status || 'draft',
+      notes: notes || '',
+      submissionDate: submissionDate ? new Date(submissionDate) : null,
+      decisionDate: decisionDate ? new Date(decisionDate) : null,
+      revisionDeadline: revisionDeadline ? new Date(revisionDeadline) : null,
+      updatedAt: new Date()
     };
 
     if (isDbConnected()) {
@@ -8210,30 +8425,681 @@ apiRouter.post('/projects/:id/submission', requireAuth, async (req, res, next) =
       return res.json(sub);
     }
 
-    memJournalSubmissions.set(req.params.id, payload);
-    res.json(payload);
+    const existing = memJournalSubmissions.get(req.params.id) || { events: [] };
+    const merged = { ...existing, ...payload };
+    memJournalSubmissions.set(req.params.id, merged);
+    res.json(merged);
   } catch (e) { next(e); }
 });
 
+// 8. Academic Cover Letter Generator
 apiRouter.post('/projects/:id/submission/cover-letter', requireAuth, async (req, res, next) => {
   try {
-    const { targetJournal = 'Journal of Academic Research', editorName = 'Editor-in-Chief', manuscriptTitle = 'Empirical Investigation' } = req.body || {};
-    const dateStr = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    const {
+      targetJournal = 'Target Academic Journal',
+      editorName = 'Editor-in-Chief',
+      manuscriptTitle = 'Empirical Investigation',
+      articleType = 'Original Research Article',
+      keyFindings,
+      correspondingAuthor,
+      ethicalDeclarations,
+      mode = 'formal'
+    } = req.body || {};
 
-    const coverLetter = `Dear ${editorName},
+    const authorObj = correspondingAuthor || {
+      name: req.user.displayName || 'Lead Researcher',
+      email: req.user.email || 'researcher@university.edu',
+      institution: 'Department of Research'
+    };
 
-I am pleased to submit our original research manuscript titled "${manuscriptTitle}" for consideration for publication in ${targetJournal}.
+    const letter = generateAcademicCoverLetter({
+      targetJournal,
+      editorName,
+      manuscriptTitle,
+      articleType,
+      keyFindings: keyFindings || 'Our findings provide reproducible evidence addressing existing empirical gaps in the literature.',
+      correspondingAuthor: authorObj,
+      ethicalDeclarations,
+      mode
+    });
 
-This manuscript presents novel empirical findings that align directly with the aims and scope of ${targetJournal}. We confirm that this work is original, has not been published previously, and is not under consideration for publication elsewhere. All authors have approved the manuscript and agree with its submission.
+    res.json({ success: true, coverLetter: letter, mode });
+  } catch (e) { next(e); }
+});
 
-Thank you for your time and consideration of our work. We look forward to hearing from you regarding the peer review process.
+// 9. Submission Package Builder (Compiles ZIP with manifest)
+apiRouter.post('/projects/:id/submission/package', requireAuth, async (req, res, next) => {
+  try {
+    const {
+      manuscriptText = '',
+      manuscriptTitle = 'Manuscript Draft',
+      coverLetter = '',
+      ethicsChecklist = [],
+      complianceReport = null,
+      targetJournal = 'Target Academic Journal'
+    } = req.body || {};
 
-Sincerely,
-${req.user.displayName || 'Lead Researcher'}
-Corresponding Author
-Date: ${dateStr}`;
+    const pkg = await buildSubmissionPackage({
+      projectId: req.params.id,
+      manuscriptText,
+      manuscriptTitle,
+      coverLetter,
+      ethicsChecklist,
+      complianceReport,
+      targetJournal,
+      authorName: req.user.displayName || 'Corresponding Author',
+      authorEmail: req.user.email
+    });
 
-    res.json({ coverLetter });
+    // Store in-memory buffer for immediate download
+    memSubmissionPackages.set(req.params.id, pkg);
+
+    // Update submission record with package manifest
+    if (isDbConnected()) {
+      await JournalSubmission.findOneAndUpdate(
+        { projectId: req.params.id },
+        {
+          $set: {
+            packageManifest: pkg.manifest,
+            status: 'ready_for_submission'
+          },
+          $push: {
+            events: {
+              status: 'ready_for_submission',
+              timestamp: new Date(),
+              note: `Submission package compiled with ${pkg.manifest.totalFiles} components.`,
+              author: req.user.displayName || req.user.email
+            }
+          }
+        },
+        { upsert: true }
+      );
+    } else {
+      const existing = memJournalSubmissions.get(req.params.id) || {};
+      existing.packageManifest = pkg.manifest;
+      existing.status = 'ready_for_submission';
+      existing.events = existing.events || [];
+      existing.events.push({
+        status: 'ready_for_submission',
+        timestamp: new Date().toISOString(),
+        note: `Submission package compiled with ${pkg.manifest.totalFiles} components.`,
+        author: req.user.displayName || req.user.email
+      });
+      memJournalSubmissions.set(req.params.id, existing);
+    }
+
+    res.json({
+      success: true,
+      manifest: pkg.manifest,
+      filename: pkg.filename
+    });
+  } catch (e) { next(e); }
+});
+
+// 10. Download Submission Package ZIP
+apiRouter.get('/projects/:id/submission/package/download', requireAuth, async (req, res, next) => {
+  try {
+    let pkg = memSubmissionPackages.get(req.params.id);
+    if (!pkg) {
+      // Recompile on the fly if needed
+      let sub = null;
+      if (isDbConnected()) {
+        sub = await JournalSubmission.findOne({ projectId: req.params.id }).lean();
+      } else {
+        sub = memJournalSubmissions.get(req.params.id);
+      }
+      pkg = await buildSubmissionPackage({
+        projectId: req.params.id,
+        manuscriptText: sub?.manuscriptText || 'Original manuscript content for editorial review.',
+        manuscriptTitle: sub?.manuscriptTitle || 'Research Manuscript',
+        coverLetter: sub?.coverLetter || '',
+        ethicsChecklist: sub?.guidelinesChecklist || [],
+        complianceReport: sub?.complianceReport || null,
+        targetJournal: sub?.targetJournal || 'Scholarly Journal',
+        authorName: req.user.displayName || 'Corresponding Author',
+        authorEmail: req.user.email
+      });
+      memSubmissionPackages.set(req.params.id, pkg);
+    }
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${pkg.filename}"`);
+    res.setHeader('Content-Length', pkg.zipBuffer.length);
+    res.send(pkg.zipBuffer);
+  } catch (e) { next(e); }
+});
+
+// 11. Update Submission Lifecycle Status
+apiRouter.post('/projects/:id/submission/status', requireAuth, async (req, res, next) => {
+  try {
+    const { status, note = '', manuscriptId = '', decisionDate, revisionDeadline } = req.body || {};
+    if (!status || !validateSubmissionStatus(status)) {
+      return res.status(400).json({
+        error: `Invalid submission status "${status}". Allowed statuses: ${SUBMISSION_STATUSES.join(', ')}`
+      });
+    }
+
+    const event = {
+      status,
+      timestamp: new Date(),
+      note: note || `Status transitioned to ${status.replace(/_/g, ' ')}.`,
+      author: req.user.displayName || req.user.email
+    };
+
+    const updateFields = {
+      status,
+      ...(manuscriptId ? { manuscriptId } : {}),
+      ...(decisionDate ? { decisionDate: new Date(decisionDate) } : {}),
+      ...(revisionDeadline ? { revisionDeadline: new Date(revisionDeadline) } : {})
+    };
+
+    if (isDbConnected()) {
+      const updated = await JournalSubmission.findOneAndUpdate(
+        { projectId: req.params.id },
+        {
+          $set: updateFields,
+          $push: { events: event }
+        },
+        { upsert: true, new: true }
+      );
+      return res.json({ success: true, submission: updated });
+    }
+
+    const existing = memJournalSubmissions.get(req.params.id) || { events: [] };
+    const merged = {
+      ...existing,
+      ...updateFields,
+      events: [...(existing.events || []), event]
+    };
+    memJournalSubmissions.set(req.params.id, merged);
+    res.json({ success: true, submission: merged });
+  } catch (e) { next(e); }
+});
+
+// ============================================================================
+// PILLAR: Research Collaboration Studio (Phase 10)
+// Invitations, 4-Tier RBAC, Inline Comments, Manuscript Reviews, Notifications
+// ============================================================================
+
+// 1. Create Project Invitation
+apiRouter.post('/projects/:id/invitations', requireAuth, async (req, res, next) => {
+  try {
+    const { email, role = 'editor' } = req.body || {};
+    if (!email || !email.trim()) return res.status(400).json({ error: 'Invitee email is required.' });
+
+    const inviteResult = await createProjectInvitation({
+      projectId: req.params.id,
+      email: email.trim(),
+      role,
+      inviterId: req.user.id,
+      isDbConnected: isDbConnected()
+    });
+
+    await recordAudit(req.user.id, 'INVITATION_SENT', 'ProjectInvitation', inviteResult.invitationId, {
+      projectId: req.params.id,
+      email: inviteResult.email,
+      role
+    });
+
+    res.status(201).json({
+      success: true,
+      invitation: inviteResult,
+      message: `Invitation successfully dispatched to ${inviteResult.email}`
+    });
+  } catch (e) { next(e); }
+});
+
+// 2. List Pending Project Invitations
+apiRouter.get('/projects/:id/invitations', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const invites = await ProjectInvitation.find({ projectId: req.params.id, status: 'pending' })
+        .populate('inviterId', 'displayName email')
+        .sort({ createdAt: -1 })
+        .lean();
+      return res.json({ success: true, invitations: invites });
+    }
+    const invites = [...memInvitations.values()].filter(i => i.projectId === req.params.id && i.status === 'pending');
+    res.json({ success: true, invitations: invites });
+  } catch (e) { next(e); }
+});
+
+// 3. Cancel / Revoke Invitation
+apiRouter.delete('/projects/:id/invitations/:inviteId', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      await ProjectInvitation.findOneAndUpdate(
+        { _id: req.params.inviteId, projectId: req.params.id },
+        { $set: { status: 'expired' } }
+      );
+      return res.json({ success: true, revoked: true });
+    }
+    for (const [k, v] of memInvitations.entries()) {
+      if (v._id === req.params.inviteId && v.projectId === req.params.id) {
+        v.status = 'expired';
+        break;
+      }
+    }
+    res.json({ success: true, revoked: true });
+  } catch (e) { next(e); }
+});
+
+// 4. Accept Invitation via Raw Token
+apiRouter.post('/invitations/:token/accept', requireAuth, async (req, res, next) => {
+  try {
+    const rawToken = req.params.token;
+    const acceptResult = await acceptProjectInvitation({
+      rawToken,
+      userId: req.user.id,
+      userEmail: req.user.email,
+      isDbConnected: isDbConnected()
+    });
+
+    await recordAudit(req.user.id, 'INVITATION_ACCEPTED', 'ProjectMember', acceptResult.memberId, {
+      projectId: acceptResult.projectId,
+      role: acceptResult.role
+    });
+
+    res.json({
+      success: true,
+      message: `Successfully joined research project as ${acceptResult.role}`,
+      projectId: acceptResult.projectId,
+      role: acceptResult.role
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// 5. Decline Invitation via Raw Token
+apiRouter.post('/invitations/:token/decline', async (req, res, next) => {
+  try {
+    const rawToken = req.params.token;
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    if (isDbConnected()) {
+      const invite = await ProjectInvitation.findOne({ tokenHash, status: 'pending' });
+      if (!invite) return res.status(404).json({ error: 'Invitation not found or already processed.' });
+      invite.status = 'declined';
+      await invite.save();
+      return res.json({ success: true, message: 'Invitation declined.' });
+    }
+
+    const invite = memInvitations.get(tokenHash);
+    if (!invite || invite.status !== 'pending') {
+      return res.status(404).json({ error: 'Invitation not found or already processed.' });
+    }
+    invite.status = 'declined';
+    res.json({ success: true, message: 'Invitation declined.' });
+  } catch (e) { next(e); }
+});
+
+// 6. Get Document Comments (Threaded Discussions)
+apiRouter.get('/projects/:id/comments', requireAuth, async (req, res, next) => {
+  try {
+    const { documentId, resolved } = req.query;
+    const filter = { projectId: req.params.id };
+    if (documentId) filter.documentId = documentId;
+    if (resolved !== undefined) filter.resolved = resolved === 'true';
+
+    if (isDbConnected()) {
+      const comments = await DocumentComment.find(filter)
+        .populate('userId', 'displayName email avatarUrl')
+        .populate('replies.userId', 'displayName email avatarUrl')
+        .sort({ createdAt: -1 })
+        .lean();
+      return res.json({ success: true, comments });
+    }
+
+    let comments = [...memComments.values()].filter(c => c.projectId === req.params.id);
+    if (documentId) comments = comments.filter(c => c.documentId === documentId);
+    if (resolved !== undefined) comments = comments.filter(c => c.resolved === (resolved === 'true'));
+    res.json({ success: true, comments });
+  } catch (e) { next(e); }
+});
+
+// 7. Add Comment (With optional anchor text)
+apiRouter.post('/projects/:id/comments', requireAuth, async (req, res, next) => {
+  try {
+    const { documentId, selectedText = '', position = {}, content } = req.body || {};
+    if (!content || !content.trim()) return res.status(400).json({ error: 'Comment content is required.' });
+    if (!documentId) return res.status(400).json({ error: 'Document ID is required.' });
+
+    if (isDbConnected()) {
+      const comment = await DocumentComment.create({
+        projectId: req.params.id,
+        documentId,
+        userId: req.user.id,
+        selectedText: selectedText.trim(),
+        position,
+        content: content.trim(),
+        resolved: false,
+        replies: []
+      });
+      await recordAudit(req.user.id, 'COMMENT_CREATED', 'DocumentComment', comment._id, {
+        projectId: req.params.id,
+        documentId
+      });
+      return res.status(201).json({ success: true, comment });
+    }
+
+    const id = new mongoose.Types.ObjectId().toString();
+    const newComment = {
+      _id: id,
+      projectId: req.params.id,
+      documentId,
+      userId: {
+        _id: req.user.id,
+        displayName: req.user.displayName || 'Researcher',
+        email: req.user.email
+      },
+      selectedText: selectedText.trim(),
+      position,
+      content: content.trim(),
+      resolved: false,
+      replies: [],
+      createdAt: new Date().toISOString()
+    };
+    memComments.set(id, newComment);
+    res.status(201).json({ success: true, comment: newComment });
+  } catch (e) { next(e); }
+});
+
+// 8. Add Reply to Comment Thread
+apiRouter.post('/projects/:id/comments/:commentId/reply', requireAuth, async (req, res, next) => {
+  try {
+    const { content } = req.body || {};
+    if (!content || !content.trim()) return res.status(400).json({ error: 'Reply content is required.' });
+
+    if (isDbConnected()) {
+      const comment = await DocumentComment.findOne({ _id: req.params.commentId, projectId: req.params.id });
+      if (!comment) return res.status(404).json({ error: 'Comment thread not found.' });
+
+      comment.replies.push({
+        userId: req.user.id,
+        content: content.trim(),
+        createdAt: new Date()
+      });
+      await comment.save();
+
+      // Notify comment author if different from replier
+      if (comment.userId.toString() !== req.user.id.toString()) {
+        await createNotification({
+          userId: comment.userId,
+          projectId: req.params.id,
+          type: 'comment_added',
+          title: 'New Reply to Comment',
+          message: `${req.user.displayName || 'A collaborator'} replied to your comment.`,
+          isDbConnected: true
+        });
+      }
+
+      return res.json({ success: true, comment });
+    }
+
+    const comment = memComments.get(req.params.commentId);
+    if (!comment || comment.projectId !== req.params.id) {
+      return res.status(404).json({ error: 'Comment thread not found.' });
+    }
+    const replyObj = {
+      _id: new mongoose.Types.ObjectId().toString(),
+      userId: {
+        _id: req.user.id,
+        displayName: req.user.displayName || 'Researcher',
+        email: req.user.email
+      },
+      content: content.trim(),
+      createdAt: new Date().toISOString()
+    };
+    comment.replies = comment.replies || [];
+    comment.replies.push(replyObj);
+    res.json({ success: true, comment });
+  } catch (e) { next(e); }
+});
+
+// 9. Resolve / Unresolve Comment Thread
+apiRouter.patch('/projects/:id/comments/:commentId', requireAuth, async (req, res, next) => {
+  try {
+    const { resolved } = req.body || {};
+    if (resolved === undefined) return res.status(400).json({ error: 'resolved boolean status is required.' });
+
+    if (isDbConnected()) {
+      const comment = await DocumentComment.findOneAndUpdate(
+        { _id: req.params.commentId, projectId: req.params.id },
+        {
+          $set: {
+            resolved: Boolean(resolved),
+            resolvedBy: resolved ? req.user.id : null,
+            resolvedAt: resolved ? new Date() : null
+          }
+        },
+        { new: true }
+      );
+      if (!comment) return res.status(404).json({ error: 'Comment not found.' });
+      return res.json({ success: true, comment });
+    }
+
+    const comment = memComments.get(req.params.commentId);
+    if (!comment || comment.projectId !== req.params.id) {
+      return res.status(404).json({ error: 'Comment not found.' });
+    }
+    comment.resolved = Boolean(resolved);
+    comment.resolvedBy = resolved ? req.user.id : null;
+    comment.resolvedAt = resolved ? new Date().toISOString() : null;
+    res.json({ success: true, comment });
+  } catch (e) { next(e); }
+});
+
+// 10. Delete Comment
+apiRouter.delete('/projects/:id/comments/:commentId', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      await DocumentComment.findOneAndDelete({ _id: req.params.commentId, projectId: req.params.id });
+      return res.json({ success: true, deleted: true });
+    }
+    memComments.delete(req.params.commentId);
+    res.json({ success: true, deleted: true });
+  } catch (e) { next(e); }
+});
+
+// 11. List Manuscript Reviews
+apiRouter.get('/projects/:id/reviews', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const reviews = await ReviewRequest.find({ projectId: req.params.id })
+        .populate('requesterId', 'displayName email')
+        .populate('reviewerId', 'displayName email')
+        .populate('documentId', 'title version')
+        .sort({ createdAt: -1 })
+        .lean();
+      return res.json({ success: true, reviews });
+    }
+    const reviews = [...memReviewRequests.values()].filter(r => r.projectId === req.params.id);
+    res.json({ success: true, reviews });
+  } catch (e) { next(e); }
+});
+
+// 12. Submit Manuscript for Review
+apiRouter.post('/projects/:id/reviews', requireAuth, async (req, res, next) => {
+  try {
+    const { documentId, reviewerId, notes = '' } = req.body || {};
+    if (!documentId) return res.status(400).json({ error: 'documentId is required.' });
+
+    const timelineEvent = {
+      event: 'submitted_for_review',
+      timestamp: new Date(),
+      actorId: req.user.id,
+      note: notes || 'Manuscript submitted for internal peer review.'
+    };
+
+    if (isDbConnected()) {
+      const doc = await Document.findById(documentId);
+      const versionNumber = doc?.version || 1;
+
+      const review = await ReviewRequest.create({
+        projectId: req.params.id,
+        documentId,
+        requesterId: req.user.id,
+        reviewerId: reviewerId || null,
+        versionNumber,
+        status: 'submitted_for_review',
+        decision: 'pending',
+        timeline: [timelineEvent]
+      });
+
+      if (reviewerId) {
+        await createNotification({
+          userId: reviewerId,
+          projectId: req.params.id,
+          type: 'review_assigned',
+          title: 'Review Assignment',
+          message: `${req.user.displayName || 'A co-author'} requested your peer review on a manuscript.`,
+          isDbConnected: true
+        });
+      }
+
+      await recordAudit(req.user.id, 'REVIEW_REQUESTED', 'ReviewRequest', review._id, {
+        projectId: req.params.id,
+        documentId
+      });
+
+      return res.status(201).json({ success: true, review });
+    }
+
+    const id = new mongoose.Types.ObjectId().toString();
+    const newReview = {
+      _id: id,
+      projectId: req.params.id,
+      documentId,
+      requesterId: { _id: req.user.id, displayName: req.user.displayName || 'Researcher', email: req.user.email },
+      reviewerId: reviewerId ? { _id: reviewerId } : null,
+      versionNumber: 1,
+      status: 'submitted_for_review',
+      decision: 'pending',
+      timeline: [{ ...timelineEvent, timestamp: new Date().toISOString() }],
+      createdAt: new Date().toISOString()
+    };
+    memReviewRequests.set(id, newReview);
+    res.status(201).json({ success: true, review: newReview });
+  } catch (e) { next(e); }
+});
+
+// 13. Submit Review Decision & Scoring Rubrics
+apiRouter.post('/projects/:id/reviews/:reviewId/decision', requireAuth, async (req, res, next) => {
+  try {
+    const { decision, decisionNotes = '', criteriaScores } = req.body || {};
+    if (!decision || !REVIEW_DECISIONS.includes(decision)) {
+      return res.status(400).json({
+        error: `Valid decision required: ${REVIEW_DECISIONS.join(', ')}`
+      });
+    }
+
+    const calculatedScore = calculateReviewScore(criteriaScores);
+    const statusMap = {
+      accept: 'approved',
+      minor_revisions: 'changes_requested',
+      major_revisions: 'changes_requested',
+      reject: 'rejected'
+    };
+    const newStatus = statusMap[decision] || 'under_review';
+
+    const timelineEvent = {
+      event: `decision_${decision}`,
+      timestamp: new Date(),
+      actorId: req.user.id,
+      note: decisionNotes || `Reviewer issued decision: ${decision}`
+    };
+
+    if (isDbConnected()) {
+      const review = await ReviewRequest.findOne({ _id: req.params.reviewId, projectId: req.params.id });
+      if (!review) return res.status(404).json({ error: 'Review request not found.' });
+
+      review.decision = decision;
+      review.decisionNotes = decisionNotes;
+      review.status = newStatus;
+      if (criteriaScores) review.criteriaScores = criteriaScores;
+      if (calculatedScore !== null) review.score = calculatedScore;
+      review.timeline.push(timelineEvent);
+      await review.save();
+
+      // Notify requester
+      await createNotification({
+        userId: review.requesterId,
+        projectId: req.params.id,
+        type: 'review_decision',
+        title: 'Review Decision Issued',
+        message: `Your manuscript received review outcome: ${decision.replace(/_/g, ' ')}. Score: ${calculatedScore || 'N/A'}/100.`,
+        isDbConnected: true
+      });
+
+      await recordAudit(req.user.id, 'REVIEW_DECISION_ISSUED', 'ReviewRequest', review._id, {
+        decision,
+        score: calculatedScore
+      });
+
+      return res.json({ success: true, review });
+    }
+
+    const review = memReviewRequests.get(req.params.reviewId);
+    if (!review || review.projectId !== req.params.id) {
+      return res.status(404).json({ error: 'Review request not found.' });
+    }
+    review.decision = decision;
+    review.decisionNotes = decisionNotes;
+    review.status = newStatus;
+    review.score = calculatedScore;
+    if (criteriaScores) review.criteriaScores = criteriaScores;
+    review.timeline = review.timeline || [];
+    review.timeline.push({ ...timelineEvent, timestamp: new Date().toISOString() });
+    res.json({ success: true, review });
+  } catch (e) { next(e); }
+});
+
+// 14. Notifications API
+apiRouter.get('/notifications', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      const notifications = await CollaborationNotification.find({ userId: req.user.id })
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .lean();
+      return res.json({ success: true, notifications });
+    }
+    const notifications = [...memNotifications.values()]
+      .filter(n => n.userId === req.user.id)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    res.json({ success: true, notifications });
+  } catch (e) { next(e); }
+});
+
+apiRouter.patch('/notifications/:id/read', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      await CollaborationNotification.findOneAndUpdate(
+        { _id: req.params.id, userId: req.user.id },
+        { $set: { read: true } }
+      );
+      return res.json({ success: true, read: true });
+    }
+    const notif = memNotifications.get(req.params.id);
+    if (notif && notif.userId === req.user.id) notif.read = true;
+    res.json({ success: true, read: true });
+  } catch (e) { next(e); }
+});
+
+apiRouter.post('/notifications/read-all', requireAuth, async (req, res, next) => {
+  try {
+    if (isDbConnected()) {
+      await CollaborationNotification.updateMany(
+        { userId: req.user.id, read: false },
+        { $set: { read: true } }
+      );
+      return res.json({ success: true, readAll: true });
+    }
+    for (const notif of memNotifications.values()) {
+      if (notif.userId === req.user.id) notif.read = true;
+    }
+    res.json({ success: true, readAll: true });
   } catch (e) { next(e); }
 });
 
