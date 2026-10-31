@@ -2149,6 +2149,405 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .tg-cert-stat strong{display:block;font:800 22px Manrope,sans-serif;margin-top:4px}
 .tg-cert-footer{display:flex;align-items:center;justify-content:space-between;padding:16px 36px;border-top:1px solid var(--border);background:var(--surface2)}
 
+/* ==========================================================================
+   TextGuard Advanced Filter System (Linear Minimal Enterprise)
+   ========================================================================== */
+.tg-filter-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--rp-text, #0f172a);
+  background: var(--rp-surface, #ffffff);
+  border: 1px solid var(--rp-border, #cbd5e1);
+  border-radius: var(--rp-radius-md, 8px);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: var(--rp-shadow-xs, 0 1px 2px rgba(0,0,0,0.05));
+}
+.tg-filter-toggle-btn:hover {
+  background: var(--rp-surface-subtle, #f1f5f9);
+  border-color: var(--rp-accent, #6366f1);
+  color: var(--rp-accent, #4f46e5);
+}
+.dark .tg-filter-toggle-btn {
+  background: var(--rp-surface, #111726);
+  border-color: var(--rp-border, #1e293b);
+  color: var(--rp-text, #f8fafc);
+}
+.dark .tg-filter-toggle-btn:hover {
+  background: var(--rp-surface-subtle, #182234);
+  border-color: var(--rp-accent, #6366f1);
+  color: #a5b4fc;
+}
+
+.tg-filter-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9999px;
+  background: var(--rp-accent, #4f46e5);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Active Filter Chips Bar */
+.tg-filter-chips-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--rp-surface-subtle, #f8fafc);
+  border: 1px solid var(--rp-border, #e2e8f0);
+  border-radius: var(--rp-radius-md, 8px);
+  margin-bottom: 12px;
+}
+.dark .tg-filter-chips-bar {
+  background: var(--rp-surface-subtle, #182234);
+  border-color: var(--rp-border, #1e293b);
+}
+.tg-chips-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--rp-text-muted, #64748b);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.tg-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: var(--rp-surface, #ffffff);
+  border: 1px solid var(--rp-border, #cbd5e1);
+  border-radius: 9999px;
+  font-size: 11px;
+  color: var(--rp-text, #0f172a);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+.dark .tg-filter-chip {
+  background: var(--rp-surface, #111726);
+  border-color: var(--rp-border, #1e293b);
+  color: var(--rp-text, #f8fafc);
+}
+.tg-chip-category {
+  font-weight: 700;
+  color: var(--rp-accent, #6366f1);
+  margin-right: 2px;
+}
+.tg-filter-chip-remove {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--rp-text-muted, #94a3b8);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px;
+  border-radius: 50%;
+  transition: all 0.12s ease;
+}
+.tg-filter-chip-remove:hover {
+  color: var(--rp-danger, #ef4444);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+/* Slide-in Filter Drawer */
+.tg-filter-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  backdrop-filter: blur(3px);
+  z-index: 9998;
+  display: flex;
+  justify-content: flex-end;
+  animation: fadeIn 0.2s ease;
+}
+.tg-filter-drawer {
+  width: 100%;
+  max-width: 440px;
+  height: 100%;
+  background: var(--rp-surface, #ffffff);
+  border-left: 1px solid var(--rp-border, #e2e8f0);
+  box-shadow: -10px 0 35px -5px rgba(0, 0, 0, 0.15);
+  display: flex;
+  flex-direction: column;
+  z-index: 9999;
+  animation: slideLeft 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.dark .tg-filter-drawer {
+  background: var(--rp-surface, #111726);
+  border-color: var(--rp-border, #1e293b);
+  box-shadow: -10px 0 35px -5px rgba(0, 0, 0, 0.6);
+}
+@keyframes slideLeft {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+.tg-filter-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--rp-border, #e2e8f0);
+}
+.dark .tg-filter-drawer-head {
+  border-color: var(--rp-border, #1e293b);
+}
+.tg-filter-drawer-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--rp-text, #0f172a);
+}
+.dark .tg-filter-drawer-title {
+  color: var(--rp-text, #f8fafc);
+}
+
+.tg-filter-search-box {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--rp-border-subtle, #f1f5f9);
+}
+.dark .tg-filter-search-box {
+  border-color: var(--rp-border, #1e293b);
+}
+.tg-filter-search-input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  border: 1px solid var(--rp-border, #cbd5e1);
+  border-radius: var(--rp-radius-md, 8px);
+  background: var(--rp-surface-subtle, #f8fafc);
+  color: var(--rp-text, #0f172a);
+  outline: none;
+  box-sizing: border-box;
+}
+.dark .tg-filter-search-input {
+  background: var(--rp-surface-subtle, #182234);
+  border-color: var(--rp-border, #1e293b);
+  color: var(--rp-text, #f8fafc);
+}
+.tg-filter-search-input:focus {
+  border-color: var(--rp-accent, #6366f1);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
+.tg-filter-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Category Accordion */
+.tg-category-accordion {
+  border: 1px solid var(--rp-border, #e2e8f0);
+  border-radius: var(--rp-radius-md, 8px);
+  overflow: hidden;
+  background: var(--rp-surface, #ffffff);
+}
+.dark .tg-category-accordion {
+  border-color: var(--rp-border, #1e293b);
+  background: var(--rp-surface, #111726);
+}
+.tg-category-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--rp-surface-subtle, #f8fafc);
+  cursor: pointer;
+  user-select: none;
+}
+.dark .tg-category-head {
+  background: var(--rp-surface-subtle, #182234);
+}
+.tg-category-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--rp-text, #0f172a);
+}
+.dark .tg-category-title {
+  color: var(--rp-text, #f8fafc);
+}
+.tg-category-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tg-category-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--rp-accent, #4f46e5);
+  cursor: pointer;
+}
+.tg-category-btn:hover {
+  text-decoration: underline;
+}
+.dark .tg-category-btn {
+  color: #a5b4fc;
+}
+
+.tg-category-options {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--rp-border-subtle, #f1f5f9);
+}
+.dark .tg-category-options {
+  border-color: var(--rp-border, #1e293b);
+}
+
+.tg-filter-checkbox-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--rp-text, #0f172a);
+  cursor: pointer;
+  padding: 3px 0;
+}
+.dark .tg-filter-checkbox-row {
+  color: var(--rp-text, #cbd5e1);
+}
+.tg-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tg-filter-item-count {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  background: var(--rp-surface-subtle, #f1f5f9);
+  color: var(--rp-text-muted, #64748b);
+}
+.dark .tg-filter-item-count {
+  background: var(--rp-surface-subtle, #182234);
+  color: var(--rp-text-dim, #94a3b8);
+}
+
+.tg-filter-drawer-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-top: 1px solid var(--rp-border, #e2e8f0);
+  background: var(--rp-surface-subtle, #f8fafc);
+}
+.dark .tg-filter-drawer-foot {
+  background: var(--rp-surface-subtle, #182234);
+  border-color: var(--rp-border, #1e293b);
+}
+
+/* Empty State */
+.tg-filter-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+  background: var(--rp-surface, #ffffff);
+  border: 1px dashed var(--rp-border, #cbd5e1);
+  border-radius: var(--rp-radius-lg, 12px);
+  margin: 16px 0;
+}
+.dark .tg-filter-empty-state {
+  background: var(--rp-surface, #111726);
+  border-color: var(--rp-border, #1e293b);
+}
+.tg-empty-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: var(--rp-surface-subtle, #f1f5f9);
+  color: var(--rp-text-muted, #64748b);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+.dark .tg-empty-icon {
+  background: var(--rp-surface-subtle, #182234);
+  color: var(--rp-text-dim, #94a3b8);
+}
+
+/* Citations & References Cards */
+.tg-citation-card {
+  border: 1px solid var(--rp-border, #e2e8f0);
+  border-radius: var(--rp-radius-md, 8px);
+  padding: 12px 16px;
+  background: var(--rp-surface, #ffffff);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dark .tg-citation-card {
+  border-color: var(--rp-border, #1e293b);
+  background: var(--rp-surface, #111726);
+}
+.tg-citation-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.tg-citation-override-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rp-border-subtle, #f1f5f9);
+}
+.dark .tg-citation-override-row {
+  border-color: var(--rp-border, #1e293b);
+}
+
+/* Research Integrity Findings */
+.tg-integrity-card {
+  border: 1px solid var(--rp-border, #e2e8f0);
+  border-radius: var(--rp-radius-md, 8px);
+  padding: 14px 16px;
+  background: var(--rp-surface, #ffffff);
+  border-left-width: 4px;
+}
+.dark .tg-integrity-card {
+  border-color: var(--rp-border, #1e293b);
+  background: var(--rp-surface, #111726);
+}
+.tg-integrity-card.high {
+  border-left-color: var(--rp-danger, #ef4444);
+}
+.tg-integrity-card.medium {
+  border-left-color: var(--rp-warning, #f59e0b);
+}
+.tg-integrity-card.advisory {
+  border-left-color: var(--rp-accent, #6366f1);
+}
+
 /* Thesis & Project Workspace (Pillar 2) */
 .thesis-workspace{display:flex;flex-direction:column;gap:18px;max-width:1380px;margin:0 auto}
 .thesis-hero{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}

@@ -7704,7 +7704,7 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
   const [excludeSmallPhrases, setExcludeSmallPhrases] = useState<boolean>(false);
   const [minPhraseWords, setMinPhraseWords] = useState<number>(5);
   const [filterTab, setFilterTab] = useState<'all' | 'overlap' | 'repeat' | 'doi'>('all');
-  const [activeDetailTab, setActiveDetailTab] = useState<'overview' | 'matches' | 'doi' | 'ai' | 'history'>('overview');
+  const [activeDetailTab, setActiveDetailTab] = useState<'overview' | 'matches' | 'doi' | 'citations' | 'integrity' | 'ai' | 'history'>('overview');
   const [sourceSearchTerm, setSourceSearchTerm] = useState<string>('');
   const [sourceTypeFilter, setSourceTypeFilter] = useState<string>('all');
   const [sourceStatusFilter, setSourceStatusFilter] = useState<string>('all');
@@ -7716,6 +7716,173 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
   const [showCertModal, setShowCertModal] = useState<boolean>(false);
   const [resolveState, setResolveState] = useState<{ matchId: string; passage: string; mode: string; busy: boolean; proposed: string | null } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Advanced Filter System State
+  const [filterDrawerOpen, setFilterDrawerOpen] = useState<boolean>(false);
+  const [filterSearch, setFilterSearch] = useState<string>('');
+  const [collapsedCategories, setCollapsedCategories] = useState<Record<string, boolean>>({});
+  const [citationOverrides, setCitationOverrides] = useState<Record<string, string>>({});
+  const [activeFilters, setActiveFilters] = useState<{
+    doi: string[];
+    reference: string[];
+    citation: string[];
+    similarity: string[];
+    source: string[];
+    integrity: string[];
+  }>({
+    doi: [],
+    reference: [],
+    citation: [],
+    similarity: [],
+    source: [],
+    integrity: []
+  });
+
+  const FILTER_CATEGORIES = useMemo(() => [
+    {
+      id: 'similarity' as const,
+      name: 'Similarity & Overlap',
+      options: [
+        { id: 'high', label: 'High Similarity (>70%)' },
+        { id: 'medium', label: 'Medium Similarity (30%-70%)' },
+        { id: 'low', label: 'Low Similarity (<30%)' },
+        { id: 'exact_matches', label: 'Exact Matches' },
+        { id: 'partial_matches', label: 'Partial Matches' },
+        { id: 'repeated_phrases', label: 'Repeated Key Phrases' },
+        { id: 'matched_quotations', label: 'Matched Quotations' },
+        { id: 'bibliography_overlap', label: 'Bibliography Overlap' },
+        { id: 'excluded_matches', label: 'Excluded Matches' },
+        { id: 'needs_review', label: 'Matches Needing Review' },
+      ]
+    },
+    {
+      id: 'doi' as const,
+      name: 'DOI Verification',
+      options: [
+        { id: 'verified', label: 'Verified DOI' },
+        { id: 'unverified', label: 'Unverified DOI' },
+        { id: 'invalid_format', label: 'Invalid DOI Format' },
+        { id: 'not_found', label: 'DOI Not Found in Crossref' },
+        { id: 'pending', label: 'DOI Lookup Pending' },
+        { id: 'lookup_failed', label: 'DOI Lookup Failed' },
+        { id: 'metadata_mismatch', label: 'DOI Metadata Mismatch' },
+        { id: 'duplicate', label: 'Duplicate DOI' },
+        { id: 'missing_from_ref', label: 'DOI Missing from Reference' },
+        { id: 'retracted', label: 'Retracted Publication' },
+        { id: 'corrected', label: 'Corrected Publication' },
+        { id: 'wrong_article', label: 'DOI Linked to Wrong Article' },
+      ]
+    },
+    {
+      id: 'reference' as const,
+      name: 'Scholarly References',
+      options: [
+        { id: 'verified', label: 'Verified References' },
+        { id: 'unverified', label: 'Unverified References' },
+        { id: 'with_doi', label: 'References with DOI' },
+        { id: 'without_doi', label: 'References without DOI' },
+        { id: 'incomplete', label: 'Incomplete References' },
+        { id: 'duplicate', label: 'Duplicate References' },
+        { id: 'author_mismatch', label: 'Incorrect Author Metadata' },
+        { id: 'year_mismatch', label: 'Publication Year Mismatch' },
+        { id: 'title_mismatch', label: 'Title Mismatch' },
+        { id: 'journal_mismatch', label: 'Journal Mismatch' },
+        { id: 'missing_from_bib', label: 'References Missing from Bibliography' },
+        { id: 'needs_review', label: 'References Needing Manual Review' },
+      ]
+    },
+    {
+      id: 'citation' as const,
+      name: 'In-Text Citations',
+      options: [
+        { id: 'verified_match', label: 'Verified Citation-Reference Matches' },
+        { id: 'unmatched', label: 'Unmatched In-Text Citations' },
+        { id: 'missing_bib', label: 'Missing Bibliography Entries' },
+        { id: 'uncited_bib', label: 'Uncited Bibliography Entries' },
+        { id: 'duplicate', label: 'Duplicate Citations' },
+        { id: 'format_issue', label: 'Formatting Issues' },
+        { id: 'author_year_mismatch', label: 'Author-Year Mismatches' },
+        { id: 'multiple_citations', label: 'Multiple Citations to Same Reference' },
+        { id: 'needs_review', label: 'Citations Needing Review' },
+        { id: 'unsupported_claim', label: 'Unsupported Claims' },
+      ]
+    },
+    {
+      id: 'source' as const,
+      name: 'Source Repositories',
+      options: [
+        { id: 'scholarly_publications', label: 'Scholarly Publications' },
+        { id: 'institutional_repositories', label: 'Institutional Repositories' },
+        { id: 'uploaded_documents', label: 'Uploaded Documents' },
+        { id: 'authorized_web_sources', label: 'Authorized Web Sources' },
+        { id: 'crossref_metadata', label: 'Crossref Metadata Records' },
+        { id: 'verified_source', label: 'Verified Source' },
+        { id: 'unverified_source', label: 'Unverified Source' },
+        { id: 'source_unavailable', label: 'Source Unavailable' },
+        { id: 'metadata_mismatch', label: 'Source Metadata Mismatch' },
+      ]
+    },
+    {
+      id: 'integrity' as const,
+      name: 'Research Integrity',
+      options: [
+        { id: 'meaning_preservation', label: 'Meaning Preservation Warnings' },
+        { id: 'numerical_inconsistency', label: 'Numerical Inconsistencies' },
+        { id: 'statistical_mismatch', label: 'Statistical Claim Mismatches' },
+        { id: 'missing_source_support', label: 'Missing Source Support' },
+        { id: 'contradictory_finding', label: 'Contradictory Findings' },
+        { id: 'citation_metadata_issue', label: 'Citation Metadata Issues' },
+        { id: 'ai_authorship_indicator', label: 'AI-Authorship Indicators (Advisory)' },
+        { id: 'manual_review_required', label: 'Manual Review Required' },
+      ]
+    }
+  ], []);
+
+  const totalActiveFilterCount = useMemo(() => {
+    return Object.values(activeFilters).reduce((acc, curr) => acc + curr.length, 0);
+  }, [activeFilters]);
+
+  function toggleFilter(category: keyof typeof activeFilters, filterId: string) {
+    setActiveFilters(prev => {
+      const exists = prev[category].includes(filterId);
+      return {
+        ...prev,
+        [category]: exists ? prev[category].filter(id => id !== filterId) : [...prev[category], filterId]
+      };
+    });
+  }
+
+  function selectAllCategory(category: keyof typeof activeFilters) {
+    const cat = FILTER_CATEGORIES.find(c => c.id === category);
+    if (!cat) return;
+    setActiveFilters(prev => ({
+      ...prev,
+      [category]: cat.options.map(o => o.id)
+    }));
+  }
+
+  function clearCategory(category: keyof typeof activeFilters) {
+    setActiveFilters(prev => ({
+      ...prev,
+      [category]: []
+    }));
+  }
+
+  function resetAllFilters() {
+    setActiveFilters({
+      doi: [],
+      reference: [],
+      citation: [],
+      similarity: [],
+      source: [],
+      integrity: []
+    });
+    setFilterSearch('');
+  }
+
+  function toggleCategoryCollapse(categoryId: string) {
+    setCollapsedCategories(prev => ({ ...prev, [categoryId]: !prev[categoryId] }));
+  }
 
   // Sync external text changes
   useEffect(() => {
@@ -7870,11 +8037,154 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
     }, 300);
   }
 
-  // Highlighting parser
+  // Filtered Passages according to Similarity & Source Filter Categories
+  const filteredPassages = useMemo(() => {
+    const rawList = scanResult?.matchedPassages || [];
+    return rawList.filter((m: any) => {
+      // 1. Similarity filter (OR within category)
+      if (activeFilters.similarity.length > 0) {
+        const matchesSim = activeFilters.similarity.some(filterKey => {
+          const sim = m.similarityPercent || 0;
+          if (filterKey === 'high') return sim >= 70;
+          if (filterKey === 'medium') return sim >= 30 && sim < 70;
+          if (filterKey === 'low') return sim < 30;
+          if (filterKey === 'exact_matches') return m.type === 'exact' || m.matchTypeLabel?.toLowerCase().includes('exact');
+          if (filterKey === 'partial_matches') return m.type === 'near_exact' || m.matchCategory === 'partial_matches';
+          if (filterKey === 'repeated_phrases') return m.type === 'repeated_key_phrase';
+          if (filterKey === 'matched_quotations') return Boolean(m.isQuotation);
+          if (filterKey === 'bibliography_overlap') return Boolean(m.isBibOverlap);
+          if (filterKey === 'excluded_matches') return Boolean(m.isExcluded);
+          if (filterKey === 'needs_review') return Boolean(m.needsReview || sim >= 50);
+          return false;
+        });
+        if (!matchesSim) return false;
+      }
+      // 2. Source filter (OR within category)
+      if (activeFilters.source.length > 0) {
+        const matchesSrc = activeFilters.source.some(filterKey => {
+          const st = (m.sourceType || '').toLowerCase();
+          const vs = (m.verificationStatus || '').toLowerCase();
+          if (filterKey === 'scholarly_publications') return st.includes('scholarly') || Boolean(m.sourceDoi);
+          if (filterKey === 'institutional_repositories') return st.includes('repository') || st.includes('institutional');
+          if (filterKey === 'uploaded_documents') return st.includes('upload') || st.includes('internal');
+          if (filterKey === 'authorized_web_sources') return st.includes('web');
+          if (filterKey === 'crossref_metadata') return Boolean(m.sourceDoi);
+          if (filterKey === 'verified_source') return vs.includes('verified');
+          if (filterKey === 'unverified_source') return vs.includes('unverified');
+          if (filterKey === 'source_unavailable') return vs.includes('unavailable');
+          if (filterKey === 'metadata_mismatch') return vs.includes('mismatch');
+          return false;
+        });
+        if (!matchesSrc) return false;
+      }
+      return true;
+    });
+  }, [scanResult, activeFilters.similarity, activeFilters.source]);
+
+  // Filtered DOI References
+  const filteredDois = useMemo(() => {
+    const rawList = scanResult?.doiVerification?.references || [];
+    if (activeFilters.doi.length === 0) return rawList;
+    return rawList.filter((r: any) => {
+      return activeFilters.doi.some(filterKey => {
+        const status = r.status || '';
+        if (filterKey === 'verified') return status === 'verified';
+        if (filterKey === 'unverified') return status === 'unverified';
+        if (filterKey === 'invalid_format') return status === 'invalid_format' || r.isInvalidFormat;
+        if (filterKey === 'not_found') return status === 'not_found';
+        if (filterKey === 'pending') return status === 'pending';
+        if (filterKey === 'lookup_failed') return status === 'lookup_failed';
+        if (filterKey === 'metadata_mismatch') return status === 'metadata_mismatch';
+        if (filterKey === 'duplicate') return Boolean(r.isDuplicate);
+        if (filterKey === 'missing_from_ref') return Boolean(r.missingFromReference);
+        if (filterKey === 'retracted') return Boolean(r.isRetracted || r.retractionNotice);
+        if (filterKey === 'corrected') return Boolean(r.isCorrected);
+        if (filterKey === 'wrong_article') return Boolean(r.wrongArticle);
+        return false;
+      });
+    });
+  }, [scanResult, activeFilters.doi]);
+
+  // Filtered Bibliographic References
+  const filteredReferences = useMemo(() => {
+    const rawList = scanResult?.bibliographicReferences || scanResult?.references || [];
+    if (activeFilters.reference.length === 0) return rawList;
+    return rawList.filter((ref: any) => {
+      return activeFilters.reference.some(filterKey => {
+        if (filterKey === 'verified') return ref.status === 'verified';
+        if (filterKey === 'unverified') return ref.status === 'unverified';
+        if (filterKey === 'with_doi') return Boolean(ref.doi);
+        if (filterKey === 'without_doi') return !ref.doi;
+        if (filterKey === 'incomplete') return Boolean(ref.isIncomplete);
+        if (filterKey === 'duplicate') return Boolean(ref.isDuplicate);
+        if (filterKey === 'author_mismatch') return Boolean(ref.authorMismatch);
+        if (filterKey === 'year_mismatch') return Boolean(ref.yearMismatch);
+        if (filterKey === 'title_mismatch') return Boolean(ref.titleMismatch);
+        if (filterKey === 'journal_mismatch') return Boolean(ref.journalMismatch);
+        if (filterKey === 'missing_from_bib') return Boolean(ref.missingFromBibliography);
+        if (filterKey === 'needs_review') return Boolean(ref.needsReview);
+        return false;
+      });
+    });
+  }, [scanResult, activeFilters.reference]);
+
+  // Filtered In-Text Citations with User Manual Match Overrides
+  const filteredCitations = useMemo(() => {
+    const rawList = scanResult?.inTextCitations || scanResult?.citations || [];
+    const listWithOverrides = rawList.map((c: any) => {
+      if (citationOverrides[c.id]) {
+        return {
+          ...c,
+          matchStatus: 'verified',
+          matchedReferenceId: citationOverrides[c.id],
+          isManuallyOverridden: true
+        };
+      }
+      return c;
+    });
+
+    if (activeFilters.citation.length === 0) return listWithOverrides;
+    return listWithOverrides.filter((c: any) => {
+      return activeFilters.citation.some(filterKey => {
+        if (filterKey === 'verified_match') return c.matchStatus === 'verified';
+        if (filterKey === 'unmatched') return c.matchStatus === 'unmatched';
+        if (filterKey === 'missing_bib') return Boolean(c.missingBibliography);
+        if (filterKey === 'uncited_bib') return Boolean(c.uncitedBibliography);
+        if (filterKey === 'duplicate') return Boolean(c.isDuplicate);
+        if (filterKey === 'format_issue') return Boolean(c.formatIssue);
+        if (filterKey === 'author_year_mismatch') return Boolean(c.authorYearMismatch);
+        if (filterKey === 'multiple_citations') return Boolean(c.multipleCitations);
+        if (filterKey === 'needs_review') return Boolean(c.needsReview || c.matchStatus === 'ambiguous');
+        if (filterKey === 'unsupported_claim') return Boolean(c.unsupportedClaim);
+        return false;
+      });
+    });
+  }, [scanResult, citationOverrides, activeFilters.citation]);
+
+  // Filtered Research Integrity Findings
+  const filteredIntegrity = useMemo(() => {
+    const rawList = scanResult?.integrityFindings || [];
+    if (activeFilters.integrity.length === 0) return rawList;
+    return rawList.filter((f: any) => {
+      return activeFilters.integrity.some(filterKey => {
+        if (filterKey === 'meaning_preservation') return f.type === 'meaning_preservation' || f.category === 'empirical';
+        if (filterKey === 'numerical_inconsistency') return f.type === 'numerical_inconsistency' || f.category === 'empirical';
+        if (filterKey === 'statistical_mismatch') return f.type === 'statistical_mismatch' || f.category === 'statistical';
+        if (filterKey === 'missing_source_support') return f.type === 'missing_source_support' || f.category === 'source';
+        if (filterKey === 'contradictory_finding') return f.type === 'contradictory_finding' || f.category === 'contradictory';
+        if (filterKey === 'citation_metadata_issue') return f.type === 'citation_metadata_issue' || f.category === 'citation';
+        if (filterKey === 'ai_authorship_indicator') return f.type === 'ai_authorship_indicator' || f.category === 'ai';
+        if (filterKey === 'manual_review_required') return f.type === 'manual_review_required' || f.category === 'review';
+        return false;
+      });
+    });
+  }, [scanResult, activeFilters.integrity]);
+
+  // Highlighting parser (Dynamically restricted to filteredPassages)
   const highlightedElements = useMemo(() => {
     if (!scanResult || !manuscript) return manuscript;
 
-    const matches = scanResult.matchedPassages || [];
+    const matches = filteredPassages;
     const quotes = scanResult.excludedContent?.quotesFound || [];
 
     // Collect all intervals to highlight
@@ -8004,27 +8314,26 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
     }
 
     return nodes;
-  }, [manuscript, scanResult, selectedMatchId]);
+  }, [manuscript, scanResult, filteredPassages, selectedMatchId]);
 
   // Filtered source matches
   const filteredMatches = useMemo(() => {
-    if (!scanResult?.matchedPassages) return [];
-    if (filterTab === 'all') return scanResult.matchedPassages;
-    if (filterTab === 'overlap') return scanResult.matchedPassages.filter((m: any) => m.type === 'internal_passage_overlap' || m.type === 'exact' || m.type === 'near_exact');
-    if (filterTab === 'repeat') return scanResult.matchedPassages.filter((m: any) => m.type === 'repeated_key_phrase' || m.type === 'semantic');
-    if (filterTab === 'doi') return scanResult.matchedPassages.filter((m: any) => m.type === 'scholarly_citation_reference' || m.sourceDoi);
-    return scanResult.matchedPassages;
-  }, [scanResult, filterTab]);
+    if (filterTab === 'all') return filteredPassages;
+    if (filterTab === 'overlap') return filteredPassages.filter((m: any) => m.type === 'internal_passage_overlap' || m.type === 'exact' || m.type === 'near_exact');
+    if (filterTab === 'repeat') return filteredPassages.filter((m: any) => m.type === 'repeated_key_phrase' || m.type === 'semantic');
+    if (filterTab === 'doi') return filteredPassages.filter((m: any) => m.type === 'scholarly_citation_reference' || m.sourceDoi);
+    return filteredPassages;
+  }, [filteredPassages, filterTab]);
 
   // Industrial Sources Table: filtered, searched, and sorted
   const processedSources = useMemo(() => {
     let list: any[] = [];
     if (scanResult?.matchedSources && Array.isArray(scanResult.matchedSources)) {
       list = [...scanResult.matchedSources];
-    } else if (scanResult?.matchedPassages && Array.isArray(scanResult.matchedPassages)) {
+    } else if (filteredPassages && Array.isArray(filteredPassages)) {
       // Fallback derivation if matchedSources is absent
       const grp = new Map();
-      scanResult.matchedPassages.forEach((m: any) => {
+      filteredPassages.forEach((m: any) => {
         const sid = m.sourceId || m.sourceTitle || 'src';
         if (!grp.has(sid)) {
           grp.set(sid, {
@@ -8051,6 +8360,12 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
         s.passages.push(m);
       });
       list = Array.from(grp.values());
+    }
+
+    // Restrict sources to those having matching filtered passages if similarity or source filter active
+    if (activeFilters.similarity.length > 0 || activeFilters.source.length > 0) {
+      const allowedSourceIds = new Set(filteredPassages.map((p: any) => p.sourceId || p.sourceTitle));
+      list = list.filter(s => allowedSourceIds.has(s.sourceId) || allowedSourceIds.has(s.title));
     }
 
     if (sourceSearchTerm.trim()) {
@@ -8083,7 +8398,7 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
     });
 
     return list;
-  }, [scanResult, sourceSearchTerm, sourceTypeFilter, sourceStatusFilter, sourceSortBy]);
+  }, [scanResult, filteredPassages, activeFilters.similarity, activeFilters.source, sourceSearchTerm, sourceTypeFilter, sourceStatusFilter, sourceSortBy]);
 
   return (
     <div className="tg-container">
@@ -8246,6 +8561,18 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
               <span style={{ letterSpacing: '0.5px' }}>AUTHENTICITY & SOURCES HUB</span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button
+                type="button"
+                className="tg-filter-toggle-btn"
+                onClick={() => setFilterDrawerOpen(true)}
+                title="Open Advanced Filters for similarity, DOIs, references, citations, and research integrity"
+              >
+                <Filter size={13} />
+                <span>Advanced Filters</span>
+                {totalActiveFilterCount > 0 && (
+                  <span className="tg-filter-badge">{totalActiveFilterCount}</span>
+                )}
+              </button>
               {/* Scan State Pill */}
               <div className="tg-status-indicator">
                 <span className={`tg-status-dot ${scanStatus}`} />
@@ -8521,7 +8848,42 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
             </div>
           </div>
 
-          {/* 5 Tab Detail Sections Header */}
+          {/* Active Filter Chips Bar */}
+          {totalActiveFilterCount > 0 && (
+            <div className="tg-filter-chips-bar">
+              <span className="tg-chips-label">Active Filters ({totalActiveFilterCount}):</span>
+              {Object.entries(activeFilters).map(([catKey, ids]) => {
+                const catDef = FILTER_CATEGORIES.find(c => c.id === catKey);
+                return ids.map(id => {
+                  const optDef = catDef?.options.find(o => o.id === id);
+                  return (
+                    <span key={`${catKey}-${id}`} className="tg-filter-chip">
+                      <span className="tg-chip-category">{catDef?.name.split(' ')[0]}:</span>
+                      <span>{optDef?.label || id}</span>
+                      <button
+                        type="button"
+                        className="tg-filter-chip-remove"
+                        onClick={() => toggleFilter(catKey as any, id)}
+                        title="Remove filter"
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  );
+                });
+              })}
+              <button
+                type="button"
+                className="text-button"
+                onClick={resetAllFilters}
+                style={{ marginLeft: 'auto', fontSize: '11px', color: 'var(--rp-danger, #ef4444)' }}
+              >
+                Reset all
+              </button>
+            </div>
+          )}
+
+          {/* 7 Tab Detail Sections Header */}
           <div className="tg-tabs-nav">
             <button
               type="button"
@@ -8538,7 +8900,7 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
             >
               <GitCompare size={13} />
               Matched Sources
-              <span className="tg-tab-count-pill">{scanResult?.matchedPassages?.length || 0}</span>
+              <span className="tg-tab-count-pill">{filteredPassages.length}</span>
             </button>
             <button
               type="button"
@@ -8546,8 +8908,26 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
               onClick={() => setActiveDetailTab('doi')}
             >
               <BookOpenCheck size={13} />
-              DOI Verification
-              <span className="tg-tab-count-pill">{scanResult?.doiVerification?.total || 0}</span>
+              DOI & References
+              <span className="tg-tab-count-pill">{filteredDois.length}</span>
+            </button>
+            <button
+              type="button"
+              className={`tg-tab-btn ${activeDetailTab === 'citations' ? 'active' : ''}`}
+              onClick={() => setActiveDetailTab('citations')}
+            >
+              <Layers size={13} />
+              Citations
+              <span className="tg-tab-count-pill">{filteredCitations.length}</span>
+            </button>
+            <button
+              type="button"
+              className={`tg-tab-btn ${activeDetailTab === 'integrity' ? 'active' : ''}`}
+              onClick={() => setActiveDetailTab('integrity')}
+            >
+              <ShieldAlert size={13} />
+              Integrity
+              <span className="tg-tab-count-pill">{filteredIntegrity.length}</span>
             </button>
             <button
               type="button"
@@ -9102,78 +9482,311 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
               </div>
             )}
 
-            {/* TAB 3: DOI VERIFICATION */}
+            {/* TAB 3: DOI & REFERENCES AUDIT */}
             {activeDetailTab === 'doi' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <strong>Scholarly DOI References Audit</strong>
-                  <span style={{ fontSize: '10.5px', color: 'var(--muted)' }}>
-                    Crossref Open Registry
-                  </span>
-                </div>
-
-                {!scanResult?.doiVerification?.references?.length ? (
-                  <div style={{ textAlign: 'center', padding: '36px 20px', color: 'var(--muted)', background: 'var(--surface2)', borderRadius: '10px' }}>
-                    <BookOpenCheck size={28} style={{ opacity: 0.5, marginBottom: '8px' }} />
-                    <strong style={{ display: 'block', color: 'var(--text)', fontSize: '12.5px' }}>No DOI references detected</strong>
-                    <p style={{ margin: '4px 0 0', fontSize: '11px', maxWidth: '420px', marginInline: 'auto' }}>
-                      This manuscript does not contain extracted DOI identifiers (e.g., 10.xxxx/yyyy). To verify citations, include standard DOI links in your bibliography.
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                  <div>
+                    <strong>Scholarly DOI & Reference Audit ({filteredDois.length} DOIs · {filteredReferences.length} refs)</strong>
+                    <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--muted)' }}>
+                      Authoritative verification against Crossref metadata records, retraction registries, and bibliography completeness.
                     </p>
                   </div>
+                </div>
+
+                {!scanResult ? (
+                  <div style={{ textAlign: 'center', padding: '36px 20px', color: 'var(--muted)' }}>
+                    <BookOpenCheck size={28} style={{ opacity: 0.5, marginBottom: '8px' }} />
+                    <p style={{ fontSize: '12px' }}>Run a scan to extract and verify scholarly references.</p>
+                  </div>
+                ) : filteredDois.length === 0 && filteredReferences.length === 0 ? (
+                  <div className="tg-filter-empty-state">
+                    <div className="tg-empty-icon"><Filter size={24} /></div>
+                    <strong style={{ fontSize: '13px', color: 'var(--rp-text)' }}>
+                      {totalActiveFilterCount > 0 ? 'No DOIs or references match active filters' : 'No DOI references detected in manuscript'}
+                    </strong>
+                    <p style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)', margin: '4px 0 14px' }}>
+                      {totalActiveFilterCount > 0 ? 'Try clearing or resetting active DOI / Reference filters.' : 'Include standard DOI identifiers (10.xxxx/yyyy) in your bibliography to enable automated Crossref verification.'}
+                    </p>
+                    {totalActiveFilterCount > 0 && (
+                      <button type="button" className="secondary small" onClick={resetAllFilters}>
+                        Reset all filters
+                      </button>
+                    )}
+                  </div>
                 ) : (
-                  <table className="tg-data-table">
-                    <thead>
-                      <tr>
-                        <th>Identifier / DOI</th>
-                        <th>Resolution Status</th>
-                        <th>Matched Metadata / Journal</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {scanResult.doiVerification.references.map((r: any, idx: number) => (
-                        <tr key={idx}>
-                          <td>
-                            <strong style={{ display: 'block', fontFamily: 'monospace', fontSize: '10.5px' }}>
-                              {r.doi || r.rawCitation?.slice(0, 40) || 'DOI Reference'}
-                            </strong>
-                            {r.doi && (
-                              <a
-                                href={`https://doi.org/${r.doi}`}
-                                target="_blank"
-                                rel="noreferrer"
-                                style={{ fontSize: '10px', color: '#6366f1', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
-                              >
-                                doi.org/{r.doi} <ExternalLink size={9} />
-                              </a>
-                            )}
-                          </td>
-                          <td>
-                            <span className={`tg-metric-badge ${r.status === 'verified' ? 'clean' : r.status === 'partial' ? 'moderate' : 'elevated'}`}>
-                              {r.status === 'verified' ? 'Verified' : r.status === 'partial' ? 'Partial' : 'Unverified'}
-                            </span>
-                          </td>
-                          <td>
-                            <div style={{ fontSize: '11px', color: 'var(--text)' }}>
-                              {r.title || r.detail || 'Metadata record retrieved from open Crossref scholarly index'}
-                            </div>
-                            {r.journal && (
-                              <div style={{ fontSize: '10px', color: 'var(--muted)', marginTop: '2px' }}>
-                                <em>{r.journal}</em> {r.year ? `(${r.year})` : ''}
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <>
+                    {filteredDois.length > 0 && (
+                      <table className="tg-data-table">
+                        <thead>
+                          <tr>
+                            <th>Identifier / DOI</th>
+                            <th>Resolution Status</th>
+                            <th>Matched Metadata / Registry</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredDois.map((r: any, idx: number) => {
+                            const isRetracted = Boolean(r.isRetracted || r.retractionNotice);
+                            const isCorrected = Boolean(r.isCorrected);
+                            const isNotFound = r.status === 'not_found';
+                            const isPending = r.status === 'pending';
+                            const isInvalid = r.status === 'invalid_format';
+                            const isMismatch = r.status === 'metadata_mismatch';
+
+                            return (
+                              <tr key={r.id || idx}>
+                                <td>
+                                  <strong style={{ display: 'block', fontFamily: 'monospace', fontSize: '10.5px' }}>
+                                    {r.doi || r.rawCitation?.slice(0, 40) || 'DOI Reference'}
+                                  </strong>
+                                  {r.doi && (
+                                    <a
+                                      href={`https://doi.org/${r.doi}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      style={{ fontSize: '10px', color: '#6366f1', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+                                    >
+                                      doi.org/{r.doi} <ExternalLink size={9} />
+                                    </a>
+                                  )}
+                                </td>
+                                <td>
+                                  <span className={`tg-metric-badge ${
+                                    isRetracted ? 'elevated' :
+                                    isInvalid ? 'elevated' :
+                                    isNotFound ? 'moderate' :
+                                    isPending ? 'neutral' :
+                                    isMismatch ? 'moderate' :
+                                    r.status === 'verified' ? 'clean' : 'moderate'
+                                  }`}>
+                                    {isRetracted ? '⚠️ Retracted Publication' :
+                                     isCorrected ? 'ℹ️ Corrected Publication' :
+                                     isInvalid ? 'Invalid DOI Format' :
+                                     isPending ? 'Lookup Pending' :
+                                     isNotFound ? 'Not Found in Crossref' :
+                                     isMismatch ? 'Metadata Mismatch' :
+                                     r.status === 'verified' ? 'Verified' : 'Unverified'}
+                                  </span>
+                                </td>
+                                <td>
+                                  <div style={{ fontSize: '11px', color: 'var(--text)' }}>
+                                    {r.title || r.detail || 'Metadata record retrieved from open Crossref scholarly index'}
+                                  </div>
+                                  {r.journal && (
+                                    <div style={{ fontSize: '10px', color: 'var(--muted)', marginTop: '2px' }}>
+                                      <em>{r.journal}</em> {r.year ? `(${r.year})` : ''}
+                                    </div>
+                                  )}
+                                  {r.retractionNotice && (
+                                    <div style={{ fontSize: '10px', color: '#ef4444', fontWeight: 600, marginTop: '3px' }}>
+                                      {r.retractionNotice}
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
+                  </>
                 )}
 
                 <div className="tg-advisory-banner info">
                   <CircleHelp size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
                   <div>
-                    <strong>Verification Criteria:</strong> ResearchProof AI queries open Crossref registries to confirm DOI authenticity, matching article titles, published years, and indexed journals against author bibliography citations.
+                    <strong>Verification Criteria:</strong> ResearchProof AI queries Crossref to confirm DOI authenticity, matching article titles, published years, and indexed journals against author citations. Crossref absence alone does not imply a DOI is invalid.
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* TAB 4: IN-TEXT CITATIONS & REFERENCE MATCHING */}
+            {activeDetailTab === 'citations' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                  <div>
+                    <strong>In-Text Citations & Bibliography Alignment ({filteredCitations.length})</strong>
+                    <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--muted)' }}>
+                      Bidirectional matching between manuscript in-text mentions and bibliography references.
+                    </p>
+                  </div>
+                </div>
+
+                {!scanResult ? (
+                  <div style={{ textAlign: 'center', padding: '36px 20px', color: 'var(--muted)' }}>
+                    <Layers size={28} style={{ opacity: 0.5, marginBottom: '8px' }} />
+                    <p style={{ fontSize: '12px' }}>Run a scan to extract and verify in-text citations.</p>
+                  </div>
+                ) : filteredCitations.length === 0 ? (
+                  <div className="tg-filter-empty-state">
+                    <div className="tg-empty-icon"><Filter size={24} /></div>
+                    <strong style={{ fontSize: '13px', color: 'var(--rp-text)' }}>
+                      {totalActiveFilterCount > 0 ? 'No citations match the active filter criteria' : 'No in-text citations detected in manuscript'}
+                    </strong>
+                    <p style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)', margin: '4px 0 14px' }}>
+                      {totalActiveFilterCount > 0 ? 'Try clearing or resetting active citation filters.' : 'Include author-year citations like (Smith, 2021) or numbered references [1] in your text.'}
+                    </p>
+                    {totalActiveFilterCount > 0 && (
+                      <button type="button" className="secondary small" onClick={resetAllFilters}>
+                        Reset all filters
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {filteredCitations.map((c: any, idx: number) => {
+                      const matchedRef = (scanResult?.bibliographicReferences || []).find((r: any) => r.id === c.matchedReferenceId || r.doi === c.matchedReferenceId);
+                      return (
+                        <div key={c.id || idx} className="tg-citation-card">
+                          <div className="tg-citation-head">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: '12px', background: 'var(--surface2)', padding: '2px 8px', borderRadius: '4px' }}>
+                                {c.rawCitation}
+                              </span>
+                              <span className={`tg-metric-badge ${c.matchStatus === 'verified' ? 'clean' : c.matchStatus === 'ambiguous' ? 'moderate' : 'elevated'}`}>
+                                {c.matchStatus === 'verified' ? 'Verified Match' : c.matchStatus === 'ambiguous' ? 'Ambiguous Match' : 'Unmatched'}
+                              </span>
+                              {c.isManuallyOverridden && (
+                                <span className="status-pill active" style={{ fontSize: '9px', background: '#ecfdf5', color: '#059669', borderColor: '#a7f3d0' }}>
+                                  Manual Override
+                                </span>
+                              )}
+                            </div>
+                            <span style={{ fontSize: '10.5px', color: 'var(--muted)', fontWeight: 600 }}>
+                              Confidence: {c.confidence || (c.matchStatus === 'verified' ? 95 : 40)}%
+                            </span>
+                          </div>
+
+                          <div style={{ fontSize: '11.5px', color: 'var(--text)' }}>
+                            <strong>Matched Reference:</strong>{' '}
+                            {matchedRef ? (
+                              <span>{matchedRef.rawText || `${matchedRef.authors?.join(', ')} (${matchedRef.year}). ${matchedRef.title}`}</span>
+                            ) : (
+                              <span style={{ color: 'var(--rp-danger, #ef4444)' }}>Missing corresponding bibliography entry</span>
+                            )}
+                          </div>
+
+                          {/* Manual Match Correction Override Control */}
+                          <div className="tg-citation-override-row">
+                            <span style={{ fontSize: '11px', color: 'var(--muted)', fontWeight: 600 }}>Override / Re-link:</span>
+                            <select
+                              value={citationOverrides[c.id] || c.matchedReferenceId || ''}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setCitationOverrides(prev => ({ ...prev, [c.id]: val }));
+                                onSuccess?.(`✓ Re-linked citation "${c.rawCitation}" to bibliography entry.`);
+                              }}
+                              style={{ flex: 1, padding: '4px 8px', fontSize: '11px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)' }}
+                            >
+                              <option value="">-- Select matching reference or mark unmatched --</option>
+                              {(scanResult?.bibliographicReferences || []).map((b: any) => (
+                                <option key={b.id} value={b.id}>
+                                  {b.authors?.[0] || 'Author'} ({b.year || 'n.d.'}) - {(b.title || b.rawText || '').slice(0, 50)}...
+                                </option>
+                              ))}
+                            </select>
+                            {citationOverrides[c.id] && (
+                              <button
+                                type="button"
+                                className="text-button"
+                                onClick={() => {
+                                  setCitationOverrides(prev => {
+                                    const next = { ...prev };
+                                    delete next[c.id];
+                                    return next;
+                                  });
+                                }}
+                                style={{ fontSize: '10px', color: 'var(--muted)' }}
+                              >
+                                Clear
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB 5: RESEARCH INTEGRITY FINDINGS */}
+            {activeDetailTab === 'integrity' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                  <div>
+                    <strong>Empirical & Methodological Integrity Findings ({filteredIntegrity.length})</strong>
+                    <p style={{ margin: '2px 0 0', fontSize: '11px', color: 'var(--muted)' }}>
+                      Automated screening for statistical reporting consistency, empirical claims, and disciplinary integrity standards.
+                    </p>
+                  </div>
+                </div>
+
+                {!scanResult ? (
+                  <div style={{ textAlign: 'center', padding: '36px 20px', color: 'var(--muted)' }}>
+                    <ShieldAlert size={28} style={{ opacity: 0.5, marginBottom: '8px' }} />
+                    <p style={{ fontSize: '12px' }}>Run a scan to analyze empirical integrity and claims.</p>
+                  </div>
+                ) : filteredIntegrity.length === 0 ? (
+                  <div className="tg-filter-empty-state">
+                    <ShieldCheck size={32} style={{ color: '#10b981', marginBottom: '8px' }} />
+                    <strong style={{ fontSize: '13px', color: 'var(--rp-text)' }}>
+                      {totalActiveFilterCount > 0 ? 'No integrity findings match the active filters' : 'No Empirical Integrity Anomalies Detected'}
+                    </strong>
+                    <p style={{ fontSize: '11.5px', color: 'var(--rp-text-muted)', margin: '4px 0 14px' }}>
+                      {totalActiveFilterCount > 0
+                        ? 'Try clearing active integrity filters to see all findings.'
+                        : 'Manuscript demonstrates consistent statistical reporting, aligned empirical claims, and valid citation anchors.'}
+                    </p>
+                    {totalActiveFilterCount > 0 && (
+                      <button type="button" className="secondary small" onClick={resetAllFilters}>
+                        Reset all filters
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {filteredIntegrity.map((f: any, idx: number) => {
+                      const sevClass = f.severity === 'high' ? 'high' : f.severity === 'medium' ? 'medium' : 'advisory';
+                      return (
+                        <div key={f.id || idx} className={`tg-integrity-card ${sevClass}`}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span className={`tg-metric-badge ${f.severity === 'high' ? 'elevated' : f.severity === 'medium' ? 'moderate' : 'neutral'}`}>
+                                {f.severity.toUpperCase()}
+                              </span>
+                              <strong style={{ fontSize: '12.5px', color: 'var(--text)' }}>
+                                {f.title}
+                              </strong>
+                            </div>
+                            <span style={{ fontSize: '10px', textTransform: 'uppercase', fontWeight: 700, color: 'var(--muted)' }}>
+                              Category: {f.category}
+                            </span>
+                          </div>
+
+                          {f.excerpt && (
+                            <div style={{ padding: '6px 10px', background: 'var(--surface2)', borderRadius: '6px', fontSize: '11px', fontStyle: 'italic', color: 'var(--text)', marginBottom: '8px' }}>
+                              “{f.excerpt}”
+                            </div>
+                          )}
+
+                          <p style={{ margin: '0 0 8px', fontSize: '11.5px', color: 'var(--muted)', lineHeight: '1.5' }}>
+                            {f.detail}
+                          </p>
+
+                          {f.actionSuggested && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#4f46e5', fontWeight: 600 }}>
+                              <span>Recommended Action:</span>
+                              <span style={{ color: 'var(--text)' }}>{f.actionSuggested}</span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 
@@ -9540,6 +10153,144 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
                   onClick={() => setCompareModalSource(null)}
                 >
                   Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Advanced Filters Slide-In Drawer */}
+      {filterDrawerOpen && (
+        <div className="tg-filter-drawer-overlay" onClick={() => setFilterDrawerOpen(false)}>
+          <div className="tg-filter-drawer" onClick={e => e.stopPropagation()}>
+            {/* Drawer Header */}
+            <div className="tg-filter-drawer-head">
+              <div className="tg-filter-drawer-title">
+                <Filter size={15} color="#6366f1" />
+                <span>Advanced Verification Filters</span>
+                {totalActiveFilterCount > 0 && (
+                  <span className="tg-filter-badge">{totalActiveFilterCount}</span>
+                )}
+              </div>
+              <button
+                type="button"
+                className="tg-resolve-close"
+                onClick={() => setFilterDrawerOpen(false)}
+                title="Close filter drawer"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            {/* Filter Search */}
+            <div className="tg-filter-search-box">
+              <input
+                type="text"
+                placeholder="Search filter options (e.g., retracted, high, missing)..."
+                value={filterSearch}
+                onChange={e => setFilterSearch(e.target.value)}
+                className="tg-filter-search-input"
+              />
+            </div>
+
+            {/* Drawer Body: Collapsible Filter Categories */}
+            <div className="tg-filter-drawer-body">
+              {FILTER_CATEGORIES.map(category => {
+                const selectedInCat = activeFilters[category.id] || [];
+                const isCollapsed = Boolean(collapsedCategories[category.id]);
+                const q = filterSearch.toLowerCase().trim();
+                const visibleOptions = q
+                  ? category.options.filter(o => o.label.toLowerCase().includes(q) || o.id.toLowerCase().includes(q))
+                  : category.options;
+
+                if (q && visibleOptions.length === 0) return null;
+
+                return (
+                  <div key={category.id} className="tg-category-accordion">
+                    <div
+                      className="tg-category-head"
+                      onClick={() => toggleCategoryCollapse(category.id)}
+                    >
+                      <div className="tg-category-title">
+                        {isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                        <span>{category.name}</span>
+                        {selectedInCat.length > 0 && (
+                          <span className="tg-filter-badge" style={{ minWidth: '16px', height: '16px', fontSize: '9.5px' }}>
+                            {selectedInCat.length}
+                          </span>
+                        )}
+                      </div>
+                      <div className="tg-category-actions" onClick={e => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          className="tg-category-btn"
+                          onClick={() => selectAllCategory(category.id)}
+                          title="Select all in category"
+                        >
+                          Select all
+                        </button>
+                        <span style={{ color: 'var(--rp-border, #cbd5e1)' }}>·</span>
+                        <button
+                          type="button"
+                          className="tg-category-btn"
+                          onClick={() => clearCategory(category.id)}
+                          title="Clear category"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+
+                    {!isCollapsed && (
+                      <div className="tg-category-options">
+                        {visibleOptions.map(opt => {
+                          const isChecked = selectedInCat.includes(opt.id);
+                          return (
+                            <label key={opt.id} className="tg-filter-checkbox-row">
+                              <span className="tg-checkbox-label">
+                                <input
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => toggleFilter(category.id, opt.id)}
+                                  style={{ cursor: 'pointer' }}
+                                />
+                                <span>{opt.label}</span>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Drawer Footer */}
+            <div className="tg-filter-drawer-foot">
+              <button
+                type="button"
+                className="secondary small"
+                onClick={resetAllFilters}
+                disabled={totalActiveFilterCount === 0}
+              >
+                <RotateCcw size={11} style={{ marginRight: '4px' }} /> Reset all
+              </button>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="secondary small"
+                  onClick={() => setFilterDrawerOpen(false)}
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  className="primary small"
+                  onClick={() => setFilterDrawerOpen(false)}
+                >
+                  Apply Filters {totalActiveFilterCount > 0 ? `(${totalActiveFilterCount})` : ''}
                 </button>
               </div>
             </div>
