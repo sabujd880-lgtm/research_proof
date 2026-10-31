@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useRef } from 'react';
 import './styles.css';
 import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
 import {
-  Activity, ArrowRight, BookOpen, BookOpenCheck, Check, ChevronDown, ChevronRight, ChevronLeft, ChevronUp,
+  Activity, ArrowRight, ArrowUpRight, BookOpen, BookOpenCheck, Check, ChevronDown, ChevronRight, ChevronLeft, ChevronUp,
   CircleHelp, Clock3, Copy, Download, FileCheck2, FileText, FolderKanban, Gauge, History,
   LayoutDashboard, LogOut, Menu, Moon, PanelLeft, Plus, RefreshCw, ScanText, Settings2,
   ShieldAlert, ShieldCheck, Sliders, Sparkles, Sun, Trash2, Upload, WandSparkles, X,
@@ -1818,7 +1818,7 @@ export default function App() {
                     </div>
                   ))}
                   <button className="text-button" onClick={() => setSection('Citation Assistant')} style={{ width: '100%', textAlign: 'left', marginTop: '4px' }}>
-                    Manage references ↗
+                    Manage references <ArrowUpRight size={13} />
                   </button>
                 </div>
               </div>
@@ -1855,9 +1855,9 @@ export default function App() {
                   </div>
 
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span style={{ fontSize: '10px', color: 'var(--muted)' }}>
+                    <span style={{ fontSize: '10px', color: 'var(--muted)', display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
                       {saveStatus === 'saving' && 'Saving…'}
-                      {saveStatus === 'saved' && '✓ Saved'}
+                      {saveStatus === 'saved' && <><Check size={11} color="#10b981" /> Saved</>}
                       {saveStatus === 'unsaved' && '● Unsaved'}
                     </span>
 
@@ -1896,8 +1896,8 @@ export default function App() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '12px', borderTop: '1px solid var(--border)', fontSize: '11px', color: 'var(--muted)' }}>
                   <span>{wordCount} words · {text.length} characters · Version {activeDoc?.version || 1}</span>
                   <div style={{ display: 'flex', gap: '10px' }}>
-                    <button className="text-button" onClick={() => runAction('writing')}>Writing Assessment ↗</button>
-                    <button className="text-button" onClick={() => runAction('originality')}>Originality Check ↗</button>
+                    <button className="text-button" onClick={() => runAction('writing')}>Writing Assessment <ArrowUpRight size={13} /></button>
+                    <button className="text-button" onClick={() => runAction('originality')}>Originality Check <ArrowUpRight size={13} /></button>
                   </div>
                 </div>
               </div>
@@ -2074,7 +2074,9 @@ export default function App() {
                                 <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700 }}>
                                   <span>{m.sourceLocation}</span>
                                   {m.sourceLink && (
-                                    <a href={m.sourceLink} target="_blank" rel="noreferrer" style={{ color: '#8876ee', textDecoration: 'underline' }}>Source ↗</a>
+                                    <a href={m.sourceLink} target="_blank" rel="noreferrer" style={{ color: '#8876ee', textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                                      Source <ArrowUpRight size={11} />
+                                    </a>
                                   )}
                                 </div>
                                 <p style={{ margin: '3px 0' }}>“{m.excerpt}”</p>
@@ -3366,8 +3368,8 @@ export default function App() {
 
                       {citationAuditResult && (
                         <div style={{ marginTop: '10px', fontSize: '10px' }}>
-                          <div style={{ fontWeight: 700, color: citationAuditResult.valid ? '#34c98b' : '#e46f7a', marginBottom: '6px' }}>
-                            {citationAuditResult.valid ? '✓ All citations verified' : '⚠ Citation discrepancies detected'}
+                          <div style={{ fontWeight: 700, color: citationAuditResult.valid ? '#34c98b' : '#e46f7a', marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            {citationAuditResult.valid ? <><Check size={12} /> All citations verified</> : <><AlertTriangle size={12} /> Citation discrepancies detected</>}
                           </div>
                           {citationAuditResult.missingCitations.map((m: any, i: number) => (
                             <div key={i} style={{ color: '#e46f7a', marginBottom: '4px' }}>• Missing reference for: {m.marker}</div>
@@ -3759,8 +3761,8 @@ export default function App() {
                       <p style={{ fontSize: '11px', color: 'var(--muted)', marginBottom: '14px', lineHeight: '1.5' }}>
                         Complete Overleaf-ready project bundle including main.tex, references.bib, and UTF-8 font settings.
                       </p>
-                      <button className="primary small" onClick={() => setSection('LaTeX Export Studio')} style={{ width: '100%' }}>
-                        Open LaTeX Studio ↗
+                      <button className="primary small" onClick={() => setSection('LaTeX Export Studio')} style={{ width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                        Open LaTeX Studio <ArrowUpRight size={13} />
                       </button>
                     </div>
                   </div>
@@ -4744,8 +4746,8 @@ function Dashboard({
                 {activeProject ? (activeProject.progress ?? activeProject.completionPercentage ?? 0) : 0}%
               </div>
             </div>
-            <button className="btn-secondary btn-sm" onClick={() => setSection('My Research Projects')}>
-              Manage All Projects ↗
+            <button className="btn-secondary btn-sm" onClick={() => setSection('My Research Projects')} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+              Manage All Projects <ArrowUpRight size={13} />
             </button>
           </div>
         </div>
@@ -5121,7 +5123,7 @@ function Dashboard({
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
             <h3 style={{ fontSize: '14px', fontWeight: 700, margin: 0 }}>Recent Research Projects</h3>
             <button className="text-button" onClick={() => setSection('My Research Projects')}>
-              View all {projects.length} projects →
+              View all {projects.length} projects <ArrowRight size={14} />
             </button>
           </div>
 
@@ -5268,7 +5270,23 @@ function Dashboard({
               <h3 style={{ fontSize: '13px', fontWeight: 600 }}>Recent manuscripts</h3>
               <p style={{ fontSize: '10.5px' }}>Continue editing your research documents.</p>
             </div>
-            <button className="text-button" onClick={() => setSection('Writing Studio')}>Open Studio ↗</button>
+            <button
+              className="btn-secondary"
+              onClick={() => setSection('Writing Studio')}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                height: '34px',
+                padding: '0 12px',
+                fontSize: '12.5px',
+                fontWeight: 500,
+                borderRadius: '6px',
+                fontFamily: 'var(--font-family-base)'
+              }}
+            >
+              Open Studio <ArrowUpRight size={14} />
+            </button>
           </div>
           {documents?.length ? documents.slice(0, 3).map((d: DocumentItem) => (
             <div className="list-row" key={d._id} onClick={() => setSection('Writing Studio')} style={{ cursor: 'pointer', padding: '10px 0' }}>
@@ -5277,7 +5295,7 @@ function Dashboard({
                 <strong style={{ fontSize: '12px' }}>{d.title}</strong>
                 <small style={{ fontSize: '10px', color: 'var(--rp-text-muted)' }}>{d.wordCount} words · v{d.version || 1} · Updated {new Date(d.updatedAt).toLocaleDateString()}</small>
               </div>
-              <span className="row-arrow">↗</span>
+              <ArrowUpRight size={14} className="row-arrow" />
             </div>
           )) : (
             <div className="empty-state" style={{ padding: '20px 10px' }}>
@@ -5289,24 +5307,58 @@ function Dashboard({
         </div>
 
         <div className="panel integrity-panel" style={{ padding: '16px' }}>
-          <div className="panel-heading" style={{ marginBottom: '12px' }}>
+          <div className="panel-heading" style={{ marginBottom: '14px' }}>
             <div>
               <h3 style={{ fontSize: '13px', fontWeight: 600 }}>Research integrity checklist</h3>
-              <p style={{ fontSize: '10.5px' }}>Key verification standards before peer review</p>
+              <p style={{ fontSize: '11px', color: 'var(--rp-text-muted)' }}>Key verification standards before peer review</p>
             </div>
-            <ShieldCheck size={18} />
+            <ShieldCheck size={18} style={{ color: 'var(--rp-success)' }} />
           </div>
-          {[
-            'Deterministic meaning audit: Check negations and findings',
-            'Crossref metadata verification: Validate all active DOIs',
-            'No silent overwrite: Revisions require explicit user acceptance',
-            'Safe export: Clean Office Open XML generation with references'
-          ].map((s, i) => (
-            <div className="check-row" key={s} style={{ margin: '10px 0' }}>
-              <span style={{ fontSize: '10px', width: '20px', height: '20px' }}>{i + 1}</span>
-              <p style={{ fontSize: '11px', margin: 0 }}>{s}</p>
-            </div>
-          ))}
+          <div className="integrity-checklist-grid">
+            {[
+              {
+                id: 'meaning',
+                title: 'Meaning Preservation',
+                desc: 'Verify negations, statistical results, and core empirical findings.',
+                icon: CheckCircle2,
+                passed: true
+              },
+              {
+                id: 'doi',
+                title: 'DOI Verification',
+                desc: 'Validate active Crossref metadata and persistent scholarly identifiers.',
+                icon: CheckCircle2,
+                passed: true
+              },
+              {
+                id: 'safety',
+                title: 'Revision Safety',
+                desc: 'Require explicit user authorization and diff audit before overwriting.',
+                icon: CheckCircle2,
+                passed: true
+              },
+              {
+                id: 'export',
+                title: 'Safe Export',
+                desc: 'Generate valid, clean Office Open XML (DOCX) files with complete references.',
+                icon: CheckCircle2,
+                passed: true
+              }
+            ].map((item) => {
+              const Icon = item.icon;
+              return (
+                <div key={item.id} className="integrity-checklist-row">
+                  <div className="integrity-checklist-icon">
+                    <Icon size={16} />
+                  </div>
+                  <div className="integrity-checklist-content">
+                    <div className="integrity-checklist-title">{item.title}</div>
+                    <p className="integrity-checklist-desc">{item.desc}</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
     </section>
@@ -5410,7 +5462,9 @@ function CitationAssistantPage({
           {lookupResult?.formatted && (
             <div style={{ background: 'var(--surface2)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <span className="subtle-tag" style={{ color: '#34c98b' }}>✓ Crossref Verified</span>
+                <span className="subtle-tag" style={{ color: '#34c98b', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                  <Check size={12} /> Crossref Verified
+                </span>
                 <select
                   value={citationFormatStyle}
                   onChange={(e: any) => setCitationFormatStyle(e.target.value)}
@@ -5554,8 +5608,8 @@ function AnalysisPage({ title, subtitle, resultsTitle, resultsSubtitle, icon, ru
               Enter or paste text above, or import a DOCX/TXT file to run the check.
             </div>
           )}
-          <button className="primary full" onClick={run} disabled={busy || !text.trim()}>
-            {busy ? 'Analysing…' : 'Run review'} <span>→</span>
+          <button className="primary full" onClick={run} disabled={busy || !text.trim()} style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+            {busy ? 'Analysing…' : 'Run review'} <ArrowRight size={14} />
           </button>
         </div>
 
@@ -5698,8 +5752,8 @@ function AnalysisPage({ title, subtitle, resultsTitle, resultsSubtitle, icon, ru
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
                             <strong style={{ fontSize: '11px', color: 'var(--text)' }}>{m.sourceLocation}</strong>
                             {m.sourceLink && (
-                              <a href={m.sourceLink} target="_blank" rel="noreferrer" style={{ fontSize: '10px', color: '#8876ee', textDecoration: 'underline' }}>
-                                View Source ↗
+                              <a href={m.sourceLink} target="_blank" rel="noreferrer" style={{ fontSize: '10px', color: '#8876ee', textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                                View Source <ArrowUpRight size={11} />
                               </a>
                             )}
                           </div>
@@ -6516,7 +6570,9 @@ function Projects({
 
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', color: 'var(--rp-text-muted)' }}>
                         <span>{pDocs.length} chapter(s) · {pWords.toLocaleString()} words</span>
-                        <span style={{ color: 'var(--rp-accent)', fontWeight: 600 }}>Open Workspace ↗</span>
+                        <span style={{ color: 'var(--rp-accent)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                          Open Workspace <ArrowUpRight size={12} />
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -6711,26 +6767,30 @@ function Projects({
             <button
               className={`qb-mode-btn ${projectTab === 'tree' ? 'active' : ''}`}
               onClick={() => setProjectTab('tree')}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >
-              📚 Chapters & Documents ({projectDocs.length})
+              <BookOpen size={13} /> Chapters & Documents ({projectDocs.length})
             </button>
             <button
               className={`qb-mode-btn ${projectTab === 'tasks' ? 'active' : ''}`}
               onClick={() => setProjectTab('tasks')}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >
-              ✅ Milestones & Tasks ({projectTasks.filter(t => t.status === 'done').length}/{projectTasks.length})
+              <CheckCircle2 size={13} /> Milestones & Tasks ({projectTasks.filter(t => t.status === 'done').length}/{projectTasks.length})
             </button>
             <button
               className={`qb-mode-btn ${projectTab === 'activity' ? 'active' : ''}`}
               onClick={() => setProjectTab('activity')}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >
-              🕒 Activity Trail ({projectActivity.length})
+              <Clock3 size={13} /> Activity Trail ({projectActivity.length})
             </button>
             <button
               className={`qb-mode-btn ${projectTab === 'bridges' ? 'active' : ''}`}
               onClick={() => setProjectTab('bridges')}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >
-              ⚡ Module Launchers
+              <Sparkles size={13} /> Module Launchers
             </button>
             <button
               className={`qb-mode-btn ${projectTab === 'cross_scan' ? 'active' : ''}`}
@@ -6738,8 +6798,9 @@ function Projects({
                 setProjectTab('cross_scan');
                 if (!crossScanReport) handleRunCrossScan();
               }}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >
-              🔍 Cross-Chapter Audit
+              <Search size={13} /> Cross-Chapter Audit
             </button>
             <button
               className={`qb-mode-btn ${projectTab === 'bibliography' ? 'active' : ''}`}
@@ -6747,8 +6808,9 @@ function Projects({
                 setProjectTab('bibliography');
                 if (!bibReport) handleSyncBib();
               }}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >
-              📑 Master Bibliography (.bib)
+              <FileText size={13} /> Master Bibliography (.bib)
             </button>
           </div>
 
@@ -6881,9 +6943,9 @@ function Projects({
                           <button
                             className="btn-primary btn-sm"
                             onClick={() => onOpenInStudio(doc)}
-                            style={{ fontSize: '11px' }}
+                            style={{ fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                           >
-                            Open in Studio ↗
+                            Open in Studio <ArrowUpRight size={12} />
                           </button>
                         </>
                       ) : (
@@ -7148,9 +7210,9 @@ function Projects({
                     handleSetActive(selectedProject);
                     setSection('Literature Review');
                   }}
-                  style={{ width: '100%', justifyContent: 'center' }}
+                  style={{ width: '100%', justifyContent: 'center', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                 >
-                  Launch Literature Studio ↗
+                  Launch Literature Studio <ArrowUpRight size={13} />
                 </button>
               </div>
 
@@ -7168,9 +7230,9 @@ function Projects({
                     handleSetActive(selectedProject);
                     setSection('Statistical Analysis');
                   }}
-                  style={{ width: '100%', justifyContent: 'center' }}
+                  style={{ width: '100%', justifyContent: 'center', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                 >
-                  Launch Statistical Engine ↗
+                  Launch Statistical Engine <ArrowUpRight size={13} />
                 </button>
               </div>
 
@@ -7188,9 +7250,9 @@ function Projects({
                     handleSetActive(selectedProject);
                     setSection('PDF Research Chat');
                   }}
-                  style={{ width: '100%', justifyContent: 'center' }}
+                  style={{ width: '100%', justifyContent: 'center', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                 >
-                  Launch PDF Chat ↗
+                  Launch PDF Chat <ArrowUpRight size={13} />
                 </button>
               </div>
 
@@ -7208,9 +7270,9 @@ function Projects({
                     handleSetActive(selectedProject);
                     setSection('Journal Submission');
                   }}
-                  style={{ width: '100%', justifyContent: 'center' }}
+                  style={{ width: '100%', justifyContent: 'center', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
                 >
-                  Launch Submission Studio ↗
+                  Launch Submission Studio <ArrowUpRight size={13} />
                 </button>
               </div>
             </div>
@@ -7264,8 +7326,8 @@ function Projects({
 
                   {crossScanReport.statisticalInconsistencies?.length > 0 && (
                     <div>
-                      <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', color: '#b91c1c', marginBottom: '8px' }}>
-                        ⚠ Numerical Discrepancies Across Chapters
+                      <div style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', color: '#b91c1c', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                        <AlertTriangle size={13} /> Numerical Discrepancies Across Chapters
                       </div>
                       {crossScanReport.statisticalInconsistencies.map((stat: any, idx: number) => (
                         <div key={idx} className="cross-stat-alert">
@@ -7592,11 +7654,11 @@ function ParaphrasingSuite({ text, setText, initialMode = 'standard', token, act
                   >
                     {viewMode === 'clean' ? 'Show Changes' : 'Clean View'}
                   </button>
-                  <button className="text-button" onClick={handleCopy}>
-                    {copied ? '✓ Copied' : 'Copy'}
+                  <button className="text-button" onClick={handleCopy} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                    {copied ? <><Check size={12} /> Copied</> : 'Copy'}
                   </button>
-                  <button className="text-button" onClick={() => onSendToStudio(revisedText)}>
-                    Open in Studio ↗
+                  <button className="text-button" onClick={() => onSendToStudio(revisedText)} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                    Open in Studio <ArrowUpRight size={12} />
                   </button>
                 </>
               )}
@@ -7661,8 +7723,8 @@ function ParaphrasingSuite({ text, setText, initialMode = 'standard', token, act
 
           {meaningWarnings.length > 0 && (
             <div className="panel" style={{ padding: '14px 18px', background: '#fff8ee', border: '1px solid #fed7aa' }}>
-              <strong style={{ fontSize: '12px', color: '#c2410c', display: 'block', marginBottom: '6px' }}>
-                ⚠ Meaning-Preservation Warnings ({meaningWarnings.length})
+              <strong style={{ fontSize: '12px', color: '#c2410c', display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '6px' }}>
+                <AlertTriangle size={13} /> Meaning-Preservation Warnings ({meaningWarnings.length})
               </strong>
               {meaningWarnings.map((w: any, idx: number) => (
                 <div key={idx} style={{ fontSize: '10px', color: '#9a3412', marginBottom: '4px' }}>
@@ -9633,32 +9695,36 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
                                     className={`tg-mode-chip ${resolveState?.mode === 'humanize' ? 'active' : ''}`}
                                     onClick={() => handleGenerateRewrite(m, 'humanize')}
                                     disabled={resolveState?.busy}
+                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}
                                   >
-                                    🛡️ TextGuard Humanizer
+                                    <ShieldCheck size={13} /> TextGuard Humanizer
                                   </button>
                                   <button
                                     type="button"
                                     className={`tg-mode-chip ${resolveState?.mode === 'academic-clarity' ? 'active' : ''}`}
                                     onClick={() => handleGenerateRewrite(m, 'academic-clarity')}
                                     disabled={resolveState?.busy}
+                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}
                                   >
-                                    🎓 Academic Clarity
+                                    <BookOpen size={13} /> Academic Clarity
                                   </button>
                                   <button
                                     type="button"
                                     className={`tg-mode-chip ${resolveState?.mode === 'standard' ? 'active' : ''}`}
                                     onClick={() => handleGenerateRewrite(m, 'standard')}
                                     disabled={resolveState?.busy}
+                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}
                                   >
-                                    ⚡ Standard
+                                    <Sparkles size={13} /> Standard
                                   </button>
                                   <button
                                     type="button"
                                     className={`tg-mode-chip ${resolveState?.mode === 'formal-scientific' ? 'active' : ''}`}
                                     onClick={() => handleGenerateRewrite(m, 'formal-scientific')}
                                     disabled={resolveState?.busy}
+                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}
                                   >
-                                    🔬 Formal Scientific
+                                    <Activity size={13} /> Formal Scientific
                                   </button>
                                 </div>
 
@@ -9690,7 +9756,7 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
                                         style={{ background: '#059669', borderColor: '#059669', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
                                         onClick={() => handleAcceptRewrite(resolveState.passage, resolveState.proposed!, m)}
                                       >
-                                        <Check size={12} /> ✓ Accept & Replace in Manuscript
+                                        <Check size={12} /> Accept & Replace in Manuscript
                                       </button>
                                     </div>
                                   </>
@@ -9789,8 +9855,8 @@ function TextGuardStudio({ text, setText, token, activeDoc, onImportFile, onErro
                                     isMismatch ? 'moderate' :
                                     r.status === 'verified' ? 'clean' : 'moderate'
                                   }`}>
-                                    {isRetracted ? '⚠️ Retracted Publication' :
-                                     isCorrected ? 'ℹ️ Corrected Publication' :
+                                    {isRetracted ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}><AlertTriangle size={11} /> Retracted Publication</span> :
+                                     isCorrected ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}><AlertCircle size={11} /> Corrected Publication</span> :
                                      isInvalid ? 'Invalid DOI Format' :
                                      isPending ? 'Lookup Pending' :
                                      isNotFound ? 'Not Found in Crossref' :
@@ -10572,7 +10638,7 @@ function HistoryPage({ revisions, token }: { revisions: Revision[]; token?: stri
               <small>{new Date(r.createdAt).toLocaleString()} · {r.originalText.trim().split(/\s+/).length} words</small>
               <p>{r.summary || 'Revision recorded'}</p>
             </div>
-            <span className="row-arrow">→</span>
+            <ArrowRight size={14} className="row-arrow" />
           </button>
         )) : (
           <div className="empty-state">
@@ -10631,8 +10697,12 @@ function HistoryPage({ revisions, token }: { revisions: Revision[]; token?: stri
                 </div>
                 <div style={{ background: 'var(--surface2)', padding: '10px', borderRadius: '6px' }}>
                   <small style={{ fontWeight: 700, color: 'var(--muted)' }}>Polarity & Claims</small>
-                  <p style={{ margin: '4px 0 0', fontSize: '12px', color: comparison.empiricalDeltas?.hasReversals ? '#ef4444' : '#10b981' }}>
-                    {comparison.empiricalDeltas?.hasReversals ? '⚠️ Warning: Potential claim reversal' : '✓ Preserved scientific polarity'}
+                  <p style={{ margin: '4px 0 0', fontSize: '12px', color: comparison.empiricalDeltas?.hasReversals ? '#ef4444' : '#10b981', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    {comparison.empiricalDeltas?.hasReversals ? (
+                      <><AlertTriangle size={12} /> Warning: Potential claim reversal</>
+                    ) : (
+                      <><Check size={12} /> Preserved scientific polarity</>
+                    )}
                   </p>
                 </div>
               </div>
@@ -10738,7 +10808,9 @@ function SettingsPage({ user, usage, dark, setDark, persist, setPersist, isCompa
             </div>
             <div style={{ marginTop: '8px' }}>
               {(user?.authProviders || ['email']).map((p: string) => (
-                <span key={p} className="provider-tag">{p === 'google' ? '✓ Google Connected' : '✓ Password Auth'}</span>
+                <span key={p} className="provider-tag" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                  <Check size={12} /> {p === 'google' ? 'Google Connected' : 'Password Auth'}
+                </span>
               ))}
             </div>
 
@@ -11261,9 +11333,9 @@ function IntegrityReportsPage({ token, documents, activeDoc, setMessage, setErro
                   <button
                     className="text-button"
                     onClick={() => handleCopyHash(currentDossier.verificationHash)}
-                    style={{ fontSize: '10px', padding: '2px 6px' }}
+                    style={{ fontSize: '10px', padding: '2px 6px', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
                   >
-                    {copiedHash ? '✓ Copied' : 'Copy Hash'}
+                    {copiedHash ? <><Check size={11} /> Copied</> : 'Copy Hash'}
                   </button>
                   <a
                     href={`${API}/integrity/verify/${currentDossier.verificationHash}`}
@@ -11277,9 +11349,9 @@ function IntegrityReportsPage({ token, documents, activeDoc, setMessage, setErro
                   <button
                     className="text-button"
                     onClick={() => window.print()}
-                    style={{ fontSize: '10px', padding: '2px 6px', color: '#10b981' }}
+                    style={{ fontSize: '11px', padding: '2px 8px', color: '#10b981', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                   >
-                    🖨️ Print PDF
+                    <Printer size={12} /> Print PDF
                   </button>
                 </div>
               </div>
@@ -11350,8 +11422,8 @@ function IntegrityReportsPage({ token, documents, activeDoc, setMessage, setErro
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
                     {pub.checks?.map((c: any) => (
                       <div key={c.id} className="pub-card-rule">
-                        <span className={c.passed ? 'pub-rule-pass' : 'pub-rule-fail'}>
-                          {c.passed ? '✓' : '✗'}
+                        <span className={c.passed ? 'pub-rule-pass' : 'pub-rule-fail'} style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+                          {c.passed ? <Check size={11} /> : <X size={11} />}
                         </span>
                         <div>
                           <strong style={{ fontSize: '11px', color: 'var(--text)' }}>{c.name}</strong>
@@ -11442,8 +11514,14 @@ function IntegrityReportsPage({ token, documents, activeDoc, setMessage, setErro
               <strong style={{ color: currentChecklist.declarations?.hasDataAvailability && currentChecklist.declarations?.hasCompetingInterests ? '#10b981' : '#f59e0b' }}>
                 {currentChecklist.declarations?.hasDataAvailability && currentChecklist.declarations?.hasCompetingInterests ? 'Complete' : 'Attention'}
               </strong>
-              <div style={{ fontSize: '10px', color: 'var(--muted)', marginTop: '4px' }}>
-                Data: {currentChecklist.declarations?.hasDataAvailability ? '✓' : '✗'} · Competing: {currentChecklist.declarations?.hasCompetingInterests ? '✓' : '✗'}
+              <div style={{ fontSize: '10px', color: 'var(--muted)', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                  Data: {currentChecklist.declarations?.hasDataAvailability ? <Check size={11} color="#10b981" /> : <X size={11} color="#ef4444" />}
+                </span>
+                <span>·</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                  Competing: {currentChecklist.declarations?.hasCompetingInterests ? <Check size={11} color="#10b981" /> : <X size={11} color="#ef4444" />}
+                </span>
               </div>
             </div>
 
@@ -11745,8 +11823,8 @@ function PrivacyPage({ token, user, projects, documents, revisions, citations, s
             <strong>Manuscript Cloud Persistence</strong>
             <p>When enabled, active document text and revision proposals are saved in your private MongoDB database. When disabled, the editor operates in stateless mode.</p>
             {policies?.serverPersistEnforced && (
-              <small style={{ color: '#b45309', fontWeight: 600, display: 'block', marginTop: '4px' }}>
-                ⚠ Server policy overrides local preference: PERSIST_DOCUMENT_TEXT is globally disabled on this deployment.
+              <small style={{ color: '#b45309', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
+                <AlertTriangle size={12} /> Server policy overrides local preference: PERSIST_DOCUMENT_TEXT is globally disabled on this deployment.
               </small>
             )}
           </div>
@@ -12973,7 +13051,7 @@ function LatexExportStudioPage({ token, activeDoc, documents, citationsList, set
                     onClick={() => customTemplateFileInputRef.current?.click()}
                     style={{ fontSize: '11px', padding: '6px 12px', display: 'flex', alignItems: 'center', gap: '6px' }}
                   >
-                    📄 {customTemplateFileName ? 'Replace Uploaded Template' : 'Upload Template (.docx)'}
+                    <FileText size={13} /> {customTemplateFileName ? 'Replace Uploaded Template' : 'Upload Template (.docx)'}
                   </button>
                   {customTemplateFileName && (
                     <button
@@ -13038,15 +13116,15 @@ function LatexExportStudioPage({ token, activeDoc, documents, citationsList, set
                 />
                 
                 {parsingFile && (
-                  <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--primary)' }}>
-                    ⏳ Parsing Word document and auto-detecting metadata...
+                  <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--primary)', display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                    <RefreshCw size={12} className="spin" /> Parsing Word document and auto-detecting metadata...
                   </div>
                 )}
 
                 {parsedFileInfo && !parsingFile && (
                   <div style={{ marginTop: '12px', textAlign: 'left', background: 'var(--surface2)', padding: '10px 12px', borderRadius: '6px', fontSize: '11px' }}>
-                    <div style={{ color: '#16a34a', fontWeight: 700, marginBottom: '4px' }}>
-                      ✓ Converted & Ready: {parsedFileInfo.filename}
+                    <div style={{ color: '#16a34a', fontWeight: 700, marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      <Check size={13} /> Converted & Ready: {parsedFileInfo.filename}
                     </div>
                     <div style={{ color: 'var(--muted)' }}>
                       Extracted: <strong>{parsedFileInfo.wordCount}</strong> words · <strong>{parsedFileInfo.charCount}</strong> characters
@@ -13225,8 +13303,8 @@ function LatexExportStudioPage({ token, activeDoc, documents, citationsList, set
 
               {/* Compatibility warning if pdfLaTeX is chosen for complex script */}
               {engine === 'pdflatex' && detectedPreview.some(s => s.name !== 'Latin') && (
-                <div style={{ padding: '8px 10px', borderRadius: '6px', background: '#fef3c7', border: '1px solid #fde68a', color: '#92400e', fontSize: '11px' }}>
-                  ⚠️ <strong>Compatibility Notice:</strong> pdfLaTeX does not support OpenType Indic, Arabic, or CJK scripts. XeLaTeX or LuaLaTeX is strongly recommended.
+                <div style={{ padding: '8px 10px', borderRadius: '6px', background: '#fef3c7', border: '1px solid #fde68a', color: '#92400e', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <AlertTriangle size={14} style={{ flexShrink: 0 }} /> <span><strong>Compatibility Notice:</strong> pdfLaTeX does not support OpenType Indic, Arabic, or CJK scripts. XeLaTeX or LuaLaTeX is strongly recommended.</span>
                 </div>
               )}
             </div>
@@ -13708,7 +13786,7 @@ function LatexExportStudioPage({ token, activeDoc, documents, citationsList, set
                           <div>
                             <strong style={{ color: 'var(--text)' }}>3. Compiler Setting:</strong>
                             <div>
-                              In Overleaf, click <strong>Menu</strong> (top left) → set <strong>Compiler</strong> to{' '}
+                              In Overleaf, click <strong>Menu</strong> (top left) <ArrowRight size={11} style={{ display: 'inline', verticalAlign: 'middle', margin: '0 2px' }} /> set <strong>Compiler</strong> to{' '}
                               <strong style={{ color: 'var(--text)' }}>
                                 {jobResult.languageReport?.selectedEngine === 'lualatex' ? 'LuaLaTeX' : 'XeLaTeX'}
                               </strong>.
@@ -13806,11 +13884,11 @@ function LatexExportStudioPage({ token, activeDoc, documents, citationsList, set
               <p style={{ maxWidth: '440px', margin: '0 auto 20px', fontSize: '13px', lineHeight: 1.5 }}>
                 Select a manuscript template, confirm author metadata, and click <strong>"Convert to APA 7 LaTeX"</strong> to generate a complete downloadable ZIP package with LaTeX sources and BibTeX references.
               </p>
-              <div style={{ display: 'inline-flex', gap: '16px', fontSize: '11px' }}>
-                <span>✓ apa7 stu & man support</span>
-                <span>✓ Booktabs formatting</span>
-                <span>✓ BibLaTeX & Biber</span>
-                <span>✓ Overleaf compatible</span>
+              <div style={{ display: 'inline-flex', gap: '16px', fontSize: '11px', flexWrap: 'wrap', justifyContent: 'center' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Check size={12} style={{ color: 'var(--rp-success)' }} /> apa7 stu & man support</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Check size={12} style={{ color: 'var(--rp-success)' }} /> Booktabs formatting</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Check size={12} style={{ color: 'var(--rp-success)' }} /> BibLaTeX & Biber</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Check size={12} style={{ color: 'var(--rp-success)' }} /> Overleaf compatible</span>
               </div>
             </div>
           )}
